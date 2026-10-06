@@ -51,15 +51,15 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 ---
 
 ### Roadmap Phase B: Database & Persistence Layer
-- **Task B1: Establish PostgreSQL Connection Pool & Base Repository Port Abstractions**
+- **Task B1: Establish PostgreSQL Connection Pool Infrastructure**
   - **Phase**: Phase B (Persistence)
   - **Prerequisites**: Task A2
-  - **Ownership**: `src/shared/`, database config
-  - **File Scope**: Database connection pool client, repository base port definitions complying with shared anti-dumping governance
-  - **Objective**: Configure secure PostgreSQL connection pooling and define generic repository port abstractions without violating module ownership boundaries.
+  - **Ownership**: `src/shared/database/`
+  - **File Scope**: `src/shared/database/db.ts` (PostgreSQL connection pool client)
+  - **Objective**: Configure secure PostgreSQL connection pooling adhering to shared governance rules, keeping domain repositories, migrations, and cross-cutting transaction orchestration out of shared.
   - **Traceability**: `docs/architecture.md`, ADR-002
-  - **Acceptance Criteria**: Connection pool establishes successfully; base repository port interfaces defined.
-  - **Required Tests**: Integration test connecting to PostgreSQL Testcontainers instance.
+  - **Acceptance Criteria**: Connection pool establishes successfully using validated environment configuration; no domain or repository abstractions placed in shared.
+  - **Required Tests**: Integration test connecting to PostgreSQL Testcontainers instance and verifying connectivity.
   - **Definition of Done**: Database connection client operational and verified against Testcontainers.
 
 - **Task B2: Implement Versioned SQL Schema Migrations & Migration Runner**

@@ -83,11 +83,13 @@ Re:NeWrld follows Clean Architecture principles organized around domain boundari
 ---
 
 ## 10. Current Implementation Status
-- **Phase 15 Implementation Status**: **Active / Sprint 1 Execution**
+- **Phase 15 Implementation Status**: **Active / Sprint 1 Execution (Task B1 Completed)**
 - **Completed Tasks**:
   - **Task A1 (Repository Foundation & Bootstrap)**: Modular monolith directory layout established, Fastify bootstrap (`src/server.ts`, `src/app.ts`) configured with `/health` endpoint, and Vitest unit test verified (`tests/unit/app.test.ts`).
   - **Task A2 (Centralized Zod Environment Validation)**: Installed `zod`, implemented strict startup validation schema (`src/config/env.ts`) covering `APP_ENV`, `LOG_LEVEL`, `PORT`, and `HOST`, updated server integration, and added comprehensive unit tests (`tests/unit/env.test.ts`).
-- **Next Task**: Task A3 (Configure Pino Structured Logger with Correlation ID Tracking).
+  - **Task A3 (Pino Structured Logger with Correlation ID Tracking)**: Configured Pino structured JSON logging (`src/shared/logger/pino.logger.ts`) with env-based log level, secret redaction, request correlation IDs (`x-request-id`), bounded validation, and unit tests (`tests/unit/logger.test.ts`).
+  - **Task B1 (PostgreSQL Connection Pool Infrastructure)**: Established `pg` connection pool (`src/shared/database/db.ts`), required PostgreSQL `DATABASE_URL` validation (no credentialed default), `PORT` integer constraint (1–65535), staging `APP_ENV` reconciliation, Node built-in `--env-file` scripts, engine node requirement `>=20.6.0`, and PostgreSQL Testcontainers integration test (`tests/integration/database.test.ts`).
+- **Next Task**: Task B2 (Implement Versioned SQL Schema Migrations & Migration Runner).
 
 ---
 

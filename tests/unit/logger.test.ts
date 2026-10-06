@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Writable } from 'stream';
 import { buildApp } from '../../src/app.js';
 import { logger, createLogger } from '../../src/shared/logger/pino.logger.js';
+import { env } from '../../src/config/env.js';
 
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -9,6 +10,7 @@ describe('Pino Structured Logger & Correlation ID Tracking', () => {
   it('should initialize Pino logger with correct level from environment', () => {
     expect(logger).toBeDefined();
     expect(logger.level).toBeTypeOf('string');
+    expect(logger.level).toBe(env.LOG_LEVEL);
   });
 
   it('should propagate valid incoming x-request-id correlation ID header unchanged', async () => {

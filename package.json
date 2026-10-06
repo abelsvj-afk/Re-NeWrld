@@ -5,24 +5,26 @@
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/server.js",
-    "dev": "tsx watch src/server.ts",
+    "start": "node --env-file .env dist/server.js",
+    "dev": "tsx --env-file .env watch src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "fastify": "^4.28.1",
+    "pg": "^8.23.1",
     "pino": "^9.14.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "^10.28.0",
     "@types/node": "^20.14.10",
-    "@types/pino": "^7.0.4",
+    "@types/pg": "^8.23.1",
     "tsx": "^4.16.2",
     "typescript": "^5.5.3",
     "vitest": "^2.0.3"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.6.0"
   }
 }
