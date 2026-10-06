@@ -5,6 +5,10 @@
 *.pem
 *.key
 
+# Dependencies & Build Artifacts
+node_modules/
+dist/
+
 # Logs & Diagnostics
 *.log
 logs/

@@ -1,0 +1,25 @@
+{
+  "name": "rene-wrld",
+  "version": "0.1.0",
+  "description": "Re:NeWrld Modular Monolith Backend & Core Engine",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3",
+    "vitest": "^2.0.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
