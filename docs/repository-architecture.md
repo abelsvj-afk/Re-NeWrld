@@ -93,16 +93,20 @@ ReNeWrld/
 - **Intelligence Domain Boundary (`src/modules/intelligence/domain/`)**: Contains **only** non-authoritative AI/media integration value objects, prompt templates, and gateway port contracts (`IntfAIGateway`, `IntfMediaGateway`). It has **zero** authoritative Re:NeWrld game-domain logic, Canon rules, Reader State logic, narrative authority, or state mutation rights.
 - **Gateway Ownership**: `IntfAIGateway` and `IntfMediaGateway` are authoritatively located in `src/modules/intelligence/domain/ports/`, while their concrete integration adapters reside in `src/modules/intelligence/infrastructure/` (utilizing provider-neutral external client wrappers).
 
-### D. `shared/` & `shared/ports/` Governance (Anti-Dumping Ground Rules)
+### D. `shared/`, `shared/database/` & `shared/ports/` Governance (Anti-Dumping Ground Rules)
 - **Allowed in `shared/`**: Pino logger, standardized error envelopes, retry/resiliency helpers, and cross-cutting Fastify middleware (Auth, Rate Limiting, Idempotency).
+- **Authorized in `shared/database/`**: Cross-cutting database connection infrastructure (`db.ts` utilizing `pg`). `shared/database/` is strictly restricted to connection pool management and query execution helpers; it **must not** become a domain repository dumping ground or house domain-specific persistence models.
 - **Allowed in `shared/ports/`**: Genuinely cross-cutting future approved abstractions only, such as `IntfJobQueue` (ADR-005).
 - **Prohibited in `shared/` / `shared/ports/`**: Domain-specific repositories, AI/media contracts, module business interfaces, application-specific abstractions, database entities, or direct SQL queries. `shared/` must never become a dumping ground.
 
-### E. Authentication Strategy (ADR-004)
-- **Authentication**: Aligned strictly with ADR-004, utilizing **Session-Based Authentication using Secure, HttpOnly, SameSite=Strict cookies backed by server-side session validation, coupled with Fastify RBAC middleware enforcing Creator vs. Reader permissions**.
+### E. Authentication Strategy & Session Distinctions (ADR-004)
+- **Authentication & Authorization**: Aligned strictly with ADR-004, utilizing **Session-Based Authentication using Secure, HttpOnly, SameSite=Strict cookies backed by server-side session validation, coupled with Fastify RBAC middleware enforcing Creator vs. Reader permissions**.
+- **Session Distinctions**:
+  - **Authentication Sessions**: User login sessions established upon successful authentication, verified via secure HTTP-only cookies and user role (Creator vs. Reader).
+  - **Reader / Story Sessions (`session_id`)**: Gameplay runtime sessions initialized for a reader interacting with a published world canon version.
 
 ### F. Transactional Invariants & Publishing Validation
-- **Session Mutation Atomicity**: Reader State mutation and Timeline append operations occur atomically within a single ACID transaction (`REPEATABLE READ`), ensuring data consistency.
+- **Session Mutation Atomicity**: Reader State mutation and Timeline append operations occur atomically within a single ACID transaction (`REPEATABLE READ`), ensuring data consistency. Note that implementing this transactional state/timeline invariant belongs to the session/runtime module transaction boundary (Task F2) and is **not** a B1 infrastructure responsibility.
 - **Publishing Validation**: Publishing validation graph traversal follows automated detailed design specifications without enforcing a universal database transaction isolation requirement across all authoring check operations unless established by workflow design.
 
 ---

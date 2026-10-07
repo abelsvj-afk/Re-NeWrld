@@ -18,7 +18,7 @@ For every reader or creator HTTP request entering the Fastify API gateway, the e
    - A unique request correlation ID (`x-request-id`) is generated or extracted for structured Pino logging and traceability.
 
 2. **Authentication & Authorization (`AuthMiddleware`)**:
-   - Request headers are inspected for secure HttpOnly session cookies or JWT bearer tokens.
+   - Request headers are inspected for secure HttpOnly session cookies (per ADR-004).
    - RBAC middleware verifies user identity, role (Creator vs. Reader vs. Operator), and resource ownership.
 
 3. **Input Validation & Sanitization (`Zod` Validation Layer)**:
@@ -84,4 +84,4 @@ For every reader or creator HTTP request entering the Fastify API gateway, the e
 | Auth & Failure Semantics | 401/403 for auth failures, 409 for concurrency conflicts, 503 with exponential backoff for transient DB errors. | **PASS** |
 | Observability & Security Boundaries | Structured Pino logging with correlation IDs, Zod runtime validation, and strict multi-tenant reader session isolation. | **PASS** |
 
-- **Audit Result**: **PASS** with zero remaining gaps.
+- **Audit Result**: **PASS** (subject to B2 Design Gate implementation tasks).

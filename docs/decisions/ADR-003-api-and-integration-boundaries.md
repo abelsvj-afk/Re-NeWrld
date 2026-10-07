@@ -17,15 +17,15 @@ Re:NeWrld requires a standardized API communication style, rigorous input valida
 - **Pluggable Abstraction**: Ability to swap or disable AI providers without affecting core gameplay.
 
 ## 3. Considered Options
-* **Option A: REST / JSON APIs with TypeBox / Zod Schema Validation**
-  - *Pros*: Simple, universally supported, highly cacheable for static catalog assets, strict runtime validation via Zod/TypeBox schemas.
+* **Option A: REST / JSON APIs with Zod Schema Validation**
+  - *Pros*: Simple, universally supported, highly cacheable for static catalog assets, strict runtime validation via Zod schemas.
   - *Cons*: Requires multiple endpoints for complex graph traversals.
 * **Option B: GraphQL**
   - *Pros*: Flexible client queries.
   - *Cons*: Overly complex for simple discrete choice progression trees; caching and rate-limiting are harder to secure.
 
 ## 4. Decision Outcome
-* **Chosen Option**: **REST / JSON APIs protected by strict runtime schema validation (Zod/TypeBox) for core engine and authoring operations, coupled with a pluggable adapter pattern for optional AI presentation gateways**.
+* **Chosen Option**: **REST / JSON APIs protected by strict runtime schema validation (Zod) for core engine and authoring operations, coupled with a pluggable adapter pattern for optional AI presentation gateways**.
 * **Justification**: REST APIs provide predictable request/response caching and rate limiting. Strict runtime schema validation at the API boundary ensures invalid authoring payloads or malformed state mutations are rejected before reaching database transactions. The AI integration boundary uses a provider abstraction interface (IntfAIGateway) ensuring AI models are strictly optional and isolated.
 
 ## 5. Consequences & Tradeoffs

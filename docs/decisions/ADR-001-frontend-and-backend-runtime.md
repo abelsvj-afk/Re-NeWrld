@@ -29,8 +29,8 @@ Re:NeWrld requires a robust, type-safe, performant technology stack for both the
   - *Cons*: Duplication of schema definitions across Go structs and TypeScript interfaces.
 
 ## 4. Decision Outcome
-* **Chosen Option**: **TypeScript / Node.js (Fastify) for Backend Runtime** and **React (Vite or Next.js) with TypeScript for Frontend**.
-* **Justification**: TypeScript sharing between backend state evaluation engines and frontend UI forms eliminates serialization mismatch risks. Fastify provides high-performance schema-based routing (JSON Schema / TypeBox) that aligns perfectly with deterministic state validation. React offers an extensive ecosystem for accessible, responsive reading and authoring interfaces (WCAG 2.1 AA compliance).
+* **Chosen Option**: **TypeScript / Node.js (Fastify) for Backend Runtime** and **React with TypeScript for Frontend**.
+* **Justification**: TypeScript sharing between backend state evaluation engines and frontend UI forms eliminates serialization mismatch risks. Fastify provides high-performance schema-based routing (Zod runtime validation) that aligns perfectly with deterministic state validation. React offers an extensive ecosystem for accessible, responsive reading and authoring interfaces (WCAG 2.1 AA compliance).
 
 ## 5. Consequences & Tradeoffs
 * **Positive Impact**: Shared types across state schemas; rapid frontend/backend development; excellent JSON Schema validation integration.

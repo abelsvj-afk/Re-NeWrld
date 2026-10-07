@@ -86,10 +86,11 @@ To support the long-term vision of a living multiverse and deep simulation acros
 ---
 
 ## 6. Persistence & Data Ownership Boundaries (Relational vs. JSONB)
-- **Canon Data**: Owned by the Creator; stored in authoritative relational tables (worlds, characters, chapters, scenes, choices, ending nodes) enforcing foreign key integrity and publishing validation constraints.
-- **Experience Data**: Owned by the Reader; stored in isolated runtime session records guaranteeing private journey persistence.
-- **Relational vs. JSONB Boundaries**: PostgreSQL relational tables own core structural entities and publishing constraints. JSONB columns are strictly restricted to flexible payload attributes (such as condition rule criteria and mutable experience variable dictionaries). **JSONB payloads cannot bypass authoritative domain contracts or Canon/Experience separation; all JSONB data must pass strict runtime validation (Zod) before persistence.**
+- **Canon Data**: Owned by the Creator; stored in authoritative relational tables (worlds, characters, chapters, scenes, choices) and immutable versioned JSONB snapshot records (`published_canon_snapshots`), enforcing foreign key integrity and publishing validation constraints. Reader sessions permanently bind to the specific snapshot version active at session initialization.
+- **Experience Data**: Owned by the Reader; stored in isolated runtime session records (`reader_sessions` and append-only `reader_timelines`) combining relational identity/concurrency fields with bounded Zod-validated JSONB state variable maps (`state_variables`) for inventory, relationships, and custom flags.
+- **Relational vs. JSONB Boundaries**: PostgreSQL 15+ relational tables own core structural entities and publishing constraints. JSONB columns are strictly restricted to flexible payload attributes (such as condition rule criteria, state mutation payloads, character role arrays, and mutable experience variable dictionaries). **JSONB payloads cannot bypass authoritative domain contracts or Canon/Experience separation; all JSONB data must pass strict runtime validation (Zod) before persistence.**
 - **Cross-Tenant Isolation**: Database queries and caching layers enforce world ID and user ID scoping on every operation.
+- **Migration & Schema Governance**: Managed via forward-only versioned SQL migrations executed via a minimal internal migration runner with ordered migration history (`schema_migrations`), application-level migration locking, and strict failure on errors.
 
 ---
 

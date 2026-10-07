@@ -192,7 +192,55 @@ PostgreSQL JSONB columns are restricted strictly to flexible authoring payload a
 
 ---
 
-## 14. Detailed Runtime & Integration Lifecycle Design (Phase 8 — Pass 3 of 3)
+## 14. B2 Design Contract & MVP Database Schema Specification
+In accordance with system governance and approved decisions, the definitive **B2 Design Contract** establishes the architectural foundation for the database persistence layer. This contract resolves all prior design gates and schema invariants without silent assumptions:
+
+### 14.1 Core Design Decisions & Invariants
+1. **Reader State Model**: Hybrid model combining relational identity/concurrency/session fields (`session_id`, `reader_id`, `world_id`, `snapshot_id`, `current_scene_id`, `version` concurrency counter, `status`, `created_at`, `updated_at`) with bounded, strict Zod-validated JSONB (`state_variables`) for flexible narrative state (inventory, trust/relationship scores, custom flags).
+2. **Published Canon Representation & Entry Point**: Immutable, versioned JSONB snapshots (`published_canon_snapshots`) storing the complete validated world graph at publication time. Reader sessions permanently bind to the specific snapshot version (`snapshot_id`) active at initialization, shielding historical reader timelines from subsequent author updates. Each snapshot explicitly defines an authoritative `entry_scene_id` in its root metadata; new reader sessions deterministically initialize `current_scene_id` to this entry point.
+3. **Draft Story Graph & Same-World Consistency**: Explicit relational entities for worlds, characters, chapters, scenes, and choices. Same-world consistency across foreign key hierarchies is enforced via composite keys (e.g., `chapters` and `scenes` reference `worlds(world_id)`, and `choices` reference valid scenes within the same world ID scope).
+4. **Role Multiplicity & Zod Contract for Character Roles**: Characters support multiple narrative roles concurrently. The `role_types` JSONB attribute conforms to a strict Zod contract allowing a closed union of standard roles (`protagonist`, `antagonist`, `companion`, `rival`, `villain`, `faction`, `custom`) plus an optional `custom_role_name` string when `custom` is selected, with uniqueness enforced per character.
+5. **Identifier Strategy & PostgreSQL Baseline**: Universal unique identifiers (`UUID v4`) are mandated for all primary keys across all entities. PostgreSQL 15+ is established as the MVP baseline.
+6. **Migration Strategy**: Forward-only versioned SQL migrations managed via an ordered migration history table (`schema_migrations`), application-level migration locking, strict failure on migration errors, and no required down-migration system, executed via a minimal internal migration runner.
+7. **Foreign Key Deletion Policies**: Explicit per-relationship policies, restrictive (`RESTRICT`) by default. `CASCADE` is strictly restricted to genuinely owned child records (e.g., choices belonging to a scene, scenes belonging to a chapter, timeline entries belonging to a session). `SET NULL` is used only where historical preservation requires nullable references.
+8. **Semantic Purpose of `worlds.status`**: `worlds.status` (`draft` vs. `published`) tracks the high-level lifecycle state of the world authoring workspace (whether it has been published at least once or is actively in authoring mode), whereas `published_canon_snapshots` stores historical immutable point-in-time version snapshots.
+9. **Timeline Scene Reference Integrity**: `reader_timelines` records `from_scene_id` and `to_scene_id`, which are strictly validated against the scenes present within the reader session's bound immutable snapshot (`snapshot_id`), ensuring timeline traversal never references scenes outside the bound Canon world version.
+10. **Timestamp Conventions & Immutable Table Rules**:
+    - Mutable entities (`users`, `worlds`, `characters`, `chapters`, `scenes`, `choices`, `reader_sessions`) have both `created_at` and `updated_at` (TIMESTAMPTZ defaulting to `CURRENT_TIMESTAMP`).
+    - Immutable, append-only, or system history tables (`auth_sessions`, `published_canon_snapshots`, `reader_timelines`, `schema_migrations`) possess only `created_at` (or `published_at`) and are **not** forced into inappropriate `updated_at` requirements.
+11. **Authentication RBAC Roles vs. Narrative Character Roles**:
+    - **Authentication RBAC Roles (`users.role`)**: Exactly one platform access role per user account (`creator` vs. `reader`).
+    - **Narrative Character Roles (`characters.role_types`)**: Domain authoring attributes assigned to characters within a world story, completely separate from platform authentication permissions.
+
+---
+
+### 14.2 Proposed MVP Table Inventory & Schema Contract
+
+| Table Name | Primary Key | Important Unique Constraints & Foreign Keys | Key Attributes & JSONB Payloads | Deletion Policy & Notes |
+|---|---|---|---|---|
+| `users` | `user_id` (UUID v4) | `email` (UNIQUE) | `password_hash`, `role` (`creator`, `reader`), `created_at`, `updated_at` | RESTRICT |
+| `auth_sessions` | `session_id` (UUID v4) | FK `user_id` -> `users(user_id)` | `expires_at`, `created_at` | CASCADE on user (Immutable history: no `updated_at`) |
+| `worlds` | `world_id` (UUID v4) | FK `creator_id` -> `users(user_id)` | `title`, `description`, `metadata` (JSONB), `status` (`draft`, `published`), `created_at`, `updated_at` | RESTRICT |
+| `characters` | `character_id` (UUID v4) | FK `world_id` -> `worlds(world_id)` | `name`, `role_types` (Zod-validated JSONB array), `description`, `attributes` (JSONB), `created_at`, `updated_at` | CASCADE on world |
+| `chapters` | `chapter_id` (UUID v4) | FK `world_id` -> `worlds(world_id)` | `title`, `sort_order`, `created_at`, `updated_at` | CASCADE on world |
+| `scenes` | `scene_id` (UUID v4) | FK `world_id` -> `worlds(world_id)`, FK `chapter_id` -> `chapters(chapter_id)` | `title`, `prose`, `metadata` (JSONB), `is_ending` (boolean), `created_at`, `updated_at` | CASCADE on chapter |
+| `choices` | `choice_id` (UUID v4) | FK `scene_id` -> `scenes(scene_id)` | `target_scene_id`, `text`, `conditions` (JSONB), `mutations` (JSONB), `sort_order`, `created_at`, `updated_at` | CASCADE on scene |
+| `published_canon_snapshots` | `snapshot_id` (UUID v4) | FK `world_id` -> `worlds(world_id)`, `(world_id, version_number)` UNIQUE | `version_number`, `canon_data` (JSONB immutable snapshot including `entry_scene_id`), `published_at` | RESTRICT (Append-only immutable record: no `updated_at`) |
+| `reader_sessions` | `session_id` (UUID v4) | FK `reader_id` -> `users(user_id)`, FK `world_id`, FK `snapshot_id` -> `published_canon_snapshots(snapshot_id)` | `current_scene_id`, `state_variables` (JSONB), `version` (integer concurrency counter), `status`, `created_at`, `updated_at` | RESTRICT |
+| `reader_timelines` | `timeline_id` (UUID v4) | FK `session_id` -> `reader_sessions(session_id)`, `(session_id, sequence_number)` UNIQUE | `sequence_number`, `from_scene_id`, `to_scene_id`, `choice_id`, `state_diff` (JSONB), `created_at` | CASCADE on session (Append-only history: no `updated_at`) |
+| `schema_migrations` | `version` (INTEGER / VARCHAR PK) | None | `name`, `applied_at` | Immutable migration log (no `updated_at`) |
+
+---
+
+### 14.3 Required Database Indexes for Known MVP Access Patterns
+1. **User & Auth Lookups**: B-Tree index on `auth_sessions(user_id)` and `auth_sessions(expires_at)`.
+2. **World Authoring & Publishing**: B-Tree indexes on `characters(world_id)`, `chapters(world_id)`, `scenes(world_id)`, `scenes(chapter_id)`, and `choices(scene_id)`. Unique B-Tree index on `published_canon_snapshots(world_id, version_number)`.
+3. **Reader Gameplay Sessions**: B-Tree indexes on `reader_sessions(reader_id)`, `reader_sessions(world_id)`, and `reader_sessions(snapshot_id)`. B-Tree index with unique sequence constraint on `reader_timelines(session_id, sequence_number)`.
+4. **JSONB / Condition Payload Optimization**: GIN indexes on `choices(conditions)`, `choices(mutations)`, `characters(attributes)`, `characters(role_types)`, and `reader_sessions(state_variables)` for high-performance condition evaluation and state lookups.
+
+---
+
+## 15. Detailed Runtime & Integration Lifecycle Design (Phase 8 — Pass 3 of 3)
 
 ### 14.1 API-to-Service-to-Domain-to-Persistence Flow
 - **Request Flow**: Incoming HTTP requests arrive at Fastify routes → Authenticated via Session/RBAC middleware → Validated against authoritative Zod schemas → Handled by Domain Service (e.g., ReaderSessionService) → Executes business rules via Deterministic Narrative Engine → Persists state via Repository boundary into PostgreSQL within an ACID transaction.
