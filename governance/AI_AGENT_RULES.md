@@ -123,3 +123,17 @@ Every proposed change must be formally classified before writing code:
 * **Observability**: Health check endpoints (`/healthz/live`, `/healthz/ready`), structured JSON logging with correlation IDs, metrics, and alerting.
 * **Database & Release Safety**: Forward/backward compatible schema migrations, zero-downtime deployments, and fast rollback procedures.
 * **Data Governance & Privacy**: Clear ownership for every data entity, data minimization, defined retention schedules, deletion workflows (right to be forgotten), standardized data export, and third-party data processor oversight.
+
+### 17. Red-Team-Derived Engineering Guardrails (Audit Advisory Standards)
+*Note: The following guardrails originate from the independent red-team audit (`REPOSITORY-RED-TEAM-AUDIT-001-CLAUDE.md`, Section AD) and serve as mandatory execution standards to prevent recurring implementation anti-patterns:*
+* **Rule 0 — Only Claim What You Ran**: Never write "tests pass", "verified", "complete", or "no debt" unless you executed the command and inspected its output. If unable to verify, mark **UNVERIFIED** and explain why. Before marking any task done, verify compilation, build, and test execution.
+* **Rule 1 — Test Integrity**: Every test file must import the module/code under test. Tests must fail if the underlying code is broken. Prohibit placeholder assertions (`expect(true).toBe(true)`) or bypassing failures. Skips must be explicit and reasoned.
+* **Rule 2 — Configuration Isolation**: Library and utility code must not read environment configuration (e.g., `validateEnv()`) at module import time, preventing frozen singletons. Pass configuration parameters explicitly.
+* **Rule 3 — No Test-Only Hooks in Production**: Prohibit mutable globals or test seams (`setPool()`, `setX()`) in production modules. Use proper dependency injection or factory patterns.
+* **Rule 4 — Chain Verification**: When modifying build scripts, environment variable handling, or Docker configurations, verify the entire lifecycle (local dev, test runner, container build, container start).
+* **Rule 5 — Strict File Scope**: Stay strictly within the approved file scope of the active task. Do not commit or introduce unrequested tool-generated files or dependencies.
+* **Rule 6 — Never Invent Requirements**: Cite specific documentation and line references for every behavior. Stop and ask immediately when specifications conflict or requirements are ambiguous.
+* **Rule 7 — Status Truthfulness**: Status documents (`PROJECT_STATE.md`) must reflect verified reality. Never claim zero technical debt or complete implementation without rigorous execution evidence.
+* **Rule 8 — Database & Migration Rigor**: Enforce immutability invariants; create indexes only for verified existing queries; hash sensitive session secrets; handle email case explicitly; do not modify applied migrations.
+* **Rule 9 — Library & Flag Precision**: Verify library APIs and CLI flags against exact version documentation before usage.
+* **Rule 10 — Security & Input Hygiene**: Prohibit hardcoded secrets or `.env` files in artifacts; use parameterized SQL queries exclusively; treat all creator- and reader-submitted text as untrusted input.
