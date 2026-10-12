@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
-    "start": "node --env-file .env dist/server.js",
+    "start": "node -e \"const fs = require('fs'); if (fs.existsSync('.env')) process.loadEnvFile('.env'); require('./dist/server.js');\"",
     "dev": "tsx --env-file .env watch src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
