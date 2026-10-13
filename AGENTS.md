@@ -40,6 +40,7 @@ Before proposing changes, executing tasks, or generating code within this worksp
 * **Test Efficacy**: Every test input must actually reach the code under test. A value that is created and never passed in tests nothing.
 * **No Silent Failures**: Never wrap infrastructure errors (database, network) in a catch that returns null or a default. Let them surface to the global error handler.
 * **Maintain Project State**: Ensure all active work, completed tasks, and technical debt are kept current in `PROJECT_STATE.md`.
+* **Keep the Changelog Current**: After completing any task, append an entry to `CHANGELOG.md` under `## [Unreleased]` with `scripts/changelog-entry.sh <Section> "<entry text>"` (sections: Added, Changed, Deprecated, Removed, Fixed, Security). One command, no hand-editing; the script places the bullet correctly and skips duplicates. Never finish a task with the changelog behind.
 
 ---
 

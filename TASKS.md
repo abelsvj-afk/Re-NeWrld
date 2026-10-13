@@ -162,12 +162,12 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Prerequisites**: Task D2
   - **Ownership**: `db/migrations/`, `src/modules/world/domain/`
   - **File Scope**: `db/migrations/004_publishing_markers.sql` (new), `src/modules/world/domain/entities/scene.entity.ts`, `src/modules/world/domain/entities/world.entity.ts`, repository mappers
-  - **Objective**: Close the two audit gaps. (1) `worlds.start_scene_id`: genuinely missing — add the column (nullable until set) with a **same-world composite FK** `(start_scene_id, world_id) REFERENCES scenes(scene_id, world_id) ON DELETE RESTRICT`, following the existing `fk_choice_target_scene` pattern and reusing `unique_scene_per_world`. A plain FK to `scenes(scene_id)` would permit pointing at another world's scene. (2) `scenes.is_ending`: the **column already exists** in migration 001 — do NOT re-add it (that would fail the migration). Instead expose it as `isEnding` on the scene entity and round-trip it in the repository mappers. Implements `detailed-design.md:63`'s `ending: true`; invents no new schema.
+  - **Objective**: Close the two audit gaps. (1) `worlds.start_scene_id`: genuinely missing — add the column (nullable until set) with a **same-world composite FK** `(start_scene_id, world_id) REFERENCES scenes(scene_id, world_id) ON DELETE RESTRICT`, following the existing `fk_choice_target_scene` pattern and reusing `unique_scene_per_world`. A plain FK to `scenes(scene_id)` would permit pointing at another world's scene. (2) `scenes.is_ending`: the **column already exists** in migration 001 — do NOT re-add it (that would fail the migration). The `Scene` entity was verified to already expose `isEnding`; no scene persistence layer exists yet, so no scene mapper changes were required. Implements `detailed-design.md:63`'s `ending: true`; invents no new schema.
   - **Traceability**: `docs/detailed-design.md`, ADR-013 §3 (corrected 2026-10-13)
   - **Acceptance Criteria**:
     - Migration 004 adds only `worlds.start_scene_id` plus the composite FK constraint; it does not touch `scenes.is_ending`.
     - Setting `start_scene_id` to a scene from a different world is rejected by the database.
-    - Scene entity exposes `isEnding`; repository round-trips preserve it and `startSceneId`.
+    - Scene entity exposes `isEnding` (verified; no scene persistence layer exists, so no scene mapper changes). World repository round-trips preserve `startSceneId`.
     - Publishing (E2a) rejects worlds with no start scene set (blocker per ADR-013 §5).
   - **Required Tests**: Unit tests for entity validation; repository mapper round-trip tests; integration test asserting cross-world `start_scene_id` is rejected (Testcontainers — UNVERIFIED until Docker/CI runs it).
   - **Definition of Done**: Markers present and enforced, migration runs cleanly on a fresh database, no duplicate-column failure.
@@ -233,12 +233,19 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Ownership**: `db/migrations/`, tests
   - **File Scope**: `db/migrations/005_canon_immutability.sql` (new), immutability tests
   - **Objective**: Defense in depth for ADR-013 D1: PostgreSQL trigger rejecting UPDATE and DELETE on `published_canon_snapshots`, plus tests proving both application paths and direct SQL cannot mutate canon. Trigger guards row mutation only — DDL/migrations unaffected; FK references use `ON DELETE RESTRICT` (already the case); retention/account-deletion design explicitly deferred.
+  - **Approved design (2026-10-13)**:
+    - `BEFORE UPDATE OR DELETE ... FOR EACH ROW` trigger `trg_canon_snapshots_immutable` on `published_canon_snapshots`, backed by function `reject_canon_snapshot_mutation()` (plpgsql). Rejects every column's UPDATE and every DELETE before the row changes; INSERTs untouched.
+    - Error contract: `RAISE EXCEPTION ... USING ERRCODE = 'P0001'` with a diagnostic message naming the operation (`TG_OP`) and `snapshot_id`. Tests assert the SQLSTATE and a stable message fragment, not the whole message.
+    - Migration `005_canon_immutability.sql` is up-only and filename-ordered (001–004 convention): `CREATE OR REPLACE FUNCTION` + `DROP TRIGGER IF EXISTS`/`CREATE TRIGGER`. Fresh DB: clean run. Existing DB: effective immediately, no backfill. Removing the trigger later would be a new migration.
+    - Boundary (documented in the migration header): TRUNCATE is not intercepted — row triggers do not fire on TRUNCATE and the trigger must not be claimed to prevent it. This guard protects against accidental application-level mutation; it is not a defense against privileged database users (who can alter triggers or run privileged operations). The application role genuinely lacks TRUNCATE privileges.
   - **Traceability**: ADR-013 §4 (D1)
   - **Acceptance Criteria**:
     - Migration 005 creates the trigger; fresh-database migration run is clean.
     - Direct UPDATE/DELETE against snapshots raises; the error surfaces, never swallowed.
     - Application repository exposes no update/delete method for snapshots (port-surface test).
-  - **Required Tests**: Integration test executing raw UPDATE/DELETE and asserting rejection (Testcontainers — UNVERIFIED until Docker/CI runs it); unit test asserting the port has no mutating methods beyond insert.
+    - **Refinement 1**: integration test recovers the transaction (rollback or savepoint) after each rejected statement — PostgreSQL marks a transaction failed after an uncaught statement error, and the test must not obscure the trigger behavior.
+    - **Refinement 2**: the prototype regression test is supplementary only — the PostgreSQL integration tests are the authoritative enforcement tests.
+  - **Required Tests**: Integration test executing raw INSERT (succeeds), UPDATE (whole-row and single-column) and DELETE (both rejected with P0001) — Testcontainers, UNVERIFIED until Docker/CI runs it; unit test asserting the port has no mutating methods beyond insert.
   - **Definition of Done**: Canon immutable at both layers; trigger documented in the migration header.
 
 ---
@@ -252,10 +259,11 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Ownership**: `src/modules/session/domain/` (exists as empty scaffolding)
   - **File Scope**: `src/modules/session/domain/entities/reader-session.entity.ts` (new), `src/modules/session/domain/ports/session.repository.port.ts` (new), value objects as needed
   - **Objective**: Pure domain model for a reader playthrough: session bound to a `snapshot_id`, `currentSceneId`, JSON state-variable map, optimistic-locking `version`, status lifecycle `active → completed | abandoned`. Status transitions validated in the entity (`completed` only via reaching a terminal ending; `abandoned` via explicit close).
-  - **Traceability**: `docs/runtime-design.md` §4, ADR-013 §4 (D2)
+  - **Traceability**: `docs/runtime-design.md` §4, ADR-013 §4 (D2), ADR-014 §4 (D3)
   - **Acceptance Criteria**:
     - Entity enforces invariants: session references a snapshot (never a mutable draft), state map is JSON-serializable, version increments only via `applyTransition`.
     - Illegal transitions (e.g., `completed → active`) throw typed domain errors.
+    - Legal transitions exactly: `active → completed`, `active → abandoned` (ADR-014 D3). Terminal states are absorbing — no outgoing transitions; terminal sessions remain readable via GET but cannot be transitioned or mutated. `completed` only via terminal ending; `abandoned` only via explicit reader close.
   - **Required Tests**: Unit tests — invariant violations, transition rules, version increment.
   - **Definition of Done**: Domain core fully tested and isolated from infrastructure.
 
@@ -263,13 +271,15 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Phase**: Phase F (Reader Runtime)
   - **Prerequisites**: Task F1a
   - **Ownership**: `src/modules/session/application/` (exists as empty scaffolding)
-  - **File Scope**: `start-reader-session.use-case.ts` (new), unit tests with fakes
+  - **File Scope**: `start-reader-session.use-case.ts` (new), `findLatestByWorldId` on `CanonRepositoryPort` + `PostgresCanonRepository` (new), unit tests with fakes
   - **Objective**: Start a new playthrough: resolve the world's latest published snapshot (error if none published), create the session pinned to that `snapshot_id` with `currentSceneId` = canon start scene and empty initial state. Multiple sessions per reader per world allowed (ADR-013 D2) — no uniqueness constraint beyond the primary key.
-  - **Traceability**: US-R01, `docs/runtime-design.md` §4
+  - **Traceability**: US-R01, `docs/runtime-design.md` §4, ADR-014 §2–§3 (D1, D2)
   - **Acceptance Criteria**:
     - World with no published snapshot → typed error (HTTP 409 with clear message at the route layer).
     - Session row references the latest snapshot version at creation time; later publishes do not move it.
     - Error cases: unknown world (404), unpublished world (409).
+    - `findLatestByWorldId(worldId)`: returns the highest-`version_number` snapshot (never derived from `worlds.status`); `null` when never published → `NoPublishedSnapshotError` → 409. `canon_data` validated against `CanonDataSchema` on read; corrupt latest snapshot → typed `CorruptCanonSnapshotError` → 500 — never silently fall back to an older version (ADR-014 D1).
+    - Owner is derived exclusively from the authenticated session (`request.user.userId`); the client never supplies it. Concurrent creates all succeed as independent sessions; no idempotency-key enforcement (deferred to Phase G).
   - **Required Tests**: Unit tests with fakes — happy path, no-snapshot error, snapshot pinning across a subsequent publish.
   - **Definition of Done**: Session initialization logic verified independent of HTTP.
 
@@ -277,9 +287,15 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Phase**: Phase F (Reader Runtime)
   - **Prerequisites**: Task C3, Task F1b
   - **Ownership**: `src/modules/session/http/` (new), `src/app.ts`
-  - **File Scope**: `src/modules/session/http/session.routes.ts` (new), route tests
-  - **Objective**: `POST /worlds/:id/sessions` (create playthrough; any authenticated reader), `GET /sessions/:id` (owner-only; 404-not-403 for other readers' sessions, mirroring world route conventions). Session cookie auth via existing middleware; `requireReader` (kept deliberately for this phase) gates creation.
-  - **Traceability**: US-R01, US-R05, ADR-003 (Zod validation)
+  - **File Scope**: `src/modules/session/http/session.routes.ts` (new), `src/modules/session/application/get-reader-session.use-case.ts` (new), `src/app.ts` (register + `sessionRepository` dep), route tests
+  - **Objective**: `POST /worlds/:id/sessions` (create playthrough; any authenticated reader), `GET /sessions/:id` (owner-only; 404-not-403 for other readers' sessions, mirroring world route conventions). Session cookie auth via existing middleware; `requireReader` (kept deliberately for this phase) gates creation. Routes are unprefixed, following the implemented E2b convention (`docs/runtime-design.md`'s `/api/v1` prefix is aspirational — ADR-014 §7).
+  - **Traceability**: US-R01, US-R05, ADR-003 (Zod validation), ADR-014 §3 (D2), ADR-014 §9 (Batch 2 design)
+  - **Acceptance Criteria**:
+    - 201 with `{ sessionId, snapshotId, versionNumber, currentSceneId, status }` on create; 409 when the world has no published snapshot.
+    - Cross-reader access returns 404 (not 403 — no existence oracle), unauthenticated returns 401.
+    - Zod-validated bodies; invalid payloads → 400.
+    - Ownership check lives in `GetReaderSessionUseCase` (404 on missing-or-not-owned) — routes stay thin, no duplicated authorization logic. `readerId` derived exclusively from `request.user.userId`.
+    - F1b touch-up (additive): `StartReaderSessionResult` gains `snapshot: CanonSnapshot` so the route can return `versionNumber` without a second query., ADR-014 §3 (D2)
   - **Acceptance Criteria**:
     - 201 with `{ sessionId, snapshotId, versionNumber, currentSceneId, status }` on create; 409 when the world has no published snapshot.
     - Cross-reader access returns 404 (not 403 — no existence oracle), unauthenticated returns 401.
@@ -293,12 +309,16 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Ownership**: `src/modules/session/infrastructure/` (exists as empty scaffolding)
   - **File Scope**: `postgres-session.repository.ts` (new), transaction handling, integration tests
   - **Objective**: The persistence mechanism for choice application (resolution logic itself is Phase G): within a single transaction — `SELECT ... FOR UPDATE` the session row, check optimistic `version` (mismatch → 409, per runtime-design), apply the state diff to `state_variables`, INSERT the timeline row (next `sequence_number`), UPDATE the session (`version + 1`, `updated_at`). Any failure → ROLLBACK. Timeline rows are append-only (no update/delete path).
-  - **Traceability**: `docs/runtime-design.md` §3, ADR-002
+  - **Traceability**: `docs/runtime-design.md` §3, ADR-002, ADR-014 §5 (D4), ADR-014 §9 (Batch 2 design)
   - **Acceptance Criteria**:
     - State mutation and timeline append commit atomically; induced failure mid-transaction rolls back both.
     - Concurrent conflicting writes → one wins, the other gets 409 (version mismatch).
     - Timeline `sequence_number` is gapless per session (unique constraint enforced).
     - No code path issues UPDATE/DELETE against `reader_timelines` or `published_canon_snapshots`.
+    - Optimistic-locking contract (ADR-014 D4): every state-changing operation takes `expectedVersion`; inside one transaction, `SELECT ... FOR UPDATE` the session row, compare versions — mismatch → typed `SessionVersionConflictError` → HTTP 409 (response includes the current version for client re-sync) and ROLLBACK with zero partial writes; match → apply state diff, INSERT timeline row, `version + 1`, COMMIT.
+    - `PostgresSessionRepository.applyTransition({ sessionId, expectedVersion, toSceneId, stateDiff, choiceId }, tx?)`: rehydrates the `ReaderSession` entity and delegates the transition to `entity.applyTransition` — the repository never bypasses the entity or duplicates transition logic; it contributes SQL + the single transaction only (joins the passed `tx` or manages its own via `withTransaction`). `SessionVersionConflictError` carries `report = { currentVersion }`, surfaced by the existing 4xx `report` envelope (E2b precedent; no handler changes).
+    - Transaction ownership (ADR-014 §10.3): `tx?: pkg.PoolClient` matches the existing port convention. Caller-supplied `tx` → repository issues statements only, never BEGIN/COMMIT/ROLLBACK. No `tx` → repository wraps in the existing `withTransaction` helper. No parallel transaction abstraction.
+    - Sequence semantics (ADR-014 §10.4): "gapless" = no missing `sequence_number` among *committed* entries per session. Allocated as `MAX(sequence_number)+1` inside the transaction while holding the session row's `FOR UPDATE` lock (NOT a PG sequence generator — those burn values on rollback). `UNIQUE(session_id, sequence_number)` is the backstop; any slipped race fails the insert and rolls back everything.
   - **Required Tests**: Integration tests with Testcontainers simulating commit, rollback on failure, and concurrent version conflicts — **UNVERIFIED until Docker/CI runs them** (no Docker in this environment); unit tests for the diff-application logic with fakes.
   - **Definition of Done**: Atomicity guarantees verified; Docker-dependent tests explicitly marked UNVERIFIED, never claimed passing.
   - **System Completeness Gate (slice)**: Security — session ownership enforced at repository level (reader_id predicate on every query); Reliability — transaction boundaries + rollback; Data Governance — timeline append-only, state minimization (only gameplay variables, no PII); AI Safety — N/A (deterministic persistence, no model involvement).

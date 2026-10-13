@@ -6,9 +6,17 @@ import { env } from './config/env.js';
 import { logger } from './shared/logger/pino.logger.js';
 import { AuthRepositoryPort } from './modules/auth/domain/ports/auth.repository.port.js';
 import { WorldRepositoryPort } from './modules/world/domain/ports/world.repository.port.js';
+import { SceneRepositoryPort } from './modules/world/domain/ports/scene.repository.port.js';
+import { ChoiceRepositoryPort } from './modules/world/domain/ports/choice.repository.port.js';
+import { CanonRepositoryPort } from './modules/world/domain/ports/canon.repository.port.js';
 import { SessionServicePort } from './modules/auth/domain/ports/session.port.js';
 import { PostgresAuthRepository } from './modules/auth/infrastructure/persistence/postgres-auth.repository.js';
 import { PostgresWorldRepository } from './modules/world/infrastructure/persistence/postgres-world.repository.js';
+import { PostgresSceneRepository } from './modules/world/infrastructure/persistence/postgres-scene.repository.js';
+import { PostgresChoiceRepository } from './modules/world/infrastructure/persistence/postgres-choice.repository.js';
+import { PostgresCanonRepository } from './modules/world/infrastructure/persistence/postgres-canon.repository.js';
+import { SessionRepositoryPort } from './modules/session/domain/ports/session.repository.port.js';
+import { PostgresSessionRepository } from './modules/session/infrastructure/persistence/postgres-session.repository.js';
 import { PostgresPasswordResetRepository } from './modules/auth/infrastructure/persistence/postgres-password-reset.repository.js';
 import { ResendEmailAdapter } from './modules/auth/infrastructure/email/resend-email.adapter.js';
 import { ConsoleEmailAdapter } from './modules/auth/infrastructure/email/console-email.adapter.js';
@@ -18,6 +26,7 @@ import { SessionService } from './modules/auth/infrastructure/services/session.s
 import { PasswordService } from './modules/auth/infrastructure/services/password.service.js';
 import { authRoutes } from './modules/auth/http/auth.routes.js';
 import { worldRoutes } from './modules/world/http/world.routes.js';
+import { sessionRoutes } from './modules/session/http/session.routes.js';
 import rateLimit from '@fastify/rate-limit';
 import cors from '@fastify/cors';
 
@@ -27,6 +36,10 @@ const REQUEST_ID_REGEX = /^[a-zA-Z0-9_\-\.:]{1,128}$/;
 export interface AppDeps {
   authRepository?: AuthRepositoryPort;
   worldRepository?: WorldRepositoryPort;
+  sceneRepository?: SceneRepositoryPort;
+  choiceRepository?: ChoiceRepositoryPort;
+  canonRepository?: CanonRepositoryPort;
+  sessionRepository?: SessionRepositoryPort;
   sessionService?: SessionServicePort;
   passwordService?: PasswordService;
   passwordResetRepository?: PasswordResetRepositoryPort;
@@ -78,10 +91,20 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
     }
 
     const message = statusCode >= 500 ? 'Internal Server Error' : error.message;
-    reply.status(statusCode).send({
+    const body: Record<string, unknown> = {
       error: message,
       statusCode,
-    });
+    };
+    // Typed 4xx errors may carry a structured report (e.g. PublishingValidationError's
+    // { blockers, warnings }); surface it so clients can act on it. Never attached
+    // to 5xx responses — internal details stay server-side.
+    if (statusCode >= 400 && statusCode < 500) {
+      const report = (error as { report?: unknown }).report;
+      if (report !== undefined) {
+        body.report = report;
+      }
+    }
+    reply.status(statusCode).send(body);
   });
 
   // Rate limiting: brute-force protection (threat model: "Brute Force & Credential
@@ -105,6 +128,10 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   // Resolve dependencies (real infrastructure by default; fakes injectable for tests)
   const authRepository = deps?.authRepository ?? new PostgresAuthRepository();
   const worldRepository = deps?.worldRepository ?? new PostgresWorldRepository();
+  const sceneRepository = deps?.sceneRepository ?? new PostgresSceneRepository();
+  const choiceRepository = deps?.choiceRepository ?? new PostgresChoiceRepository();
+  const canonRepository = deps?.canonRepository ?? new PostgresCanonRepository();
+  const sessionRepository = deps?.sessionRepository ?? new PostgresSessionRepository();
   const sessionService = deps?.sessionService ?? new SessionService();
   const passwordService = deps?.passwordService ?? new PasswordService();
   const passwordResetRepository =
@@ -127,7 +154,19 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       passwordResetRepository,
       emailService,
     });
-    await worldRoutes(instance, { worldRepository, sessionVerifier: sessionService.getVerifier() });
+    await worldRoutes(instance, {
+      worldRepository,
+      sceneRepository,
+      choiceRepository,
+      canonRepository,
+      sessionVerifier: sessionService.getVerifier(),
+    });
+    await sessionRoutes(instance, {
+      sessionRepository,
+      worldRepository,
+      canonRepository,
+      sessionVerifier: sessionService.getVerifier(),
+    });
   });
 
   // Health check endpoint

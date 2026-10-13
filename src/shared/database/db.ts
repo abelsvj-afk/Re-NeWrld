@@ -47,6 +47,37 @@ export async function getClient(): Promise<pkg.PoolClient> {
   return client;
 }
 
+/**
+ * Minimal transaction primitive (Task E2a).
+ *
+ * Runs `fn` inside a single database transaction on one pooled client:
+ * BEGIN → fn(client) → COMMIT. On any failure, rolls back and rethrows the
+ * ORIGINAL error — a rollback failure is logged but never masks it.
+ * The client is always released back to the pool.
+ */
+export async function withTransaction<T>(
+  fn: (client: pkg.PoolClient) => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    try {
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackErr) {
+        logger.error({ err: rollbackErr }, 'Transaction rollback failed; rethrowing original error');
+      }
+      throw err;
+    }
+  } finally {
+    client.release();
+  }
+}
+
 export async function closePool(): Promise<void> {
   await pool.end();
   logger.info('PostgreSQL connection pool closed');
