@@ -43,7 +43,7 @@
 - **Next Tasks** (per 2026-10-13 code review, in order):
   1. ~~Push Phase E to GitHub~~ — done (`7d105da`, `37ee6f5`).
   2. ~~H1 destructive migration 002~~ — fixed 2026-10-13 (`55d066c`): in-place `encode(digest(...), 'hex')` conversion, sessions preserved. NOTE: if a dev DB already ran the old 002, reset it — the rewritten file won't re-run (version recorded).
-  3. Remaining findings: M3 fly.toml memory contradiction, M4 Dockerfile EXPOSE mismatch, M5 real dev password in `.env.example`, M7 email-conflict → 409 mapping, M13 no CI pipeline.
+  3. Remaining findings: ~~M3 fly.toml memory contradiction~~ — fixed 2026-10-13 (`67cf0e1`, 256mb per user). ~~M4 Dockerfile EXPOSE mismatch~~ — fixed 2026-10-13 (`c2bacbe`, EXPOSE 8080). M13 CI pipeline — implemented 2026-10-13 (commit `a7d0783`: `.github/workflows/ci.yml`, `scripts/hooks/pre-push`, `scripts/setup-hooks.sh`, `test:unit`/`test:integration` scripts; hook verified: tsc clean, 90/90 unit tests) but NOT pushed — GitHub API 403 "Resource not accessible by integration" (account billing hold, same one blocking Actions). Tracked item `push-re-newrld-ci-commit-to-github`; local copies in `~/workspace/rene-wrld-push-retry/local/`. Push when invoice cleared, then verify on GitHub. Still open: M5 real dev password in `.env.example`, M7 email-conflict → 409 mapping.
   3. Decide creator-promotion path (registration currently hardcodes `reader`; no admin endpoint yet).
 - **Known Limitations / Deferred Scope**:
   - Integration test container execution requires a running Docker daemon (mitigated via `SKIP_DB_TESTS=true` in Termux).
@@ -55,5 +55,5 @@
   - D1 schemas are placeholders and D1 connectivity AC unproven.
   - `publish()` / `revertToDraft()` methods pending business workflow integration.
   - Start script uses conditional `node -e` dotenv hack (old `--env-file .env` crashed without `.env` — verified).
-  - No CI pipeline configured.
-  - Phase E work is committed locally but NOT pushed to GitHub.
+  - CI workflow committed locally (`a7d0783`) but not on GitHub yet — push blocked by billing hold; Actions workflow will activate once Actions is re-enabled.
+  - Pre-push hook requires `DATABASE_URL` to be a syntactically valid postgres URL at import time (env.ts validation); the hook exports a dummy value if unset — unit tests never open a connection.

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Re:NeWrld pre-push hook — local CI safety net.
+# Runs the type-check and unit tests before every push; the push is blocked if
+# either fails. (GitHub Actions runs the full suite once billing is re-enabled.)
+# Install: ./scripts/setup-hooks.sh
+set -e
+
+# Unit tests import env.ts, which requires a syntactically valid DATABASE_URL
+# at import time (no connection is made). Provide a dummy one if unset.
+if [ -z "$DATABASE_URL" ]; then
+  export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/renewrld_test"
+fi
+
+echo "[pre-push] type-check..."
+npx tsc --noEmit
+
+echo "[pre-push] unit tests..."
+npm run -s test:unit
+
+echo "[pre-push] all checks passed."

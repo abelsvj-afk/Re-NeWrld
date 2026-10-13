@@ -9,6 +9,8 @@
     "dev": "tsx --env-file .env watch src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
     "migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
