@@ -46,7 +46,7 @@ describeFn('Canon snapshot immutability (migration 005)', () => {
       const creatorId = crypto.randomUUID();
       await pool.query(
         `INSERT INTO users (user_id, email, password_hash, role) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-        [creatorId, 'canon@immutability.test', 'hash', 'creator']
+        [creatorId, `canon-${creatorId}@immutability.test`, 'hash', 'creator']
       );
       await pool.query(
         `INSERT INTO worlds (world_id, creator_id, title, description, metadata, status)

@@ -55,12 +55,12 @@ describeFn('Session atomic transitions (F2a)', () => {
 
     await pool.query(
       `INSERT INTO users (user_id, email, password_hash, role) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-      [readerId.getValue(), 'f2a@reader.test', 'hash', 'reader']
+      [readerId.getValue(), `f2a-${readerId.getValue()}@reader.test`, 'hash', 'reader']
     );
     const creatorId = crypto.randomUUID();
     await pool.query(
       `INSERT INTO users (user_id, email, password_hash, role) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-      [creatorId, 'f2a-creator@test', 'hash', 'creator']
+      [creatorId, `f2a-creator-${creatorId}@test`, 'hash', 'creator']
     );
     await pool.query(
       `INSERT INTO worlds (world_id, creator_id, title, description, metadata, status)

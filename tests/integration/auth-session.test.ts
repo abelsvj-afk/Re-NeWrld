@@ -55,8 +55,8 @@ describeFn('Authentication & Session Management Integration (C2 Secure Hashing &
   });
 
   it('should store only SHA-256 hash in DB matching sha256(raw), never raw token, and validate/revoke successfully without exposing raw token in SessionInfo', async () => {
-    const userId = new UserId('22222222-2222-4222-8222-222222222222');
-    const email = new Email('creator.test@rene.wrld');
+    const userId = new UserId(crypto.randomUUID());
+    const email = new Email(`creator-${userId.getValue()}@rene.wrld`);
     const role = new UserRole('creator');
     const user = User.create({
       userId,
