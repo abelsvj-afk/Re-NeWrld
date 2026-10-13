@@ -191,7 +191,7 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Prerequisites**: Task E1a
   - **Ownership**: `src/modules/world/domain/services/`
   - **File Scope**: `src/modules/world/domain/services/graph-validator.ts`, unit tests
-  - **Objective**: Validate structural references: every choice's target scene exists (dangling target = blocker). Condition/mutation *semantic* reference validation is explicitly out of scope — conditions are opaque JSON until the G1 grammar lands (documented limitation, ADR-013 §5).
+  - **Objective**: Validate structural references: every choice's target scene exists (dangling target = blocker). Condition/mutation *semantic* reference validation is explicitly out of scope — conditions are opaque JSON until the G1 grammar lands (Decision: Option A, 2026-10-13 — documented limitation, ADR-013 §5: a condition referencing a nonexistent item/flag/character can pass publishing and fail later; G1 must define semantic validation and its failure behavior, and the runtime must handle invalid references safely).
   - **Traceability**: FR-05, ADR-013 §5
   - **Acceptance Criteria**:
     - Every choice target resolves to an existing scene; dangling targets are blockers identifying the choice and scene.
@@ -275,7 +275,7 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 
 - **Task F1c: Implement Session HTTP Routes (reader-owned)**
   - **Phase**: Phase F (Reader Runtime)
-  - **Prerequisites**: Task F1b
+  - **Prerequisites**: Task C3, Task F1b
   - **Ownership**: `src/modules/session/http/` (new), `src/app.ts`
   - **File Scope**: `src/modules/session/http/session.routes.ts` (new), route tests
   - **Objective**: `POST /worlds/:id/sessions` (create playthrough; any authenticated reader), `GET /sessions/:id` (owner-only; 404-not-403 for other readers' sessions, mirroring world route conventions). Session cookie auth via existing middleware; `requireReader` (kept deliberately for this phase) gates creation.
@@ -316,7 +316,7 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Acceptance Criteria**: Evaluates complex boolean and numeric conditions deterministically with zero side effects.
   - **Required Tests**: 100% Vitest unit test coverage for condition evaluation edge cases.
   - **Definition of Done**: Condition evaluator service fully tested and isolated.
-
+  - **Acceptance Criteria (added 2026-10-13, Option A)**: G1 defines condition/mutation semantic reference validation and its failure behavior (what happens at publish time and at runtime when a reference is invalid); the runtime handles invalid references safely rather than silently producing incorrect outcomes.
 - **Task G2: Implement State Transition & Narrative Choice Resolution Use Case**
   - **Phase**: Phase G (Deterministic Engine)
   - **Prerequisites**: Task F2, Task G1

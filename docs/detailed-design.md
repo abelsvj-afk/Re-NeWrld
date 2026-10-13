@@ -57,12 +57,18 @@ When a reader selects a choice (`choice_id`):
 ---
 
 ## 7. Publishing Validation Contract
-Before a draft world status updates to `Published`, the publishing validator executes automated checks:
-- **Target Reachability**: Verifies that every `target_scene_id` referenced by a choice actually exists within the world.
-- **Orphan Detection**: Identifies scenes that cannot be reached from any chapter entry point.
-- **Ending Reachability**: Verifies that at least one valid terminal ending node (`ending: true`) is reachable from graph traversal.
-- **Reference Integrity**: Validates that condition rules and mutation effects reference valid items, flags, and character IDs.
-- **Rejection**: If any validation check fails, publication is rejected with a detailed validation error report.
+Before a draft world status updates to `Published`, the publishing validator executes automated checks by traversing the scene graph from the world's designated start scene (`worlds.start_scene_id`).
+
+**Blocking errors** — publication is rejected with a detailed validation error report if any occur:
+- **Target Reachability**: Every `target_scene_id` referenced by a choice must exist within the world. Dangling references are blockers.
+- **Start Scene Designation**: The world must designate a start scene. A missing start scene is a blocker.
+- **Ending Reachability**: At least one valid terminal ending node (`ending: true`) must be reachable from the start scene. No reachable ending is a blocker.
+
+**Warnings** — reported in the validation report; they do not block publication:
+- **Orphan Detection**: Scenes that cannot be reached from the start scene are reported as warnings. An unreachable but otherwise well-formed scene does not make the publication structurally invalid.
+
+**Deferred until the G-phase condition contract (G1)**:
+- **Condition/Mutation Reference Integrity**: Semantic validation of condition rules and mutation effects (e.g. references to items, flags, character IDs) is deferred. Conditions are opaque JSON until G1 defines the formal contract (see §5), so publishing-time reference validation cannot parse them. Known limitation: a condition referencing a nonexistent item, flag, or character can pass publication and fail later. G1 must define semantic validation and its failure behavior before implementation, and the runtime must handle invalid references safely rather than silently producing incorrect outcomes.
 
 ---
 
