@@ -3,15 +3,15 @@
 - **Project Name**: Re:NeWrld
 - **Workflow Version**: v1.1.0
 - **Governing Master**: workflows/MASTER_AI_ENGINEERING_WORKFLOW.md (v1.1.0)
-- **Current Phase**: Phase 15 — Task Implementation (Phase D Task D2 Remediated & Unit Verified)
-- **Last Updated**: 2026-10-12
+- **Current Phase**: Phase E gap-closure planning (E0–E2c specified; implementation NOT started — awaiting product-owner approval of planning docs)
+- **Last Updated**: 2026-10-13
 
 ---
 
 ## Current Status
 
-- **Current Phase**: Phase 15 — Task Implementation (Phase D Task D2 Remediated)
-- **Current Sprint**: Sprint 1 (Implementation Execution)
+- **Current Phase**: Phase E gap-closure planning (2026-10-13)
+- **Planning pass 2026-10-13 (documentation only, no implementation)**: Prerequisite audit found Phase E application code was never written (E1/E2 missing; world module is draft CRUD only) — F1's prerequisite E2 unverified, so Phase F cannot begin per AGENTS.md rules. Schema for publishing already exists (migration 001). Audit also found two schema gaps: no terminal-ending flag (despite `detailed-design.md:63` specifying `ending: true`) and no start-scene designation anywhere. Resolved in ADR-013 (Proposed): migration 004 adds `scenes.is_ending` + `worlds.start_scene_id`. Product-owner decisions recorded: (D1) canon immutability via trigger + app safeguards + tests, (D2) multiple sessions per reader per world, (D3) idempotency contract specified now / enforced in Phase G. Validation semantics: dangling refs, missing start, no reachable ending = blockers; unreachable well-formed scenes = warnings; condition-reference semantics deferred to G1 (opaque JSON until then). TASKS.md now specifies E0, E1a, E1b, E2a, E2b, E2c, F1a, F1b, F1c, F2a with acceptance criteria, error cases, and test requirements; ROADMAP.md Phase E/F updated. Docker-dependent integration tests marked UNVERIFIED until they run in a suitable environment. **No implementation until the product owner approves these documents.**
 - **Completed**:
   - Initialized project with Project Growth v1.1.0 governance foundation.
   - Completed Phase 0 through Phase 14 (Specifications, Architecture, ADRs, Roadmap Design).

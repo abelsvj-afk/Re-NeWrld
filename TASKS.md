@@ -155,52 +155,152 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 ---
 
 ### Roadmap Phase E: Story, Scene & Publishing Validation
-- **Task E1: Implement Publishing Graph Traversal & Reachability Validation**
+> **Status note (2026-10-13 audit)**: Phase E was marked complete, but E1/E2 were never implemented — the world module is draft CRUD only. The schema for publishing already exists (migration 001: `published_canon_snapshots`, `reader_sessions`, `reader_timelines`); only application code is missing, plus two schema gaps (no terminal-ending flag despite `detailed-design.md:63` specifying `ending: true`; no start-scene designation anywhere). Tasks below close the gap in dependency order. Design: ADR-013 (Proposed).
+
+- **Task E0: Complete Draft Schema for Publishing (start scene + terminal endings)**
   - **Phase**: Phase E (Publishing)
   - **Prerequisites**: Task D2
-  - **Ownership**: `src/modules/world/application/`
-  - **File Scope**: Publishing use cases, graph validator service
-  - **Objective**: Implement graph reachability algorithms, orphaned node detection, and structural completeness checks before publication.
-  - **Traceability**: `docs/automation-design.md`, `docs/system-completeness.md`
-  - **Acceptance Criteria**: Invalid graphs fail publishing validation with descriptive error logs; valid graphs pass.
-  - **Required Tests**: Unit tests with diverse valid and invalid world graph topologies.
-  - **Definition of Done**: Publishing graph validation service fully tested and integrated.
+  - **Ownership**: `db/migrations/`, `src/modules/world/domain/`
+  - **File Scope**: `db/migrations/004_publishing_markers.sql` (new), `src/modules/world/domain/entities/scene.entity.ts`, `src/modules/world/domain/entities/world.entity.ts`, repository mappers
+  - **Objective**: Add the two markers the design docs assume but code lacks: `is_ending` on scenes (implements `detailed-design.md:63`'s `ending: true`) and `start_scene_id` on worlds (one entry point per world, FK-guarded). This implements defined design; it invents no new schema.
+  - **Traceability**: `docs/detailed-design.md`, ADR-013 §3
+  - **Acceptance Criteria**:
+    - Migration 004 adds `scenes.is_ending BOOLEAN NOT NULL DEFAULT FALSE` and `worlds.start_scene_id UUID REFERENCES scenes(scene_id)` (nullable until set).
+    - Entities expose `isEnding` / `startSceneId` with validation; repository round-trips preserve them.
+    - Publishing (E2a) rejects worlds with no start scene set (blocker per ADR-013 §5).
+  - **Required Tests**: Unit tests for entity validation; repository mapper round-trip tests.
+  - **Definition of Done**: Schema markers present, entities enforce them, migration runs cleanly on a fresh database.
 
-- **Task E2: Implement Immutable Published Canon Snapshot Generation**
+- **Task E1a: Implement Graph Reachability Validator (pure domain service)**
   - **Phase**: Phase E (Publishing)
-  - **Prerequisites**: Task E1
-  - **Ownership**: `src/modules/world/infrastructure/`
-  - **File Scope**: Published canon repository, versioning service
-  - **Objective**: Store validated draft worlds as immutable, versioned Published Canon snapshots (`published_canon_snapshots`).
-  - **Traceability**: `docs/detailed-design.md`, `docs/architecture.md`
-  - **Acceptance Criteria**: Publishing creates a distinct, read-only canon version snapshot.
-  - **Required Tests**: Integration tests verifying immutability and version retrieval.
-  - **Definition of Done**: Published Canon snapshots securely stored and immutable.
+  - **Prerequisites**: Task E0
+  - **Ownership**: `src/modules/world/domain/services/` (new)
+  - **File Scope**: `src/modules/world/domain/services/graph-validator.ts` (new), unit tests
+  - **Objective**: Pure-function graph traversal from the world's designated start scene: compute reachable scenes, detect unreachable scenes (warnings, not blockers), verify at least one `is_ending` scene is reachable (blocker if none).
+  - **Traceability**: FR-05, ADR-013 §5
+  - **Acceptance Criteria**:
+    - Returns `{ reachable, unreachable, reachableEndings, errors }`; blockers: no start scene, no scenes at all, zero reachable endings.
+    - Unreachable well-formed scenes appear in `unreachable`, never in `errors`.
+    - Pure: no DB, no I/O, deterministic; handles cycles without infinite loops.
+  - **Required Tests**: Unit tests — linear chain, branching, cycle, disconnected subgraph (warning), no endings (blocker), empty world (blocker), diamond merge.
+  - **Definition of Done**: All topologies pass; full branch coverage of the traversal.
+
+- **Task E1b: Implement Reference Validator (choice targets)**
+  - **Phase**: Phase E (Publishing)
+  - **Prerequisites**: Task E1a
+  - **Ownership**: `src/modules/world/domain/services/`
+  - **File Scope**: `src/modules/world/domain/services/graph-validator.ts`, unit tests
+  - **Objective**: Validate structural references: every choice's target scene exists (dangling target = blocker). Condition/mutation *semantic* reference validation is explicitly out of scope — conditions are opaque JSON until the G1 grammar lands (documented limitation, ADR-013 §5).
+  - **Traceability**: FR-05, ADR-013 §5
+  - **Acceptance Criteria**:
+    - Every choice target resolves to an existing scene; dangling targets are blockers identifying the choice and scene.
+    - All dangling references reported, not just the first.
+  - **Required Tests**: Unit tests — valid graph, dangling target, self-loop (valid), multiple dangling targets.
+  - **Definition of Done**: All dangling references detected with locations.
+
+- **Task E2a: Implement Publish Use Case & Snapshot Repository**
+  - **Phase**: Phase E (Publishing)
+  - **Prerequisites**: Task E1b
+  - **Ownership**: `src/modules/world/application/`, `src/modules/world/infrastructure/persistence/`
+  - **File Scope**: `publish-world.use-case.ts` (new), `postgres-canon.repository.ts` (new), `canon.repository.port.ts` (new domain port)
+  - **Objective**: Creator-triggered publishing: run E1a+E1b validators → on blockers, return the validation report without writing; on pass, serialize the draft graph into `canon_data` JSONB and INSERT a new `published_canon_snapshots` row with `version_number = max + 1`. Never UPDATE snapshots.
+  - **Traceability**: FR-05, `docs/detailed-design.md`, ADR-013
+  - **Acceptance Criteria**:
+    - Validation blockers abort publishing with typed errors listing every blocker and warning.
+    - Success creates exactly one snapshot row; `version_number` increments per world; `canon_data` deep-equals the draft graph at publish time.
+    - Re-publishing after draft edits creates a new version; earlier snapshots byte-identical.
+    - Error cases: world not found / not owned (404-not-403 per world route convention), no start scene, validation blockers.
+  - **Required Tests**: Unit tests with fake repos (blocker abort, version increment, snapshot content); integration tests for persistence and version sequencing (Testcontainers — UNVERIFIED until Docker/CI runs them).
+  - **Definition of Done**: Validated drafts produce versioned, immutable snapshots; invalid drafts never write.
+
+- **Task E2b: Implement Publish API Route (creator-only)**
+  - **Phase**: Phase E (Publishing)
+  - **Prerequisites**: Task E2a
+  - **Ownership**: `src/modules/world/http/`
+  - **File Scope**: `src/modules/world/http/world.routes.ts`
+  - **Objective**: `POST /worlds/:id/publish` — creator-only, 404-not-403 ownership semantics (matches existing world routes). Returns `{ snapshotId, versionNumber, warnings[] }` on 201; 422 with `{ blockers[], warnings[] }` on validation failure.
+  - **Traceability**: FR-05, ADR-003 (Zod validation)
+  - **Acceptance Criteria**:
+    - Readers receive 403; strangers/unknown worlds receive 404; creators receive 201 or 422.
+    - 422 body distinguishes blockers from warnings.
+  - **Required Tests**: Route tests via `buildApp` + inject with fakes — 201/404/403/422 cases.
+  - **Definition of Done**: Publishing operable over HTTP with typed errors.
+
+- **Task E2c: Enforce Canon Immutability (trigger + tests)**
+  - **Phase**: Phase E (Publishing)
+  - **Prerequisites**: Task E2a
+  - **Ownership**: `db/migrations/`, tests
+  - **File Scope**: `db/migrations/005_canon_immutability.sql` (new), immutability tests
+  - **Objective**: Defense in depth for ADR-013 D1: PostgreSQL trigger rejecting UPDATE and DELETE on `published_canon_snapshots`, plus tests proving both application paths and direct SQL cannot mutate canon. Trigger guards row mutation only — DDL/migrations unaffected; FK references use `ON DELETE RESTRICT` (already the case); retention/account-deletion design explicitly deferred.
+  - **Traceability**: ADR-013 §4 (D1)
+  - **Acceptance Criteria**:
+    - Migration 005 creates the trigger; fresh-database migration run is clean.
+    - Direct UPDATE/DELETE against snapshots raises; the error surfaces, never swallowed.
+    - Application repository exposes no update/delete method for snapshots (port-surface test).
+  - **Required Tests**: Integration test executing raw UPDATE/DELETE and asserting rejection (Testcontainers — UNVERIFIED until Docker/CI runs it); unit test asserting the port has no mutating methods beyond insert.
+  - **Definition of Done**: Canon immutable at both layers; trigger documented in the migration header.
 
 ---
 
 ### Roadmap Phase F: Reader Runtime, State & Timeline Experience
-- **Task F1: Implement Reader Session Initialization & State Loading**
-  - **Phase**: Phase F (Reader Runtime)
-  - **Prerequisites**: Task C3, Task E2
-  - **Ownership**: `src/modules/session/application/` & `infrastructure/`
-  - **File Scope**: Session initialization use case, PostgreSQL session repository
-  - **Objective**: Initialize active reader sessions bound to specific published canon versions (`canon_version_id`).
-  - **Traceability**: `docs/runtime-design.md`, `docs/user-stories.md`
-  - **Acceptance Criteria**: Sessions correctly load canon snapshot data and initialize reader state variables.
-  - **Required Tests**: Integration tests verifying session creation and state loading.
-  - **Definition of Done**: Reader session lifecycle initialization operational.
+> **Status note (2026-10-13 audit)**: Prerequisites are Task C3 (done) and Task E2 (was missing — now specified above as E0–E2c). Per AGENTS.md prerequisite rules, F-tasks begin only after E2c is verified. Design: `docs/runtime-design.md` (authoritative), ADR-013 (Proposed). Idempotency contract is specified in ADR-013 §4 (D3); enforcement lands with Phase G choice submission.
 
-- **Task F2: Implement Atomic Reader State Mutation & Timeline Append Repository**
+- **Task F1a: Implement Reader Session Domain Entity & Repository Port**
   - **Phase**: Phase F (Reader Runtime)
-  - **Prerequisites**: Task F1
-  - **Ownership**: `src/modules/session/infrastructure/`
-  - **File Scope**: PostgreSQL transaction manager, session state repository, timeline repository
-  - **Objective**: Ensure Reader State updates and Timeline log appends execute atomically within a single ACID transaction (`REPEATABLE READ`).
-  - **Traceability**: `docs/runtime-design.md`, ADR-002
-  - **Acceptance Criteria**: Failure in either state mutation or timeline append triggers an instant database rollback.
-  - **Required Tests**: Integration tests simulating transaction failures and verifying rollback integrity.
-  - **Definition of Done**: ACID persistence guarantees fully verified.
+  - **Prerequisites**: Task E2c
+  - **Ownership**: `src/modules/session/domain/` (exists as empty scaffolding)
+  - **File Scope**: `src/modules/session/domain/entities/reader-session.entity.ts` (new), `src/modules/session/domain/ports/session.repository.port.ts` (new), value objects as needed
+  - **Objective**: Pure domain model for a reader playthrough: session bound to a `snapshot_id`, `currentSceneId`, JSON state-variable map, optimistic-locking `version`, status lifecycle `active → completed | abandoned`. Status transitions validated in the entity (`completed` only via reaching a terminal ending; `abandoned` via explicit close).
+  - **Traceability**: `docs/runtime-design.md` §4, ADR-013 §4 (D2)
+  - **Acceptance Criteria**:
+    - Entity enforces invariants: session references a snapshot (never a mutable draft), state map is JSON-serializable, version increments only via `applyTransition`.
+    - Illegal transitions (e.g., `completed → active`) throw typed domain errors.
+  - **Required Tests**: Unit tests — invariant violations, transition rules, version increment.
+  - **Definition of Done**: Domain core fully tested and isolated from infrastructure.
+
+- **Task F1b: Implement Session Initialization Use Case**
+  - **Phase**: Phase F (Reader Runtime)
+  - **Prerequisites**: Task F1a
+  - **Ownership**: `src/modules/session/application/` (exists as empty scaffolding)
+  - **File Scope**: `start-reader-session.use-case.ts` (new), unit tests with fakes
+  - **Objective**: Start a new playthrough: resolve the world's latest published snapshot (error if none published), create the session pinned to that `snapshot_id` with `currentSceneId` = canon start scene and empty initial state. Multiple sessions per reader per world allowed (ADR-013 D2) — no uniqueness constraint beyond the primary key.
+  - **Traceability**: US-R01, `docs/runtime-design.md` §4
+  - **Acceptance Criteria**:
+    - World with no published snapshot → typed error (HTTP 409 with clear message at the route layer).
+    - Session row references the latest snapshot version at creation time; later publishes do not move it.
+    - Error cases: unknown world (404), unpublished world (409).
+  - **Required Tests**: Unit tests with fakes — happy path, no-snapshot error, snapshot pinning across a subsequent publish.
+  - **Definition of Done**: Session initialization logic verified independent of HTTP.
+
+- **Task F1c: Implement Session HTTP Routes (reader-owned)**
+  - **Phase**: Phase F (Reader Runtime)
+  - **Prerequisites**: Task F1b
+  - **Ownership**: `src/modules/session/http/` (new), `src/app.ts`
+  - **File Scope**: `src/modules/session/http/session.routes.ts` (new), route tests
+  - **Objective**: `POST /worlds/:id/sessions` (create playthrough; any authenticated reader), `GET /sessions/:id` (owner-only; 404-not-403 for other readers' sessions, mirroring world route conventions). Session cookie auth via existing middleware; `requireReader` (kept deliberately for this phase) gates creation.
+  - **Traceability**: US-R01, US-R05, ADR-003 (Zod validation)
+  - **Acceptance Criteria**:
+    - 201 with `{ sessionId, snapshotId, versionNumber, currentSceneId, status }` on create; 409 when the world has no published snapshot.
+    - Cross-reader access returns 404 (not 403 — no existence oracle), unauthenticated returns 401.
+    - Zod-validated bodies; invalid payloads → 400.
+  - **Required Tests**: Route tests via `buildApp` + inject with fakes — 201/401/404/409 cases, ownership isolation.
+  - **Definition of Done**: Session lifecycle operable over HTTP with correct authorization.
+
+- **Task F2a: Implement Atomic State Mutation & Timeline Append**
+  - **Phase**: Phase F (Reader Runtime)
+  - **Prerequisites**: Task F1c
+  - **Ownership**: `src/modules/session/infrastructure/` (exists as empty scaffolding)
+  - **File Scope**: `postgres-session.repository.ts` (new), transaction handling, integration tests
+  - **Objective**: The persistence mechanism for choice application (resolution logic itself is Phase G): within a single transaction — `SELECT ... FOR UPDATE` the session row, check optimistic `version` (mismatch → 409, per runtime-design), apply the state diff to `state_variables`, INSERT the timeline row (next `sequence_number`), UPDATE the session (`version + 1`, `updated_at`). Any failure → ROLLBACK. Timeline rows are append-only (no update/delete path).
+  - **Traceability**: `docs/runtime-design.md` §3, ADR-002
+  - **Acceptance Criteria**:
+    - State mutation and timeline append commit atomically; induced failure mid-transaction rolls back both.
+    - Concurrent conflicting writes → one wins, the other gets 409 (version mismatch).
+    - Timeline `sequence_number` is gapless per session (unique constraint enforced).
+    - No code path issues UPDATE/DELETE against `reader_timelines` or `published_canon_snapshots`.
+  - **Required Tests**: Integration tests with Testcontainers simulating commit, rollback on failure, and concurrent version conflicts — **UNVERIFIED until Docker/CI runs them** (no Docker in this environment); unit tests for the diff-application logic with fakes.
+  - **Definition of Done**: Atomicity guarantees verified; Docker-dependent tests explicitly marked UNVERIFIED, never claimed passing.
+  - **System Completeness Gate (slice)**: Security — session ownership enforced at repository level (reader_id predicate on every query); Reliability — transaction boundaries + rollback; Data Governance — timeline append-only, state minimization (only gameplay variables, no PII); AI Safety — N/A (deterministic persistence, no model involvement).
 
 ---
 

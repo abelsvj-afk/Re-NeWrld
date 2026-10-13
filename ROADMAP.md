@@ -44,20 +44,20 @@ This roadmap defines the authoritative implementation plan for **Re:NeWrld**. It
 - **Completion Criteria**: Creators can create, update, and manage draft world authoring graphs.
 
 ### Phase E: Story, Scene & Publishing Validation
-- **Objective**: Implement graph traversal validation, reachability checks, and immutable Published Canon snapshot generation (`modules/world/publishing/`).
+- **Objective**: Implement graph traversal validation, reachability checks, and immutable Published Canon snapshot generation. **Status (2026-10-13 audit)**: the application code for this phase was never written — the world module is draft CRUD only. The schema exists (migration 001); tasks E0–E2c in TASKS.md close the gap in dependency order before Phase F begins. Design: ADR-013 (Proposed).
 - **Dependencies**: Phase D.
-- **Continuous Testing**: Publishing graph algorithms tested concurrently via Vitest unit tests.
-- **Gate**: Publishing validation test suite passing for valid and invalid graph topologies.
-- **Deliverables**: Publishing validation use case, graph reachability algorithms, and immutable snapshot repository.
-- **Completion Criteria**: Draft worlds passing validation successfully transition to versioned Published Canon snapshots.
+- **Continuous Testing**: Publishing graph algorithms tested concurrently via Vitest unit tests (pure validators, no DB).
+- **Gate**: Publishing validation test suite passing for valid and invalid graph topologies; immutability trigger verified.
+- **Deliverables**: Schema markers migration (004: `is_ending`, `start_scene_id`), graph validators (E1a/E1b), publish use case + snapshot repository (E2a), `POST /worlds/:id/publish` route (E2b), canon immutability trigger migration (005) (E2c).
+- **Completion Criteria**: Draft worlds passing validation successfully transition to versioned Published Canon snapshots; snapshots immutable at application and database layers.
 
 ### Phase F: Reader Runtime, State & Timeline Experience
-- **Objective**: Implement active reader session initialization bound to specific published canon versions, variable state maps, and append-only timeline logs (`modules/session/`).
+- **Objective**: Implement active reader session initialization bound to specific published canon versions, variable state maps, and append-only timeline logs (`modules/session/`). **Prerequisite**: Phase E gap-closure (E0–E2c) verified — F-tasks begin only after E2c per AGENTS.md prerequisite rules. Idempotency contract specified (ADR-013 D3); enforcement lands with Phase G choice submission.
 - **Dependencies**: Phase C (Reader Auth), Phase E (Published Canon).
-- **Continuous Testing**: Session state and timeline append unit tests executed concurrently.
-- **Gate**: ACID transaction tests ensuring atomic Reader State and Timeline recording (`REPEATABLE READ`).
-- **Deliverables**: `modules/session/domain/` aggregates and `modules/session/infrastructure/` persistence adapters.
-- **Completion Criteria**: Readers can initialize sessions, submit choices, and persist state/timeline history atomically.
+- **Continuous Testing**: Session state and timeline append unit tests executed concurrently; transaction tests via Testcontainers (UNVERIFIED until Docker/CI runs them).
+- **Gate**: ACID transaction tests ensuring atomic Reader State and Timeline recording; session ownership isolation verified.
+- **Deliverables**: Session domain entity + port (F1a), init use case (F1b), session routes (F1c), atomic Postgres persistence (F2a).
+- **Completion Criteria**: Readers can initialize sessions pinned to immutable snapshots, and persist state/timeline history atomically; multiple independent playthroughs per reader per world.
 
 ### Phase G: Deterministic Narrative Execution
 - **Objective**: Implement condition evaluation engines, numeric/boolean state mutations, choice resolution, and next-node rendering logic within the session domain.
