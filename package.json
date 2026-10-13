@@ -7,10 +7,10 @@
     "build": "tsc",
     "start": "node -e \"const fs = require('fs'); if (fs.existsSync('.env')) process.loadEnvFile('.env'); require('./dist/server.js');\"",
     "dev": "tsx --env-file .env watch src/server.ts",
-    "test": "APP_ENV=test vitest run",
-    "test:watch": "APP_ENV=test vitest",
-    "test:unit": "APP_ENV=test vitest run tests/unit",
-    "test:integration": "APP_ENV=test vitest run tests/integration",
+    "test": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest run",
+    "test:watch": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest",
+    "test:unit": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest run tests/unit",
+    "test:integration": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest run tests/integration",
     "migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
