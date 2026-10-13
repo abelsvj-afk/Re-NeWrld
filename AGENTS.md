@@ -55,3 +55,12 @@ Before proposing changes, executing tasks, or generating code within this worksp
 
 * Governed by **Project Growth v1.1.0**.
 * Application source code is blocked until the required design and System Completeness Gate evaluation are complete and approved for the current scope.
+
+## 5. Local Development & Push Workflow (agent notes)
+
+* **Install git hooks after cloning**: run `./scripts/setup-hooks.sh`. The pre-push hook runs `tsc --noEmit` and `npm run test:unit`; the push is blocked if either fails.
+* **Unit tests need a DATABASE_URL**: `src/config/env.ts` validates it at import time (valid postgres URL syntax only — no connection is made). The hook and CI export a dummy value (`postgresql://postgres:postgres@localhost:5432/renewrld_test`) when unset. Never require a live database for unit tests.
+* **Test split**: `npm run test:unit` (no Docker) vs `npm run test:integration` (requires Docker for Testcontainers PostgreSQL).
+* **Pushing workflow files**: the owner's Termux git credential is an OAuth App token without the `workflow` scope — GitHub rejects pushes that create/update `.github/workflows/*` from it. Add or change workflow files via the github.com web UI instead.
+* **Agent pushes**: if the agent's GitHub integration returns 403 on write, do not retry blindly — hand the user a `git format-patch` file and let them `git am` + `git push` from their own terminal.
+* **Secrets**: `.env` is gitignored. `.env.example` must contain only placeholders — never commit real credentials, even for localhost-only dev databases.
