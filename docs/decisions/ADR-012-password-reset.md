@@ -1,6 +1,6 @@
 # ADR-012: Password Reset & Account Recovery
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-10-13
 - **Decision Makers**: Sajacous Smith (product owner)
 - **Consulted**: AI engineering agents (governance review)
@@ -43,10 +43,10 @@ Phase C (Authentication & Authorization) shipped registration, login, logout, an
 * **Negative Impact / Tradeoffs**: Adds an external dependency (email provider) with cost and deliverability considerations; introduces a token table requiring cleanup; email becomes a critical-path trust anchor (account security now depends on email account security — standard and accepted).
 * **Mitigations**: 15-minute expiry + single-use + hashed storage bound the blast radius of a leaked token; strict rate limiting and anti-enumeration bound abuse; all reset events audit-logged.
 
-## 6. Open Decisions (require human approval before implementation)
+## 6. Open Decisions
 
-1. **Email provider** (Resend, SES, SendGrid, other, or self-hosted): affects cost, deliverability, and which adapter gets built. Recommendation deferred — no provider invented here.
-2. **Reset email template/branding**: copy and sender identity; can follow the Phase H brand work or ship plain-text first.
+1. **Email provider** — DECIDED 2026-10-13: **Resend**. The product owner delegated the choice with the constraint "must be free." Resend's free tier (3,000 emails/month, 100/day) is the most generous among reputable transactional providers (SendGrid: 100/day with heavier setup; SES: free 62k/mo only from EC2; Brevo: 300/day), and its plain REST API needs no SDK dependency. `ConsoleEmailAdapter` remains the dev/test default (`EMAIL_PROVIDER=console`).
+2. **Reset email template/branding**: copy and sender identity; ships plain-text first, brand pass with Phase H.
 
 ## 7. System Completeness Gate Evaluation (this slice)
 
@@ -59,4 +59,4 @@ Phase C (Authentication & Authorization) shipped registration, login, logout, an
 
 ## 8. Change Classification
 
-**Level 4** (Security / Authority) per `governance/AI_AGENT_RULES.md` §5: touches the authentication boundary and introduces an account-takeover vector. Requires: formal governance review, security review of this design, and explicit human approval before implementation. No implementation code until ADR status moves to Accepted.
+**Level 4** (Security / Authority) per `governance/AI_AGENT_RULES.md` §5: touches the authentication boundary and introduces an account-takeover vector. Requires: formal governance review, security review of this design, and explicit human approval before implementation. **Approved 2026-10-13** — product owner authorized implementation ("finish" the Phase C addition) and delegated the provider choice. Implemented as Task C4: 111/111 unit tests pass, tsc clean.

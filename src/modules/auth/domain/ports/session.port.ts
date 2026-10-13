@@ -26,6 +26,8 @@ export interface SessionServicePort {
   createSession(userId: UserId, durationMs?: number): Promise<{ sessionId: string; expiresAt: Date }>;
   validateSession(token: string): Promise<SessionInfo | null>;
   revokeSession(token: string): Promise<void>;
+  /** Revokes every session for a user (e.g., password reset, security revocation). */
+  revokeAllUserSessions(userId: UserId): Promise<void>;
   getCookieOptions(secure: boolean, expiresAt?: Date): {
     httpOnly: boolean;
     secure: boolean;

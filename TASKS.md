@@ -111,7 +111,8 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 
 - **Task C4: Implement Password Reset & Account Recovery**
   - **Phase**: Phase C (Auth/RBAC)
-  - **Prerequisites**: Task C2 (session service with `revokeAllUserSessions`), ADR-012 accepted, email provider selected (open decision)
+  - **Prerequisites**: Task C2 (session service with `revokeAllUserSessions`); ADR-012 accepted 2026-10-13; email provider: Resend (free tier)
+  - **Status**: ✅ Implemented 2026-10-13 — 111/111 unit tests pass, tsc clean.
   - **Ownership**: `src/modules/auth/`
   - **File Scope**: `src/modules/auth/application/request-password-reset.use-case.ts`, `src/modules/auth/application/confirm-password-reset.use-case.ts`, `src/modules/auth/application/ports/email-service.port.ts`, `src/modules/auth/infrastructure/persistence/postgres-password-reset.repository.ts`, `src/modules/auth/infrastructure/email/*` (adapter), `src/modules/auth/http/auth.routes.ts`, `db/migrations/003_password_reset_tokens.sql`, session janitor extension in `src/server.ts`
   - **Objective**: Implement FR-13 / US-A01: time-limited, single-use, hashed reset tokens delivered via email; anti-enumeration request endpoint; session revocation on confirm.

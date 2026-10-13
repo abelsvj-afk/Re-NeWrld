@@ -21,6 +21,12 @@ describe('Environment Configuration & Validation', () => {
       RATE_LIMIT_MAX: 100,
       RATE_LIMIT_WINDOW_MS: 60000,
       RATE_LIMIT_AUTH_MAX: 10,
+      RATE_LIMIT_RESET_MAX: 5,
+      RATE_LIMIT_RESET_WINDOW_MS: 3600000,
+      EMAIL_PROVIDER: 'console',
+      RESEND_API_KEY: undefined,
+      EMAIL_FROM: 'Re:NeWrld <noreply@example.com>',
+      APP_BASE_URL: 'http://localhost:8080',
       CORS_ORIGIN: undefined,
     });
   });
@@ -39,6 +45,12 @@ describe('Environment Configuration & Validation', () => {
       RATE_LIMIT_MAX: 100,
       RATE_LIMIT_WINDOW_MS: 60000,
       RATE_LIMIT_AUTH_MAX: 10,
+      RATE_LIMIT_RESET_MAX: 5,
+      RATE_LIMIT_RESET_WINDOW_MS: 3600000,
+      EMAIL_PROVIDER: 'console',
+      RESEND_API_KEY: undefined,
+      EMAIL_FROM: 'Re:NeWrld <noreply@example.com>',
+      APP_BASE_URL: 'http://localhost:8080',
       CORS_ORIGIN: undefined,
     });
   });

@@ -11,6 +11,10 @@ import { PasswordService } from '../infrastructure/services/password.service.js'
 import { RegisterUserUseCase } from '../application/register-user.use-case.js';
 import { LoginUserUseCase } from '../application/login-user.use-case.js';
 import { BecomeCreatorUseCase } from '../application/become-creator.use-case.js';
+import { RequestPasswordResetUseCase } from '../application/request-password-reset.use-case.js';
+import { ConfirmPasswordResetUseCase } from '../application/confirm-password-reset.use-case.js';
+import { PasswordResetRepositoryPort } from '../domain/ports/password-reset.repository.port.js';
+import { EmailServicePort } from '../application/ports/email-service.port.js';
 import { UserId } from '../domain/value-objects/user-id.value-object.js';
 import { authenticate, getRequestToken } from '../../../shared/middleware/auth.middleware.js';
 
@@ -18,6 +22,8 @@ export interface AuthRouteDeps {
   authRepository: AuthRepositoryPort;
   sessionService: SessionServicePort;
   passwordService: PasswordService;
+  passwordResetRepository: PasswordResetRepositoryPort;
+  emailService: EmailServicePort;
 }
 
 const RegisterBody = z.object({
@@ -31,6 +37,18 @@ const RegisterBody = z.object({
 const LoginBody = z.object({
   email: z.string().email({ message: 'Invalid email address' }),
   password: z.string().min(1, { message: 'Password is required' }).max(128),
+});
+
+const PasswordResetRequestBody = z.object({
+  email: z.string().email({ message: 'Invalid email address' }),
+});
+
+const PasswordResetConfirmBody = z.object({
+  token: z.string().min(1, { message: 'Reset token is required' }).max(128),
+  newPassword: z
+    .string()
+    .min(8, { message: 'Password must be at least 8 characters' })
+    .max(128, { message: 'Password must not exceed 128 characters' }),
 });
 
 interface CookieOptions {
@@ -62,6 +80,18 @@ export async function authRoutes(app: FastifyInstance, deps: AuthRouteDeps): Pro
   const registerUseCase = new RegisterUserUseCase(deps.authRepository, deps.passwordService);
   const loginUseCase = new LoginUserUseCase(deps.authRepository, deps.sessionService, deps.passwordService);
   const becomeCreatorUseCase = new BecomeCreatorUseCase(deps.authRepository);
+  const requestResetUseCase = new RequestPasswordResetUseCase(
+    deps.authRepository,
+    deps.passwordResetRepository,
+    deps.emailService,
+    deps.passwordService
+  );
+  const confirmResetUseCase = new ConfirmPasswordResetUseCase(
+    deps.authRepository,
+    deps.passwordResetRepository,
+    deps.sessionService,
+    deps.passwordService
+  );
   const verifier = deps.sessionService.getVerifier();
   const secureCookies = cookieSecureForEnv(env.APP_ENV);
 
@@ -71,6 +101,17 @@ export async function authRoutes(app: FastifyInstance, deps: AuthRouteDeps): Pro
       rateLimit: {
         max: env.RATE_LIMIT_AUTH_MAX,
         timeWindow: env.RATE_LIMIT_WINDOW_MS,
+      },
+    },
+  };
+
+  // Strictest rate limit: the reset endpoints are account-takeover and spam
+  // targets (ADR-012). 5 requests/hour per IP by default.
+  const resetRateLimit = {
+    config: {
+      rateLimit: {
+        max: env.RATE_LIMIT_RESET_MAX,
+        timeWindow: env.RATE_LIMIT_RESET_WINDOW_MS,
       },
     },
   };
@@ -141,5 +182,19 @@ export async function authRoutes(app: FastifyInstance, deps: AuthRouteDeps): Pro
       role: session.role.getValue(),
       expiresAt: session.expiresAt.toISOString(),
     };
+  });
+
+  // Password reset (FR-13, ADR-012). The request endpoint always returns 202 —
+  // it never reveals whether the email is registered (anti-enumeration).
+  app.post('/auth/password-reset/request', resetRateLimit, async (request, reply) => {
+    const body = PasswordResetRequestBody.parse(request.body);
+    await requestResetUseCase.execute(body);
+    return reply.code(202).send({ ok: true });
+  });
+
+  app.post('/auth/password-reset/confirm', resetRateLimit, async (request, reply) => {
+    const body = PasswordResetConfirmBody.parse(request.body);
+    await confirmResetUseCase.execute({ token: body.token, newPassword: body.newPassword });
+    return reply.send({ ok: true });
   });
 }

@@ -9,6 +9,11 @@ import { WorldRepositoryPort } from './modules/world/domain/ports/world.reposito
 import { SessionServicePort } from './modules/auth/domain/ports/session.port.js';
 import { PostgresAuthRepository } from './modules/auth/infrastructure/persistence/postgres-auth.repository.js';
 import { PostgresWorldRepository } from './modules/world/infrastructure/persistence/postgres-world.repository.js';
+import { PostgresPasswordResetRepository } from './modules/auth/infrastructure/persistence/postgres-password-reset.repository.js';
+import { ResendEmailAdapter } from './modules/auth/infrastructure/email/resend-email.adapter.js';
+import { ConsoleEmailAdapter } from './modules/auth/infrastructure/email/console-email.adapter.js';
+import { PasswordResetRepositoryPort } from './modules/auth/domain/ports/password-reset.repository.port.js';
+import { EmailServicePort } from './modules/auth/application/ports/email-service.port.js';
 import { SessionService } from './modules/auth/infrastructure/services/session.service.js';
 import { PasswordService } from './modules/auth/infrastructure/services/password.service.js';
 import { authRoutes } from './modules/auth/http/auth.routes.js';
@@ -24,6 +29,8 @@ export interface AppDeps {
   worldRepository?: WorldRepositoryPort;
   sessionService?: SessionServicePort;
   passwordService?: PasswordService;
+  passwordResetRepository?: PasswordResetRepositoryPort;
+  emailService?: EmailServicePort;
 }
 
 export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Promise<FastifyInstance<RawServerDefault, RawRequestDefaultExpression<RawServerDefault>, RawReplyDefaultExpression<RawServerDefault>, pino.Logger>> {
@@ -100,9 +107,26 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const worldRepository = deps?.worldRepository ?? new PostgresWorldRepository();
   const sessionService = deps?.sessionService ?? new SessionService();
   const passwordService = deps?.passwordService ?? new PasswordService();
+  const passwordResetRepository =
+    deps?.passwordResetRepository ?? new PostgresPasswordResetRepository();
+  const emailService =
+    deps?.emailService ??
+    (env.EMAIL_PROVIDER === 'resend'
+      ? new ResendEmailAdapter({
+          apiKey: env.RESEND_API_KEY as string,
+          from: env.EMAIL_FROM,
+          baseUrl: env.APP_BASE_URL,
+        })
+      : new ConsoleEmailAdapter(env.APP_BASE_URL));
 
   await app.register(async (instance) => {
-    await authRoutes(instance, { authRepository, sessionService, passwordService });
+    await authRoutes(instance, {
+      authRepository,
+      sessionService,
+      passwordService,
+      passwordResetRepository,
+      emailService,
+    });
     await worldRoutes(instance, { worldRepository, sessionVerifier: sessionService.getVerifier() });
   });
 

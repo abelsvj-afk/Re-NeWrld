@@ -9,6 +9,9 @@ import { User } from '../../../src/modules/auth/domain/entities/user.entity.js';
 import { UserId } from '../../../src/modules/auth/domain/value-objects/user-id.value-object.js';
 import { Email } from '../../../src/modules/auth/domain/value-objects/email.value-object.js';
 import { WorldRepositoryPort } from '../../../src/modules/world/domain/ports/world.repository.port.js';
+import { PasswordResetRepositoryPort } from '../../../src/modules/auth/domain/ports/password-reset.repository.port.js';
+import { PasswordResetToken } from '../../../src/modules/auth/domain/entities/password-reset-token.entity.js';
+import { EmailServicePort } from '../../../src/modules/auth/application/ports/email-service.port.js';
 import { World } from '../../../src/modules/world/domain/entities/world.entity.js';
 import { WorldId } from '../../../src/modules/world/domain/value-objects/world-id.value-object.js';
 
@@ -81,6 +84,14 @@ export class FakeSessionService implements SessionServicePort {
     this.sessions.delete(token);
   }
 
+  async revokeAllUserSessions(userId: UserId): Promise<void> {
+    for (const [token, info] of this.sessions) {
+      if (info.userId.equals(userId)) {
+        this.sessions.delete(token);
+      }
+    }
+  }
+
   getCookieOptions(secure: boolean, expiresAt?: Date) {
     const options: {
       httpOnly: boolean;
@@ -117,5 +128,53 @@ export class FakeWorldRepository implements WorldRepositoryPort {
 
   async delete(worldId: WorldId): Promise<void> {
     this.worlds.delete(worldId.getValue());
+  }
+}
+
+export class FakePasswordResetRepository implements PasswordResetRepositoryPort {
+  private tokens = new Map<string, PasswordResetToken>();
+
+  async save(token: PasswordResetToken): Promise<void> {
+    this.tokens.set(token.getTokenHash(), token);
+  }
+
+  async findByHash(tokenHash: string): Promise<PasswordResetToken | null> {
+    return this.tokens.get(tokenHash) ?? null;
+  }
+
+  async markUsed(tokenHash: string): Promise<void> {
+    const token = this.tokens.get(tokenHash);
+    if (token && !token.isUsed()) {
+      token.markUsed();
+    }
+  }
+
+  async deleteExpired(now: Date = new Date()): Promise<number> {
+    let removed = 0;
+    for (const [hash, token] of this.tokens) {
+      if (token.isExpired(now)) {
+        this.tokens.delete(hash);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /** Test helper: inspect stored tokens. */
+  get stored(): PasswordResetToken[] {
+    return [...this.tokens.values()];
+  }
+}
+
+export interface SentEmail {
+  to: string;
+  rawToken: string;
+}
+
+export class FakeEmailService implements EmailServicePort {
+  public sent: SentEmail[] = [];
+
+  async sendPasswordResetEmail(to: Email, rawToken: string): Promise<void> {
+    this.sent.push({ to: to.getValue(), rawToken });
   }
 }
