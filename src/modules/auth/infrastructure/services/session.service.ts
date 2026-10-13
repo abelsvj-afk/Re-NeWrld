@@ -123,6 +123,18 @@ export class SessionService {
   }
 
   /**
+   * Deletes sessions past their expiry. Sessions are 7-day TTL with no
+   * automatic cleanup otherwise, so this keeps auth_sessions from growing
+   * unbounded. Returns the number of rows removed.
+   */
+  public async cleanupExpiredSessions(): Promise<number> {
+    const result = await query(
+      `DELETE FROM auth_sessions WHERE expires_at <= CURRENT_TIMESTAMP`
+    );
+    return result.rowCount ?? 0;
+  }
+
+  /**
    * Returns secure cookie configuration options adhering to ADR-004, taking secure as a parameter and adding maxAge in seconds from expiry.
    */
   public getCookieOptions(secure: boolean, expiresAt?: Date) {

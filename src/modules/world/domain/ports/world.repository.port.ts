@@ -6,4 +6,5 @@ export interface WorldRepositoryPort {
   findById(worldId: WorldId): Promise<World | null>;
   findByCreatorId(creatorId: UserId): Promise<World[]>;
   save(world: World): Promise<void>;
+  delete(worldId: WorldId): Promise<void>;
 }

@@ -13,6 +13,8 @@ import { SessionService } from './modules/auth/infrastructure/services/session.s
 import { PasswordService } from './modules/auth/infrastructure/services/password.service.js';
 import { authRoutes } from './modules/auth/http/auth.routes.js';
 import { worldRoutes } from './modules/world/http/world.routes.js';
+import rateLimit from '@fastify/rate-limit';
+import cors from '@fastify/cors';
 
 // Bounded validation regex for incoming x-request-id (alphanumeric, hyphens, underscores, periods, colons; 1-128 chars)
 const REQUEST_ID_REGEX = /^[a-zA-Z0-9_\-\.:]{1,128}$/;
@@ -74,6 +76,24 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       statusCode,
     });
   });
+
+  // Rate limiting: brute-force protection (threat model: "Brute Force & Credential
+  // Abuse" — Planned). Skipped in test env so unit tests never flake on limits.
+  if (env.APP_ENV !== 'test') {
+    await app.register(rateLimit, {
+      max: env.RATE_LIMIT_MAX,
+      timeWindow: env.RATE_LIMIT_WINDOW_MS,
+    });
+  }
+
+  // CORS: only when a browser frontend origin is configured (Phase H).
+  // Unset CORS_ORIGIN = no CORS headers (API-only mode).
+  if (env.CORS_ORIGIN) {
+    await app.register(cors, {
+      origin: env.CORS_ORIGIN,
+      credentials: true,
+    });
+  }
 
   // Resolve dependencies (real infrastructure by default; fakes injectable for tests)
   const authRepository = deps?.authRepository ?? new PostgresAuthRepository();

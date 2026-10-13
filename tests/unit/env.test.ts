@@ -18,6 +18,10 @@ describe('Environment Configuration & Validation', () => {
       PORT: 3000,
       HOST: '127.0.0.1',
       DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/rene_wrld',
+      RATE_LIMIT_MAX: 100,
+      RATE_LIMIT_WINDOW_MS: 60000,
+      RATE_LIMIT_AUTH_MAX: 10,
+      CORS_ORIGIN: undefined,
     });
   });
 
@@ -32,6 +36,10 @@ describe('Environment Configuration & Validation', () => {
       PORT: 8080,
       HOST: '0.0.0.0',
       DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/rene_wrld',
+      RATE_LIMIT_MAX: 100,
+      RATE_LIMIT_WINDOW_MS: 60000,
+      RATE_LIMIT_AUTH_MAX: 10,
+      CORS_ORIGIN: undefined,
     });
   });
 

@@ -170,4 +170,76 @@ describe('World HTTP routes (creator-only)', () => {
     expect(patched.json().metadata).toEqual({ genre: 'fantasy' });
     await app.close();
   });
+
+  it('DELETE /worlds/:id removes the caller\u2019s world (204) and it stays gone', async () => {
+    const app = await boot();
+    const cookie = await seedUser('creator', 'deleter@rene.wrld');
+    const created = await app.inject({
+      method: 'POST',
+      url: '/worlds',
+      headers: { cookie },
+      payload: { title: 'Ephemeral' },
+    });
+    const worldId = created.json().id;
+
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/worlds/${worldId}`,
+      headers: { cookie },
+    });
+    expect(deleted.statusCode).toBe(204);
+
+    const fetched = await app.inject({
+      method: 'GET',
+      url: `/worlds/${worldId}`,
+      headers: { cookie },
+    });
+    expect(fetched.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('DELETE /worlds/:id returns 404 for unknown ids and other creators\u2019 worlds, 403 for readers', async () => {
+    const app = await boot();
+    const cookie = await seedUser('creator', 'owner@rene.wrld');
+    const otherCookie = await seedUser('creator', 'stranger@rene.wrld');
+    const readerCookie = await seedUser('reader', 'looker@rene.wrld');
+    const created = await app.inject({
+      method: 'POST',
+      url: '/worlds',
+      headers: { cookie },
+      payload: { title: 'Mine' },
+    });
+    const worldId = created.json().id;
+
+    const unknown = await app.inject({
+      method: 'DELETE',
+      url: `/worlds/${crypto.randomUUID()}`,
+      headers: { cookie },
+    });
+    expect(unknown.statusCode).toBe(404);
+
+    // 404-not-403: another creator's world looks missing, not forbidden.
+    const strangerAttempt = await app.inject({
+      method: 'DELETE',
+      url: `/worlds/${worldId}`,
+      headers: { cookie: otherCookie },
+    });
+    expect(strangerAttempt.statusCode).toBe(404);
+
+    const readerAttempt = await app.inject({
+      method: 'DELETE',
+      url: `/worlds/${worldId}`,
+      headers: { cookie: readerCookie },
+    });
+    expect(readerAttempt.statusCode).toBe(403);
+
+    // The world survived all of the above.
+    const stillThere = await app.inject({
+      method: 'GET',
+      url: `/worlds/${worldId}`,
+      headers: { cookie },
+    });
+    expect(stillThere.statusCode).toBe(200);
+    await app.close();
+  });
 });

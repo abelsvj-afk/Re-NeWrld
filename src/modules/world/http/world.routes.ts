@@ -7,6 +7,7 @@ import { WorldMetadataSchema } from '../domain/value-objects/world-schemas.js';
 import { CreateWorldUseCase } from '../application/create-world.use-case.js';
 import { GetWorldUseCase } from '../application/get-world.use-case.js';
 import { UpdateWorldUseCase } from '../application/update-world.use-case.js';
+import { DeleteWorldUseCase } from '../application/delete-world.use-case.js';
 import { SessionVerifier } from '../../auth/domain/ports/session.port.js';
 import { authenticate, requireCreator } from '../../../shared/middleware/auth.middleware.js';
 import { BadRequestError } from '../../../shared/http/http.errors.js';
@@ -57,6 +58,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
   const createWorld = new CreateWorldUseCase(deps.worldRepository);
   const getWorld = new GetWorldUseCase(deps.worldRepository);
   const updateWorld = new UpdateWorldUseCase(deps.worldRepository);
+  const deleteWorld = new DeleteWorldUseCase(deps.worldRepository);
   const creatorOnly = [authenticate(deps.sessionVerifier), requireCreator()];
 
   app.post('/worlds', { preHandler: creatorOnly }, async (request, reply) => {
@@ -94,5 +96,14 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       metadata: body.metadata,
     });
     return toWorldJson(world);
+  });
+
+  app.delete('/worlds/:id', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    await deleteWorld.execute({
+      worldId: parseWorldId(params.id),
+      creatorId: request.user!.userId,
+    });
+    return reply.code(204).send();
   });
 }

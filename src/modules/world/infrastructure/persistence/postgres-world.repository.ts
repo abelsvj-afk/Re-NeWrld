@@ -64,6 +64,10 @@ export class PostgresWorldRepository implements WorldRepositoryPort {
     );
   }
 
+  public async delete(worldId: WorldId): Promise<void> {
+    await query(`DELETE FROM worlds WHERE world_id = $1`, [worldId.getValue()]);
+  }
+
   private mapRowToWorld(row: WorldRow): World {
     const props: WorldProps = {
       worldId: new WorldId(row.world_id),

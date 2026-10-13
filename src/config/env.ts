@@ -5,6 +5,13 @@ export const envSchema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   PORT: z.coerce.number().int().min(1).max(65535).default(8080),
   HOST: z.string().default('0.0.0.0'),
+  // Rate limiting (requests per window, per IP). Skipped entirely when APP_ENV=test.
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000),
+  // Tighter limit for the auth endpoints (login/register are brute-force targets).
+  RATE_LIMIT_AUTH_MAX: z.coerce.number().int().positive().default(10),
+  // Browser frontend origin for CORS. Unset = no CORS headers (same-origin/API-only).
+  CORS_ORIGIN: z.string().url().optional(),
   DATABASE_URL: z.string().refine(
     (val) => {
       try {

@@ -114,4 +114,8 @@ export class FakeWorldRepository implements WorldRepositoryPort {
   async save(world: World): Promise<void> {
     this.worlds.set(world.getWorldId().getValue(), world);
   }
+
+  async delete(worldId: WorldId): Promise<void> {
+    this.worlds.delete(worldId.getValue());
+  }
 }

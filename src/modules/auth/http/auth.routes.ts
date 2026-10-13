@@ -11,6 +11,7 @@ import { PasswordService } from '../infrastructure/services/password.service.js'
 import { RegisterUserUseCase } from '../application/register-user.use-case.js';
 import { LoginUserUseCase } from '../application/login-user.use-case.js';
 import { BecomeCreatorUseCase } from '../application/become-creator.use-case.js';
+import { UserId } from '../domain/value-objects/user-id.value-object.js';
 import { authenticate, getRequestToken } from '../../../shared/middleware/auth.middleware.js';
 
 export interface AuthRouteDeps {
@@ -64,18 +65,34 @@ export async function authRoutes(app: FastifyInstance, deps: AuthRouteDeps): Pro
   const verifier = deps.sessionService.getVerifier();
   const secureCookies = cookieSecureForEnv(env.APP_ENV);
 
-  app.post('/auth/register', async (request, reply) => {
+  // Tighter rate limit: registration and login are brute-force targets.
+  const authRateLimit = {
+    config: {
+      rateLimit: {
+        max: env.RATE_LIMIT_AUTH_MAX,
+        timeWindow: env.RATE_LIMIT_WINDOW_MS,
+      },
+    },
+  };
+
+  app.post('/auth/register', authRateLimit, async (request, reply) => {
     const body = RegisterBody.parse(request.body);
     const user = await registerUseCase.execute(body);
+    // Auto-login: a fresh registration immediately establishes a session, so
+    // the new user doesn't have to turn around and call /auth/login.
+    const { sessionId, expiresAt } = await deps.sessionService.createSession(new UserId(user.id));
+    const regCookieOptions = deps.sessionService.getCookieOptions(secureCookies, expiresAt);
+    reply.header('Set-Cookie', serializeCookie(SESSION_COOKIE_NAME, sessionId, regCookieOptions));
     return reply.code(201).send({
       id: user.id,
       email: user.email,
       role: user.role,
       createdAt: user.createdAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
     });
   });
 
-  app.post('/auth/login', async (request, reply) => {
+  app.post('/auth/login', authRateLimit, async (request, reply) => {
     const body = LoginBody.parse(request.body);
     const result = await loginUseCase.execute(body);
     const cookieOptions = deps.sessionService.getCookieOptions(secureCookies, result.expiresAt);
