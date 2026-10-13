@@ -9,9 +9,13 @@ import { logger } from '../src/shared/logger/pino.logger.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export async function runMigrations(): Promise<void> {
+export async function runMigrations(connectionString: string): Promise<void> {
+  if (!connectionString) {
+    throw new Error('Connection string is required for running migrations');
+  }
+
   const pool = new Pool({
-    connectionString: env.DATABASE_URL,
+    connectionString,
   });
 
   const client = await pool.connect();
@@ -83,7 +87,7 @@ export async function runMigrations(): Promise<void> {
 
 // Allow direct execution via CLI
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  runMigrations()
+  runMigrations(env.DATABASE_URL)
     .then(() => {
       console.log('✅ Migrations completed successfully');
       process.exit(0);

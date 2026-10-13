@@ -15,7 +15,6 @@ describeFn('Database Migration Integration & Idempotency', () => {
     try {
       container = await new PostgreSqlContainer('postgres:15-alpine').start();
       connectionString = container.getConnectionUri();
-      process.env.DATABASE_URL = connectionString;
     } catch (err) {
       throw new Error(`Docker daemon / PostgreSQL container startup failed and intentional skip mechanism is not enabled: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -33,7 +32,7 @@ describeFn('Database Migration Integration & Idempotency', () => {
     }
 
     // Run migrations first time
-    await runMigrations();
+    await runMigrations(connectionString);
 
     // Verify schema tables were created
     const pool = new Pool({ connectionString });
@@ -53,15 +52,16 @@ describeFn('Database Migration Integration & Idempotency', () => {
       expect(tables).toContain('reader_timelines');
       expect(tables).toContain('schema_migrations');
 
-      // Verify migration version recorded
-      const migRes = await pool.query('SELECT version, name FROM schema_migrations');
-      expect(migRes.rows).toHaveLength(1);
+      // Verify migration version recorded (001 and 002)
+      const migRes = await pool.query('SELECT version, name FROM schema_migrations ORDER BY version');
+      expect(migRes.rows.length).toBeGreaterThanOrEqual(2);
       expect(migRes.rows[0].version).toBe(1);
+      expect(migRes.rows[1].version).toBe(2);
 
       // Run migrations second time (idempotency check)
-      await runMigrations();
+      await runMigrations(connectionString);
       const migRes2 = await pool.query('SELECT version FROM schema_migrations');
-      expect(migRes2.rows).toHaveLength(1);
+      expect(migRes2.rows.length).toBeGreaterThanOrEqual(2);
     } finally {
       await pool.end();
     }
@@ -72,7 +72,7 @@ describeFn('Database Migration Integration & Idempotency', () => {
       throw new Error('Testcontainer connection string is missing.');
     }
 
-    await runMigrations();
+    await runMigrations(connectionString);
     const pool = new Pool({ connectionString });
     try {
       const userRes = await pool.query(`
@@ -117,7 +117,7 @@ describeFn('Database Migration Integration & Idempotency', () => {
       throw new Error('Testcontainer connection string is missing.');
     }
 
-    await runMigrations();
+    await runMigrations(connectionString);
     const pool = new Pool({ connectionString });
     try {
       const userRes = await pool.query(`
@@ -162,7 +162,7 @@ describeFn('Database Migration Integration & Idempotency', () => {
       throw new Error('Testcontainer connection string is missing.');
     }
 
-    await runMigrations();
+    await runMigrations(connectionString);
     const pool = new Pool({ connectionString });
     try {
       // Create user

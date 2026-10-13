@@ -31,6 +31,14 @@ Before initiating any task, generating plans, or proposing changes, Antigravity 
 * **Immediate Escalation & Review**:
   * AI authority is strictly bounded. Never expand your own tool or operational permissions.
   * Stop execution and request human review whenever change impact is ambiguous, a Level 4 change (security/authority/direction) is encountered, or an operation exceeds your defined role.
+* **Evidence Standards**: Evidence means literal file contents or raw command output. A summary is never evidence, and citing an unrelated file as proof is a false claim.
+* **Raw Output Means Unedited**: Save command output with `tee` to a file under /tmp and paste it exactly. Never add annotations, brackets, or exit codes the tool did not print.
+* **Implemented Is Not Verified**: Use "implemented" for code written and "verified" only for checks you actually ran. Anything that needs Docker, a database, or a network that you could not run must be marked UNVERIFIED, with the exact commands someone else can run. Never mark a task complete from an environment that cannot run its required tests.
+* **Prerequisite Checking**: Check the task's Prerequisites line before starting. If a prerequisite is not verified, stop.
+* **Design Document Protection**: Never edit a design document during an implementation task. Ask first.
+* **Strict Scope & No Unrequested Behavior**: Do not add behavior no document asks for, and do not describe a placeholder as a feature.
+* **Test Efficacy**: Every test input must actually reach the code under test. A value that is created and never passed in tests nothing.
+* **No Silent Failures**: Never wrap infrastructure errors (database, network) in a catch that returns null or a default. Let them surface to the global error handler.
 
 ---
 
