@@ -41,8 +41,9 @@
 - **In Progress**: None — Phase E ready for review.
 - **Blocked**: None.
 - **Next Tasks** (per 2026-10-13 code review, in order):
-  1. Push Phase E to GitHub (currently local only).
-  2. Review remaining findings: H1 destructive migration 002, M3 fly.toml memory contradiction, M4 Dockerfile EXPOSE mismatch, M5 real dev password in `.env.example`, M7 email-conflict → 409 mapping, M13 no CI pipeline.
+  1. ~~Push Phase E to GitHub~~ — done (`7d105da`, `37ee6f5`).
+  2. ~~H1 destructive migration 002~~ — fixed 2026-10-13 (`55d066c`): in-place `encode(digest(...), 'hex')` conversion, sessions preserved. NOTE: if a dev DB already ran the old 002, reset it — the rewritten file won't re-run (version recorded).
+  3. Remaining findings: M3 fly.toml memory contradiction, M4 Dockerfile EXPOSE mismatch, M5 real dev password in `.env.example`, M7 email-conflict → 409 mapping, M13 no CI pipeline.
   3. Decide creator-promotion path (registration currently hardcodes `reader`; no admin endpoint yet).
 - **Known Limitations / Deferred Scope**:
   - Integration test container execution requires a running Docker daemon (mitigated via `SKIP_DB_TESTS=true` in Termux).
