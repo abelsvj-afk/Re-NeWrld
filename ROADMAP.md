@@ -48,7 +48,7 @@ This roadmap defines the authoritative implementation plan for **Re:NeWrld**. It
 - **Dependencies**: Phase D.
 - **Continuous Testing**: Publishing graph algorithms tested concurrently via Vitest unit tests (pure validators, no DB).
 - **Gate**: Publishing validation test suite passing for valid and invalid graph topologies; immutability trigger verified.
-- **Deliverables**: Schema markers migration (004: `is_ending`, `start_scene_id`), graph validators (E1a/E1b), publish use case + snapshot repository (E2a), `POST /worlds/:id/publish` route (E2b), canon immutability trigger migration (005) (E2c).
+- **Deliverables**: Schema markers migration 004 (`worlds.start_scene_id` + same-world composite FK; `scenes.is_ending` column already exists — entity mapping only), graph validators (E1a/E1b), publish use case + snapshot repository (E2a), `POST /worlds/:id/publish` route (E2b), canon immutability trigger migration 005 (E2c).
 - **Completion Criteria**: Draft worlds passing validation successfully transition to versioned Published Canon snapshots; snapshots immutable at application and database layers.
 
 ### Phase F: Reader Runtime, State & Timeline Experience

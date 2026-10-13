@@ -157,19 +157,20 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 ### Roadmap Phase E: Story, Scene & Publishing Validation
 > **Status note (2026-10-13 audit)**: Phase E was marked complete, but E1/E2 were never implemented — the world module is draft CRUD only. The schema for publishing already exists (migration 001: `published_canon_snapshots`, `reader_sessions`, `reader_timelines`); only application code is missing, plus two schema gaps (no terminal-ending flag despite `detailed-design.md:63` specifying `ending: true`; no start-scene designation anywhere). Tasks below close the gap in dependency order. Design: ADR-013 (Proposed).
 
-- **Task E0: Complete Draft Schema for Publishing (start scene + terminal endings)**
+- **Task E0: Complete Draft Schema for Publishing (start scene designation + ending flag mapping)**
   - **Phase**: Phase E (Publishing)
   - **Prerequisites**: Task D2
   - **Ownership**: `db/migrations/`, `src/modules/world/domain/`
   - **File Scope**: `db/migrations/004_publishing_markers.sql` (new), `src/modules/world/domain/entities/scene.entity.ts`, `src/modules/world/domain/entities/world.entity.ts`, repository mappers
-  - **Objective**: Add the two markers the design docs assume but code lacks: `is_ending` on scenes (implements `detailed-design.md:63`'s `ending: true`) and `start_scene_id` on worlds (one entry point per world, FK-guarded). This implements defined design; it invents no new schema.
-  - **Traceability**: `docs/detailed-design.md`, ADR-013 §3
+  - **Objective**: Close the two audit gaps. (1) `worlds.start_scene_id`: genuinely missing — add the column (nullable until set) with a **same-world composite FK** `(start_scene_id, world_id) REFERENCES scenes(scene_id, world_id) ON DELETE RESTRICT`, following the existing `fk_choice_target_scene` pattern and reusing `unique_scene_per_world`. A plain FK to `scenes(scene_id)` would permit pointing at another world's scene. (2) `scenes.is_ending`: the **column already exists** in migration 001 — do NOT re-add it (that would fail the migration). Instead expose it as `isEnding` on the scene entity and round-trip it in the repository mappers. Implements `detailed-design.md:63`'s `ending: true`; invents no new schema.
+  - **Traceability**: `docs/detailed-design.md`, ADR-013 §3 (corrected 2026-10-13)
   - **Acceptance Criteria**:
-    - Migration 004 adds `scenes.is_ending BOOLEAN NOT NULL DEFAULT FALSE` and `worlds.start_scene_id UUID REFERENCES scenes(scene_id)` (nullable until set).
-    - Entities expose `isEnding` / `startSceneId` with validation; repository round-trips preserve them.
+    - Migration 004 adds only `worlds.start_scene_id` plus the composite FK constraint; it does not touch `scenes.is_ending`.
+    - Setting `start_scene_id` to a scene from a different world is rejected by the database.
+    - Scene entity exposes `isEnding`; repository round-trips preserve it and `startSceneId`.
     - Publishing (E2a) rejects worlds with no start scene set (blocker per ADR-013 §5).
-  - **Required Tests**: Unit tests for entity validation; repository mapper round-trip tests.
-  - **Definition of Done**: Schema markers present, entities enforce them, migration runs cleanly on a fresh database.
+  - **Required Tests**: Unit tests for entity validation; repository mapper round-trip tests; integration test asserting cross-world `start_scene_id` is rejected (Testcontainers — UNVERIFIED until Docker/CI runs it).
+  - **Definition of Done**: Markers present and enforced, migration runs cleanly on a fresh database, no duplicate-column failure.
 
 - **Task E1a: Implement Graph Reachability Validator (pure domain service)**
   - **Phase**: Phase E (Publishing)

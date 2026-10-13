@@ -27,15 +27,15 @@ The schema itself is ready: migration 001 already defines `published_canon_snaps
 
 ## 3. Schema Gaps Found (resolved, not invented)
 
-1. **Terminal ending marker**: `detailed-design.md` requires `ending: true` nodes. Resolution: add `is_ending BOOLEAN NOT NULL DEFAULT FALSE` to `scenes` via migration 004. This implements the defined design; it does not invent a new one.
-2. **Start scene designation**: undefined everywhere. Resolution: add `start_scene_id UUID REFERENCES scenes(scene_id)` to `worlds` via migration 004 (nullable until set; publishing requires it). One start per world, referentially intact. Chosen over a per-scene boolean because a world has exactly one entry point and the FK prevents dangling references.
+1. **Terminal ending marker**: `detailed-design.md` requires `ending: true` nodes. Audit correction (2026-10-13): the `scenes.is_ending BOOLEAN NOT NULL DEFAULT FALSE` column **already exists** in migration 001 (line 65) — the original audit missed it due to a bad grep pattern. What is actually missing is the **entity field and repository mapping**: `scene.entity.ts` does not expose `isEnding`. No new column is added; E0 wires the existing column through the entity and mappers. (Attempting to re-add the column would fail the migration.)
+2. **Start scene designation**: genuinely undefined everywhere and absent from the schema. Resolution: migration 004 adds `worlds.start_scene_id UUID` (nullable until set; publishing requires it) with a **same-world composite foreign key** `(start_scene_id, world_id) REFERENCES scenes(scene_id, world_id) ON DELETE RESTRICT` — following the existing `fk_choice_target_scene` pattern, reusing the existing `unique_scene_per_world (scene_id, world_id)` constraint. A plain FK to `scenes(scene_id)` would not prevent pointing at another world's scene; the composite FK enforces same-world ownership at the database layer.
 
 ## 4. Decisions (product-owner approved 2026-10-13)
 
 ### D1 — Canon immutability: trigger + application safeguards + tests
 `published_canon_snapshots` rows are immutable after insert. Enforcement is two-layer:
 - Application: no repository method issues UPDATE/DELETE against snapshots; publish only INSERTs.
-- Database: migration 004 adds a trigger rejecting UPDATE and DELETE on `published_canon_snapshots`.
+- Database: migration **005** adds a trigger rejecting UPDATE and DELETE on `published_canon_snapshots`. (Numbering corrected 2026-10-13: ADR originally said 004, conflicting with the publishing-markers migration; 005 matches TASKS.md E2c and ROADMAP.)
 - Refinement: the trigger must not block legitimate lifecycle operations. FK references to snapshots use `ON DELETE RESTRICT` (already the case); retention and account-deletion semantics are explicitly out of scope for this slice and must be designed before any purge tooling is built. Migration operations themselves (schema changes) are unaffected — the trigger guards row mutation, not DDL.
 - Tests: unit/integration tests asserting application paths cannot mutate canon, plus a direct-SQL test asserting the trigger rejects UPDATE/DELETE.
 
@@ -55,7 +55,7 @@ FR-05 requires the check to "detect orphaned/unreachable scenes" and "reject str
 
 ## 6. Scope and Task Order (approved)
 
-E0 (migration 004 + entity fields) → E1a (reachability) → E1b (reference validation) → E2a (publish use case + repo) → E2b (publish route) → E2c (immutability trigger + tests) → F1a/F1b/F1c (session model, init, routes) → F2a (atomic persistence). Full task specs in TASKS.md.
+E0 (migration 004: `worlds.start_scene_id` + same-world composite FK; entity exposes existing `is_ending` column) → E1a (reachability) → E1b (reference validation) → E2a (publish use case + repo) → E2b (publish route) → E2c (migration 005 immutability trigger + tests) → F1a/F1b/F1c (session model, init, routes) → F2a (atomic persistence). Full task specs in TASKS.md.
 
 ## 7. Change Classification
 
