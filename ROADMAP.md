@@ -28,12 +28,12 @@ This roadmap defines the authoritative implementation plan for **Re:NeWrld**. It
 - **Completion Criteria**: Migrations apply cleanly, integration test harness successfully communicates with database container.
 
 ### Phase C: Authentication & Authorization (RBAC)
-- **Objective**: Implement user credentials, session-based authentication using Secure, HttpOnly, SameSite=Strict cookies backed by server-side session validation, and Fastify RBAC middleware enforcing Creator vs. Reader permissions (ADR-004).
+- **Objective**: Implement user credentials, session-based authentication using Secure, HttpOnly, SameSite=Strict cookies backed by server-side session validation, Fastify RBAC middleware enforcing Creator vs. Reader permissions (ADR-004), and self-serve password reset via time-limited single-use email tokens (FR-13, ADR-012).
 - **Dependencies**: Phase B.
 - **Continuous Testing**: RBAC and session middleware unit tests developed concurrently.
 - **Gate**: RBAC middleware unit tests passing; session creation and revocation verified.
-- **Deliverables**: `modules/auth/` domain entities, use cases, repository adapters, and RBAC security middleware.
-- **Completion Criteria**: Unauthenticated requests rejected; Creator and Reader roles correctly authorized/restricted.
+- **Deliverables**: `modules/auth/` domain entities, use cases, repository adapters, RBAC security middleware, password-reset use cases + token store + email port.
+- **Completion Criteria**: Unauthenticated requests rejected; Creator and Reader roles correctly authorized/restricted; users can recover accounts via reset flow without operator intervention.
 
 ### Phase D: Creator & World Authoring Subsystem
 - **Objective**: Implement authoring domain models and use cases for worlds, characters, story arcs, scenes, and draft nodes (`modules/world/`).

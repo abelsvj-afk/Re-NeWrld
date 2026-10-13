@@ -30,6 +30,9 @@ This document defines the formal requirements for **Re:NeWrld**. All requirement
 - **FR-11 [SHOULD]**: Readers SHOULD be able to inspect their current inventory, relationship standings, and active state flags through a character sheet view.
 - **FR-12 [FUTURE]**: Readers SHOULD be able to bookmark scenes, save/load multiple playthrough slots, and view branching history trees.
 
+### 2.3 Account & Authentication
+- **FR-13 [MUST]**: Users MUST be able to recover a lost password via a time-limited, single-use reset token delivered to their registered email address. The request endpoint MUST NOT reveal whether an email address is registered. A successful reset MUST invalidate all existing sessions for the account.
+
 ---
 
 ## 3. Non-Functional Requirements

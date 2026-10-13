@@ -109,6 +109,23 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Required Tests**: Integration tests verifying route protection for Creator-only and Reader-only endpoints.
   - **Definition of Done**: RBAC middleware active across API route definitions.
 
+- **Task C4: Implement Password Reset & Account Recovery**
+  - **Phase**: Phase C (Auth/RBAC)
+  - **Prerequisites**: Task C2 (session service with `revokeAllUserSessions`), ADR-012 accepted, email provider selected (open decision)
+  - **Ownership**: `src/modules/auth/`
+  - **File Scope**: `src/modules/auth/application/request-password-reset.use-case.ts`, `src/modules/auth/application/confirm-password-reset.use-case.ts`, `src/modules/auth/application/ports/email-service.port.ts`, `src/modules/auth/infrastructure/persistence/postgres-password-reset.repository.ts`, `src/modules/auth/infrastructure/email/*` (adapter), `src/modules/auth/http/auth.routes.ts`, `db/migrations/003_password_reset_tokens.sql`, session janitor extension in `src/server.ts`
+  - **Objective**: Implement FR-13 / US-A01: time-limited, single-use, hashed reset tokens delivered via email; anti-enumeration request endpoint; session revocation on confirm.
+  - **Traceability**: `docs/requirements.md` (FR-13), `docs/user-stories.md` (US-A01), ADR-012, `docs/threat-model.md`
+  - **Acceptance Criteria**:
+    - `POST /auth/password-reset/request` returns `202` with identical timing/response whether or not the email is registered.
+    - Reset tokens are 256-bit random, SHA-256 hashed at rest, single-use, 15-minute expiry; raw tokens never logged or persisted.
+    - `POST /auth/password-reset/confirm` with a valid token updates the password (existing scrypt service), marks the token used, and revokes all sessions via `revokeAllUserSessions`.
+    - Expired, reused, or invalid tokens return a generic `400`.
+    - Strict per-IP rate limits on both endpoints (abuse target).
+    - Expired tokens purged by the janitor.
+  - **Required Tests**: Unit tests for both use cases (token lifecycle, expiry, reuse, anti-enumeration); integration tests for the endpoints including rate-limit behavior and session revocation.
+  - **Definition of Done**: Full request→email→confirm→login-with-new-password flow verified; ADR-012 marked Accepted; threat-model rows marked Mitigated.
+
 ---
 
 ### Roadmap Phase D: Creator & World Authoring Subsystem

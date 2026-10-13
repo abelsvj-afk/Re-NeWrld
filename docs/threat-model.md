@@ -33,6 +33,8 @@ Security cannot guarantee zero breaches. The engineering objective is to minimiz
 | **Data Exfiltration via AI** | AI leaking internal secrets through tool calls | Critical | Tool argument validation, blocking external sink requests with secrets, least privilege | Planned |
 | **Memory Poisoning** | Malicious injection into agent long-term memory | High | Memory provenance verification, human approval before committing to memory | Planned |
 | **Denial of Wallet (AI Costs)**| Excessive token consumption, infinite loops | Medium | Token caps per request, user budget limits, rate limits, circuit breakers | Planned |
+| **Password Reset Token Theft** | Intercepted or leaked reset token used for account takeover | Critical | 256-bit random tokens, SHA-256 hashed at rest, single-use, 15-minute expiry, all sessions revoked on confirm | Planned (ADR-012) |
+| **Reset Endpoint Abuse & Enumeration** | Mass reset requests for spam, DoS, or account-existence probing | High | Always-202 anti-enumeration response, strict per-IP rate limiting (5/hour), audit logging of reset events | Planned (ADR-012) |
 
 ---
 

@@ -58,3 +58,6 @@
   - Start script uses conditional `node -e` dotenv hack (old `--env-file .env` crashed without `.env` — verified).
   - CI workflow committed locally (`a7d0783`) but not on GitHub yet — push blocked by billing hold; Actions workflow will activate once Actions is re-enabled.
   - Pre-push hook requires `DATABASE_URL` to be a syntactically valid postgres URL at import time (env.ts validation); the hook exports a dummy value if unset — unit tests never open a connection.
+  - 2026-10-13: test npm scripts now inline `APP_ENV=test` + dummy `DATABASE_URL` (`34fd25e`), so `npm run test:unit` works with zero manual env setup anywhere (previously the hook did this only for pre-push).
+- **Planned Scope Addition (no code yet — Level 4, design pending approval)**:
+  - Password reset & account recovery (FR-13, US-A01, Task C4, ADR-012 **Proposed**): request/confirm endpoints, hashed single-use 15-min tokens, anti-enumeration, session revocation. Email provider is an OPEN decision (no provider invented); ADR must move to Accepted before implementation.

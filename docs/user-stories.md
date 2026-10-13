@@ -56,6 +56,15 @@ This document defines the comprehensive user stories and end-to-end workflows re
 - **US-C16 [FUTURE]: Collaborative Multi-Author Workspace**
   - *As a* Creator, *I want to* invite co-writers and editors with granular role permissions into my world workspace, *so that* team-based story world authoring is supported.
 
+### 2.5 Account Security & Recovery (MVP)
+- **US-A01 [MVP]: Password Reset & Account Recovery**
+  - *As a* User (Creator or Reader), *I want to* reset my password using a secure link sent to my registered email, *so that* I can regain access if I forget my password.
+  - *Acceptance Criteria*:
+    1. User can request a reset link by submitting their email address; the response is identical whether or not the email is registered.
+    2. Reset link contains a single-use token valid for 15 minutes.
+    3. Submitting a valid token with a new password updates the password, invalidates the token, and signs the user out of all other sessions.
+    4. Expired, reused, or invalid tokens are rejected with a generic error.
+
 ---
 
 ## 3. Reader User Stories & Workflows
