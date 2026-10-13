@@ -1,3 +1,4 @@
+import { WorldValidationError } from '../errors/world.errors.js';
 import { ChoiceId } from '../value-objects/choice-id.value-object.js';
 import { WorldId } from '../value-objects/world-id.value-object.js';
 import { SceneId } from '../value-objects/scene-id.value-object.js';
@@ -30,11 +31,11 @@ export class Choice {
 
   private constructor(props: ChoiceProps) {
     if (!props.text || typeof props.text !== 'string' || props.text.trim().length === 0) {
-      throw new Error('Choice text cannot be empty');
+      throw new WorldValidationError('Choice text cannot be empty');
     }
     const order = props.sortOrder ?? 0;
     if (typeof order !== 'number' || !Number.isFinite(order)) {
-      throw new Error('Choice sortOrder must be a finite number');
+      throw new WorldValidationError('Choice sortOrder must be a finite number');
     }
     const validatedConditions = ConditionSchema.parse(props.conditions ?? {});
     const validatedMutations = MutationSchema.parse(props.mutations ?? {});
@@ -97,7 +98,7 @@ export class Choice {
 
   public updateText(text: string): void {
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
-      throw new Error('Choice text cannot be empty');
+      throw new WorldValidationError('Choice text cannot be empty');
     }
     this.text = text.trim();
     this.updatedAt = new Date();
@@ -122,7 +123,7 @@ export class Choice {
 
   public updateSortOrder(sortOrder: number): void {
     if (typeof sortOrder !== 'number' || !Number.isFinite(sortOrder)) {
-      throw new Error('Choice sortOrder must be a finite number');
+      throw new WorldValidationError('Choice sortOrder must be a finite number');
     }
     this.sortOrder = sortOrder;
     this.updatedAt = new Date();

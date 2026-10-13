@@ -1,3 +1,4 @@
+import { WorldValidationError } from '../errors/world.errors.js';
 import { SceneId } from '../value-objects/scene-id.value-object.js';
 import { WorldId } from '../value-objects/world-id.value-object.js';
 import { ChapterId } from '../value-objects/chapter-id.value-object.js';
@@ -28,10 +29,10 @@ export class Scene {
 
   private constructor(props: SceneProps) {
     if (!props.title || typeof props.title !== 'string' || props.title.trim().length === 0) {
-      throw new Error('Scene title cannot be empty');
+      throw new WorldValidationError('Scene title cannot be empty');
     }
     if (typeof props.prose !== 'string') {
-      throw new Error('Scene prose must be a string');
+      throw new WorldValidationError('Scene prose must be a string');
     }
     const validatedMetadata = SceneMetadataSchema.parse(props.metadata ?? {});
 
@@ -88,7 +89,7 @@ export class Scene {
 
   public updateTitle(title: string): void {
     if (!title || typeof title !== 'string' || title.trim().length === 0) {
-      throw new Error('Scene title cannot be empty');
+      throw new WorldValidationError('Scene title cannot be empty');
     }
     this.title = title.trim();
     this.updatedAt = new Date();
@@ -96,7 +97,7 @@ export class Scene {
 
   public updateProse(prose: string): void {
     if (typeof prose !== 'string') {
-      throw new Error('Scene prose must be a string');
+      throw new WorldValidationError('Scene prose must be a string');
     }
     this.prose = prose;
     this.updatedAt = new Date();

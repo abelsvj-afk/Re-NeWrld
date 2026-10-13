@@ -16,10 +16,7 @@ interface AuthSessionRow {
   created_at: string | Date;
 }
 
-export function cookieSecureForEnv(appEnv: string): boolean {
-  const normalized = (appEnv || '').trim().toLowerCase();
-  return normalized !== 'development' && normalized !== 'test';
-}
+export { cookieSecureForEnv } from '../../domain/ports/session.port.js';
 
 export class SessionService {
   private static readonly DEFAULT_SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days

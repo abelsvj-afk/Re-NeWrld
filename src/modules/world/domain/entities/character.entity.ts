@@ -1,3 +1,4 @@
+import { WorldValidationError } from '../errors/world.errors.js';
 import { CharacterId } from '../value-objects/character-id.value-object.js';
 import { WorldId } from '../value-objects/world-id.value-object.js';
 import { CharacterRole } from '../value-objects/character-role.value-object.js';
@@ -26,7 +27,7 @@ export class Character {
 
   private constructor(props: CharacterProps) {
     if (!props.name || typeof props.name !== 'string' || props.name.trim().length === 0) {
-      throw new Error('Character name cannot be empty');
+      throw new WorldValidationError('Character name cannot be empty');
     }
     const validatedRoles = Character.validateAndCloneRoles(props.roleTypes);
     const validatedAttributes = CharacterAttributesSchema.parse(props.attributes ?? {});
@@ -43,7 +44,7 @@ export class Character {
 
   private static validateAndCloneRoles(roleTypes: CharacterRole[]): CharacterRole[] {
     if (!roleTypes || !Array.isArray(roleTypes) || roleTypes.length === 0) {
-      throw new Error('Character must have at least one role type');
+      throw new WorldValidationError('Character must have at least one role type');
     }
     const seen = new Set<string>();
     const cloned: CharacterRole[] = [];
@@ -56,7 +57,7 @@ export class Character {
       const key = type === 'custom' ? `custom:${(r.getCustomRoleName() ?? '').trim().toLowerCase()}` : type;
 
       if (seen.has(key)) {
-        throw new Error(`Duplicate character role assignment is prohibited: ${type}${type === 'custom' ? ` (${r.getCustomRoleName()})` : ''}`);
+        throw new WorldValidationError(`Duplicate character role assignment is prohibited: ${type}${type === 'custom' ? ` (${r.getCustomRoleName()})` : ''}`);
       }
       seen.add(key);
       cloned.push(new CharacterRole(type, r.getCustomRoleName()));
@@ -102,7 +103,7 @@ export class Character {
 
   public updateName(name: string): void {
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
-      throw new Error('Character name cannot be empty');
+      throw new WorldValidationError('Character name cannot be empty');
     }
     this.name = name.trim();
     this.updatedAt = new Date();

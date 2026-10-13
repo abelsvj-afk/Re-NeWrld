@@ -4,6 +4,14 @@ import { SessionVerifier, SessionInfo, SESSION_COOKIE_NAME } from '../../modules
 export { SessionVerifier, SessionInfo, SESSION_COOKIE_NAME };
 
 /**
+ * Extracts the raw session token from the request's session cookie, if present.
+ * Exported so route handlers (e.g. logout) can revoke the exact token presented.
+ */
+export function getRequestToken(request: FastifyRequest): string | null {
+  return parseCookieHeader(request.headers.cookie, SESSION_COOKIE_NAME);
+}
+
+/**
  * Helper to parse cookies from the request headers.
  */
 function parseCookieHeader(cookieHeader?: string, name: string = SESSION_COOKIE_NAME): string | null {

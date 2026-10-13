@@ -4,12 +4,27 @@ import crypto from 'crypto';
 import { ZodError } from 'zod';
 import { env } from './config/env.js';
 import { logger } from './shared/logger/pino.logger.js';
-import { WorldValidationError } from './modules/world/domain/errors/world.errors.js';
+import { AuthRepositoryPort } from './modules/auth/domain/ports/auth.repository.port.js';
+import { WorldRepositoryPort } from './modules/world/domain/ports/world.repository.port.js';
+import { SessionServicePort } from './modules/auth/domain/ports/session.port.js';
+import { PostgresAuthRepository } from './modules/auth/infrastructure/persistence/postgres-auth.repository.js';
+import { PostgresWorldRepository } from './modules/world/infrastructure/persistence/postgres-world.repository.js';
+import { SessionService } from './modules/auth/infrastructure/services/session.service.js';
+import { PasswordService } from './modules/auth/infrastructure/services/password.service.js';
+import { authRoutes } from './modules/auth/http/auth.routes.js';
+import { worldRoutes } from './modules/world/http/world.routes.js';
 
 // Bounded validation regex for incoming x-request-id (alphanumeric, hyphens, underscores, periods, colons; 1-128 chars)
 const REQUEST_ID_REGEX = /^[a-zA-Z0-9_\-\.:]{1,128}$/;
 
-export async function buildApp(customLogger?: pino.Logger): Promise<FastifyInstance<RawServerDefault, RawRequestDefaultExpression<RawServerDefault>, RawReplyDefaultExpression<RawServerDefault>, pino.Logger>> {
+export interface AppDeps {
+  authRepository?: AuthRepositoryPort;
+  worldRepository?: WorldRepositoryPort;
+  sessionService?: SessionServicePort;
+  passwordService?: PasswordService;
+}
+
+export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Promise<FastifyInstance<RawServerDefault, RawRequestDefaultExpression<RawServerDefault>, RawReplyDefaultExpression<RawServerDefault>, pino.Logger>> {
   const activeLogger = customLogger || logger;
   const app = Fastify({
     logger: activeLogger,
@@ -58,6 +73,17 @@ export async function buildApp(customLogger?: pino.Logger): Promise<FastifyInsta
       error: message,
       statusCode,
     });
+  });
+
+  // Resolve dependencies (real infrastructure by default; fakes injectable for tests)
+  const authRepository = deps?.authRepository ?? new PostgresAuthRepository();
+  const worldRepository = deps?.worldRepository ?? new PostgresWorldRepository();
+  const sessionService = deps?.sessionService ?? new SessionService();
+  const passwordService = deps?.passwordService ?? new PasswordService();
+
+  await app.register(async (instance) => {
+    await authRoutes(instance, { authRepository, sessionService, passwordService });
+    await worldRoutes(instance, { worldRepository, sessionVerifier: sessionService.getVerifier() });
   });
 
   // Health check endpoint

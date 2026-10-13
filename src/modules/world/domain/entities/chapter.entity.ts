@@ -1,3 +1,4 @@
+import { WorldValidationError } from '../errors/world.errors.js';
 import { ChapterId } from '../value-objects/chapter-id.value-object.js';
 import { WorldId } from '../value-objects/world-id.value-object.js';
 
@@ -20,11 +21,11 @@ export class Chapter {
 
   private constructor(props: ChapterProps) {
     if (!props.title || typeof props.title !== 'string' || props.title.trim().length === 0) {
-      throw new Error('Chapter title cannot be empty');
+      throw new WorldValidationError('Chapter title cannot be empty');
     }
     const order = props.sortOrder ?? 0;
     if (typeof order !== 'number' || !Number.isFinite(order)) {
-      throw new Error('Chapter sortOrder must be a finite number');
+      throw new WorldValidationError('Chapter sortOrder must be a finite number');
     }
 
     this.chapterId = props.chapterId;
@@ -65,7 +66,7 @@ export class Chapter {
 
   public updateTitle(title: string): void {
     if (!title || typeof title !== 'string' || title.trim().length === 0) {
-      throw new Error('Chapter title cannot be empty');
+      throw new WorldValidationError('Chapter title cannot be empty');
     }
     this.title = title.trim();
     this.updatedAt = new Date();
@@ -73,7 +74,7 @@ export class Chapter {
 
   public updateSortOrder(sortOrder: number): void {
     if (typeof sortOrder !== 'number' || !Number.isFinite(sortOrder)) {
-      throw new Error('Chapter sortOrder must be a finite number');
+      throw new WorldValidationError('Chapter sortOrder must be a finite number');
     }
     this.sortOrder = sortOrder;
     this.updatedAt = new Date();
