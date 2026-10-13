@@ -1,6 +1,9 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
+import { SceneRepositoryPort } from '../domain/ports/scene.repository.port.js';
+import { ChoiceRepositoryPort } from '../domain/ports/choice.repository.port.js';
+import { CanonRepositoryPort } from '../domain/ports/canon.repository.port.js';
 import { World } from '../domain/entities/world.entity.js';
 import { WorldId } from '../domain/value-objects/world-id.value-object.js';
 import { WorldMetadataSchema } from '../domain/value-objects/world-schemas.js';
@@ -8,12 +11,16 @@ import { CreateWorldUseCase } from '../application/create-world.use-case.js';
 import { GetWorldUseCase } from '../application/get-world.use-case.js';
 import { UpdateWorldUseCase } from '../application/update-world.use-case.js';
 import { DeleteWorldUseCase } from '../application/delete-world.use-case.js';
+import { PublishWorldUseCase } from '../application/publish-world.use-case.js';
 import { SessionVerifier } from '../../auth/domain/ports/session.port.js';
 import { authenticate, requireCreator } from '../../../shared/middleware/auth.middleware.js';
 import { BadRequestError } from '../../../shared/http/http.errors.js';
 
 export interface WorldRouteDeps {
   worldRepository: WorldRepositoryPort;
+  sceneRepository: SceneRepositoryPort;
+  choiceRepository: ChoiceRepositoryPort;
+  canonRepository: CanonRepositoryPort;
   sessionVerifier: SessionVerifier;
 }
 
@@ -59,6 +66,12 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
   const getWorld = new GetWorldUseCase(deps.worldRepository);
   const updateWorld = new UpdateWorldUseCase(deps.worldRepository);
   const deleteWorld = new DeleteWorldUseCase(deps.worldRepository);
+  const publishWorld = new PublishWorldUseCase(
+    deps.worldRepository,
+    deps.sceneRepository,
+    deps.choiceRepository,
+    deps.canonRepository
+  );
   const creatorOnly = [authenticate(deps.sessionVerifier), requireCreator()];
 
   app.post('/worlds', { preHandler: creatorOnly }, async (request, reply) => {
@@ -105,5 +118,18 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       creatorId: request.user!.userId,
     });
     return reply.code(204).send();
+  });
+
+  app.post('/worlds/:id/publish', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const result = await publishWorld.execute({
+      worldId: parseWorldId(params.id),
+      creatorId: request.user!.userId,
+    });
+    return reply.code(201).send({
+      snapshotId: result.snapshot.getSnapshotId().getValue(),
+      versionNumber: result.snapshot.getVersionNumber(),
+      warnings: result.warnings,
+    });
   });
 }

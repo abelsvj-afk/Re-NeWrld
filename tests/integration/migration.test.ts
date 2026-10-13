@@ -13,8 +13,16 @@ describeFn('Database Migration Integration & Idempotency', () => {
 
   beforeAll(async () => {
     try {
-      container = await new PostgreSqlContainer('postgres:15-alpine').start();
-      connectionString = container.getConnectionUri();
+      // TEST_DATABASE_URL: run against a real, externally-managed PostgreSQL
+      // (e.g. a local install) instead of Testcontainers. Same tests against
+      // the same real database engine — only the provisioning differs.
+      const externalUrl = process.env.TEST_DATABASE_URL;
+      if (externalUrl) {
+        connectionString = externalUrl;
+      } else {
+        container = await new PostgreSqlContainer('postgres:15-alpine').start();
+        connectionString = container.getConnectionUri();
+      }
     } catch (err) {
       throw new Error(`Docker daemon / PostgreSQL container startup failed and intentional skip mechanism is not enabled: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -76,8 +84,9 @@ describeFn('Database Migration Integration & Idempotency', () => {
     const pool = new Pool({ connectionString });
     try {
       const userRes = await pool.query(`
-        INSERT INTO users (email, password_hash, role) 
-        VALUES ('creator@test.com', 'hash', 'creator') 
+        INSERT INTO users (email, password_hash, role)
+        VALUES ('creator@test.com', 'hash', 'creator')
+        ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
         RETURNING user_id
       `);
       const userId = userRes.rows[0].user_id;
@@ -121,8 +130,9 @@ describeFn('Database Migration Integration & Idempotency', () => {
     const pool = new Pool({ connectionString });
     try {
       const userRes = await pool.query(`
-        INSERT INTO users (email, password_hash, role) 
-        VALUES ('creator@test.com', 'hash', 'creator') 
+        INSERT INTO users (email, password_hash, role)
+        VALUES ('creator@test.com', 'hash', 'creator')
+        ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
         RETURNING user_id
       `);
       const userId = userRes.rows[0].user_id;
@@ -167,8 +177,9 @@ describeFn('Database Migration Integration & Idempotency', () => {
     try {
       // Create user
       const userRes = await pool.query(`
-        INSERT INTO users (email, password_hash, role) 
-        VALUES ('creator@test.com', 'hash', 'creator') 
+        INSERT INTO users (email, password_hash, role)
+        VALUES ('creator@test.com', 'hash', 'creator')
+        ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
         RETURNING user_id
       `);
       const userId = userRes.rows[0].user_id;
