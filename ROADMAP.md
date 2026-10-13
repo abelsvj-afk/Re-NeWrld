@@ -44,7 +44,7 @@ This roadmap defines the authoritative implementation plan for **Re:NeWrld**. It
 - **Completion Criteria**: Creators can create, update, and manage draft world authoring graphs.
 
 ### Phase E: Story, Scene & Publishing Validation
-- **Objective**: Implement graph traversal validation, reachability checks, and immutable Published Canon snapshot generation. **Status (2026-10-13 audit)**: the application code for this phase was never written — the world module is draft CRUD only. The schema exists (migration 001); tasks E0–E2c in TASKS.md close the gap in dependency order before Phase F begins. Design: ADR-013 (Proposed).
+- **Objective**: Implement graph traversal validation, reachability checks, and immutable Published Canon snapshot generation. **Status (2026-10-13)**: implemented and code-reviewed — E0 (migration 004), E1a/E1b (validators), E2a (publish use case + snapshot repository), E2b (`POST /worlds/:id/publish` route), E2c (immutability trigger migration 005); tsc clean, 166/166 unit tests. PostgreSQL integration (concurrent publishing, JSONB round-trip, trigger behavior, migration 005 execution) UNVERIFIED until Testcontainers/CI runs it. Design: ADR-013 (Proposed).
 - **Dependencies**: Phase D.
 - **Continuous Testing**: Publishing graph algorithms tested concurrently via Vitest unit tests (pure validators, no DB).
 - **Gate**: Publishing validation test suite passing for valid and invalid graph topologies; immutability trigger verified.
@@ -52,7 +52,7 @@ This roadmap defines the authoritative implementation plan for **Re:NeWrld**. It
 - **Completion Criteria**: Draft worlds passing validation successfully transition to versioned Published Canon snapshots; snapshots immutable at application and database layers.
 
 ### Phase F: Reader Runtime, State & Timeline Experience
-- **Objective**: Implement active reader session initialization bound to specific published canon versions, variable state maps, and append-only timeline logs (`modules/session/`). **Prerequisite**: Phase E gap-closure (E0–E2c) verified — F-tasks begin only after E2c per AGENTS.md prerequisite rules. Idempotency contract specified (ADR-013 D3); enforcement lands with Phase G choice submission.
+- **Objective**: Implement active reader session initialization bound to specific published canon versions, variable state maps, and append-only timeline logs (`modules/session/`). **Prerequisite**: Phase E gap-closure (E0–E2c) implemented & code-reviewed 2026-10-13 — PostgreSQL integration UNVERIFIED (tracked separately); F-tasks begin only after product-owner approval of the Phase F design per AGENTS.md prerequisite rules. Idempotency contract specified (ADR-013 D3); enforcement lands with Phase G choice submission.
 - **Dependencies**: Phase C (Reader Auth), Phase E (Published Canon).
 - **Continuous Testing**: Session state and timeline append unit tests executed concurrently; transaction tests via Testcontainers (UNVERIFIED until Docker/CI runs them).
 - **Gate**: ACID transaction tests ensuring atomic Reader State and Timeline recording; session ownership isolation verified.

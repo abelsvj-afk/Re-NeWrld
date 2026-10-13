@@ -19,8 +19,17 @@ describeFn('PostgresWorldRepository Integration (UNVERIFIED if Docker unavailabl
 
   beforeAll(async () => {
     try {
-      container = await new PostgreSqlContainer('postgres:15-alpine').start();
-      const connectionString = container.getConnectionUri();
+      // TEST_DATABASE_URL: run against a real, externally-managed PostgreSQL
+      // (e.g. a local install) instead of Testcontainers. Same tests against
+      // the same real database engine — only the provisioning differs.
+      const externalUrl = process.env.TEST_DATABASE_URL;
+      let connectionString: string;
+      if (externalUrl) {
+        connectionString = externalUrl;
+      } else {
+        container = await new PostgreSqlContainer('postgres:15-alpine').start();
+        connectionString = container.getConnectionUri();
+      }
       await runMigrations(connectionString);
       setPool(connectionString);
 

@@ -1,4 +1,5 @@
 import { WorldId } from '../value-objects/world-id.value-object.js';
+import { SceneId } from '../value-objects/scene-id.value-object.js';
 import { WorldStatus } from '../value-objects/world-status.value-object.js';
 import { WorldMetadata, WorldMetadataSchema } from '../value-objects/world-schemas.js';
 import { UserId } from '../../../auth/domain/value-objects/user-id.value-object.js';
@@ -11,6 +12,7 @@ export interface WorldProps {
   description?: string | null;
   metadata?: WorldMetadata;
   status?: WorldStatus;
+  startSceneId?: SceneId | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -22,6 +24,7 @@ export class World {
   private description: string | null;
   private metadata: WorldMetadata;
   private status: WorldStatus;
+  private startSceneId: SceneId | null;
   private readonly createdAt: Date;
   private updatedAt: Date;
 
@@ -42,6 +45,7 @@ export class World {
     this.description = validatedDescription;
     this.metadata = structuredClone(validatedMetadata);
     this.status = props.status ?? new WorldStatus('draft');
+    this.startSceneId = props.startSceneId ?? null;
     this.createdAt = props.createdAt ? new Date(props.createdAt.getTime()) : new Date();
     this.updatedAt = props.updatedAt ? new Date(props.updatedAt.getTime()) : new Date();
   }
@@ -89,6 +93,15 @@ export class World {
 
   public getStatus(): WorldStatus {
     return this.status;
+  }
+
+  public getStartSceneId(): SceneId | null {
+    return this.startSceneId;
+  }
+
+  public setStartSceneId(sceneId: SceneId | null): void {
+    this.startSceneId = sceneId;
+    this.updatedAt = new Date();
   }
 
   public getCreatedAt(): Date {
