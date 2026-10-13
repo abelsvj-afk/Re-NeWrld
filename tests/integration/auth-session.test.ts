@@ -23,8 +23,16 @@ describeFn('Authentication & Session Management Integration (C2 Secure Hashing &
 
   beforeAll(async () => {
     try {
-      container = await new PostgreSqlContainer('postgres:15-alpine').start();
-      connectionString = container.getConnectionUri();
+      // TEST_DATABASE_URL: run against a real, externally-managed PostgreSQL
+      // (e.g. a local install) instead of Testcontainers. Same tests against
+      // the same real database engine — only the provisioning differs.
+      const externalUrl = process.env.TEST_DATABASE_URL;
+      if (externalUrl) {
+        connectionString = externalUrl;
+      } else {
+        container = await new PostgreSqlContainer('postgres:15-alpine').start();
+        connectionString = container.getConnectionUri();
+      }
       setPool(connectionString);
       await runMigrations(connectionString);
     } catch (err) {

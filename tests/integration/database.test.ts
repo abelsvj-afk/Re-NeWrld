@@ -10,8 +10,17 @@ describeFn('PostgreSQL Connection Pool & Database Integration', () => {
 
   beforeAll(async () => {
     try {
-      container = await new PostgreSqlContainer('postgres:15-alpine').start();
-      const connectionString = container.getConnectionUri();
+      // TEST_DATABASE_URL: run against a real, externally-managed PostgreSQL
+      // (e.g. a local install) instead of Testcontainers. Same tests against
+      // the same real database engine — only the provisioning differs.
+      const externalUrl = process.env.TEST_DATABASE_URL;
+      let connectionString: string;
+      if (externalUrl) {
+        connectionString = externalUrl;
+      } else {
+        container = await new PostgreSqlContainer('postgres:15-alpine').start();
+        connectionString = container.getConnectionUri();
+      }
       setPool(connectionString);
     } catch (err) {
       throw new Error(`Docker daemon / PostgreSQL container startup failed and intentional skip mechanism is not enabled: ${err instanceof Error ? err.message : String(err)}`);
@@ -28,7 +37,7 @@ describeFn('PostgreSQL Connection Pool & Database Integration', () => {
   });
 
   it('should connect to PostgreSQL via the B1 pool and execute a test query', async () => {
-    if (!container) {
+    if (!container && !process.env.TEST_DATABASE_URL) {
       throw new Error('Integration test failed: PostgreSQL container is not running and SKIP_DB_TESTS is not enabled.');
     }
 
