@@ -7,10 +7,10 @@
     "build": "tsc",
     "start": "node -e \"const fs = require('fs'); if (fs.existsSync('.env')) process.loadEnvFile('.env'); require('./dist/server.js');\"",
     "dev": "tsx --env-file .env watch src/server.ts",
-    "test": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest run",
+    "test": "APP_ENV=test vitest run",
     "test:watch": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest",
-    "test:unit": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest run tests/unit",
-    "test:integration": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest run tests/integration",
+    "test:unit": "APP_ENV=test DATABASE_URL=postgresql://dummy/dummy vitest run tests/unit",
+    "test:integration": "APP_ENV=test vitest run tests/integration",
     "migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
@@ -25,6 +25,7 @@
     "@testcontainers/postgresql": "^10.28.0",
     "@types/node": "^20.14.10",
     "@types/pg": "^8.23.1",
+    "@vitest/coverage-v8": "^2.1.9",
     "tsx": "^4.16.2",
     "typescript": "^5.5.3",
     "vitest": "^2.0.3"

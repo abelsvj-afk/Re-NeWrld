@@ -23,6 +23,9 @@ function startSessionJanitor(app: { log: { info: (o: object, m: string) => void;
       if (removedTokens > 0) {
         app.log.info({ removedTokens }, 'Cleaned up expired password-reset tokens');
       }
+      // TODO Phase H: idempotency janitor — see TASKS.md H-idempotency-janitor.
+      // PostgresIdempotencyRepository.deleteExpired() exists but is never
+      // called; expired idempotency_keys rows accumulate until wired here.
     } catch (err) {
       app.log.error({ err }, 'Expired session cleanup failed');
     }

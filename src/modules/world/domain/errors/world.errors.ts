@@ -23,11 +23,12 @@ export class WorldValidationError extends WorldError {
 import type {
   GraphValidationError,
   DanglingReference,
+  SemanticBlocker,
 } from '../services/graph-validator.js';
 
 export interface PublishingValidationReport {
   /** Blocking conditions that prevented publication. */
-  blockers: Array<GraphValidationError | DanglingReference>;
+  blockers: Array<GraphValidationError | DanglingReference | SemanticBlocker>;
   /** Unreachable-scene warnings; preserved for the caller, never blockers. */
   warnings: string[];
 }

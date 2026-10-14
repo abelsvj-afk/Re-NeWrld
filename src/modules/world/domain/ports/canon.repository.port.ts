@@ -1,6 +1,7 @@
 import type pkg from 'pg';
 import { CanonSnapshot } from '../entities/canon-snapshot.entity.js';
 import { WorldId } from '../value-objects/world-id.value-object.js';
+import { SnapshotId } from '../value-objects/snapshot-id.value-object.js';
 
 /**
  * Persistence port for published canon snapshots (Task E2a).
@@ -31,4 +32,14 @@ export interface CanonRepositoryPort {
    * implementation never silently falls back to an older version.
    */
   findLatestByWorldId(worldId: WorldId): Promise<CanonSnapshot | null>;
+
+  /**
+   * Returns the snapshot with the given id, or `null` when it does not
+   * exist. Used by choice submission (G2) to load the session's PINNED
+   * snapshot — the version active at session initialization, not the
+   * latest. `canon_data` is validated against `CanonDataSchema` on read;
+   * a corrupt snapshot throws `CorruptCanonSnapshotError` (HTTP 500),
+   * never a silent fallback (ADR-014 D1, ADR-015 D3 step 5).
+   */
+  findById(snapshotId: SnapshotId): Promise<CanonSnapshot | null>;
 }
