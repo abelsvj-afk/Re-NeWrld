@@ -103,7 +103,10 @@ export interface ChoiceSummary {
 }
 
 export const worldsApi = {
-  list: () => api<WorldSummary[]>('/worlds'),
+  list: async (): Promise<WorldSummary[]> => {
+    const res = await api<{ worlds: WorldSummary[] } | WorldSummary[]>('/worlds');
+    return Array.isArray(res) ? res : res.worlds ?? [];
+  },
   create: (input: { title: string; description?: string }) =>
     api<WorldSummary>('/worlds', { method: 'POST', body: input }),
   get: (id: string) => api<WorldSummary & { scenes: unknown[] }>(`/worlds/${id}`),
