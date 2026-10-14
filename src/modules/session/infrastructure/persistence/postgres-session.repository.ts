@@ -6,10 +6,12 @@ import {
 import { ReaderSession, SessionState } from '../../domain/entities/reader-session.entity.js';
 import { SessionId } from '../../domain/value-objects/session-id.value-object.js';
 import { SessionStatus } from '../../domain/value-objects/session-status.value-object.js';
-import { WorldId } from '../../../world/domain/value-objects/world-id.value-object.js';
-import { SceneId } from '../../../world/domain/value-objects/scene-id.value-object.js';
-import { SnapshotId } from '../../../world/domain/value-objects/snapshot-id.value-object.js';
-import { ChoiceId } from '../../../world/domain/value-objects/choice-id.value-object.js';
+import {
+  WorldId,
+  SceneId,
+  SnapshotId,
+  ChoiceId,
+} from '../../../world/application/index.js';
 import { UserId } from '../../../auth/domain/value-objects/user-id.value-object.js';
 import {
   SessionNotFoundError,
