@@ -293,10 +293,13 @@ describe('E2a: PublishWorldUseCase', () => {
     expect(Object.keys(canonData).sort()).toEqual([
       'canon_schema_version',
       'choices',
+      'condition_grammar_version',
       'scenes',
       'world',
     ]);
     expect(canonData.canon_schema_version).toBe(1);
+    // G1: newly published canon is marked v1 (G1c validated the grammar).
+    expect(canonData.condition_grammar_version).toBe(1);
     expect(Object.keys(canonData.world).sort()).toEqual([
       'description',
       'metadata',
@@ -313,10 +316,9 @@ describe('E2a: PublishWorldUseCase', () => {
       'scene_id',
       'title',
     ]);
+    // G1: conditions/mutations are ABSENT when not set (unconditional choice).
     expect(Object.keys(canonData.choices[0]).sort()).toEqual([
       'choice_id',
-      'conditions',
-      'mutations',
       'scene_id',
       'sort_order',
       'target_scene_id',
