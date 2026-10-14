@@ -2,7 +2,11 @@ import { z } from 'zod';
 import type pkg from 'pg';
 import { withTransaction } from '../../../shared/database/db.js';
 import { SessionRepositoryPort } from '../domain/ports/session.repository.port.js';
-import { CanonRepositoryPort } from '../../world/domain/ports/canon.repository.port.js';
+import {
+  CanonRepositoryPort,
+  SceneId,
+  ChoiceId,
+} from '../../world/application/index.js';
 import {
   IdempotencyRepositoryPort,
   IdempotencyRecord,
@@ -10,8 +14,6 @@ import {
 import { ReaderSession, SessionState } from '../domain/entities/reader-session.entity.js';
 import { SessionStateSchema } from '../domain/entities/reader-session.entity.js';
 import { SessionId } from '../domain/value-objects/session-id.value-object.js';
-import { SceneId } from '../../world/domain/value-objects/scene-id.value-object.js';
-import { ChoiceId } from '../../world/domain/value-objects/choice-id.value-object.js';
 import { UserId } from '../../auth/domain/value-objects/user-id.value-object.js';
 import {
   SessionNotFoundError,
