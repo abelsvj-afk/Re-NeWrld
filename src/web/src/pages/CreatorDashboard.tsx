@@ -42,6 +42,10 @@ export function CreatorDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [showNewWorld, setShowNewWorld] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newDesc, setNewDesc] = useState('');
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -50,6 +54,22 @@ export function CreatorDashboard() {
       finally { setLoading(false); }
     })();
   }, []);
+
+  const createWorld = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTitle.trim() || creating) return;
+    setCreating(true);
+    try {
+      const w = await worldsApi.create({ title: newTitle.trim(), description: newDesc.trim() || undefined });
+      setShowNewWorld(false);
+      setNewTitle(''); setNewDesc('');
+      navigate({ to: '/creator/worlds/$worldId/scenes', params: { worldId: w.id } });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to create world');
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const filtered = worlds.filter((w) => w.title.toLowerCase().includes(query.toLowerCase()));
   const stats = [
@@ -102,7 +122,7 @@ export function CreatorDashboard() {
                 <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search worlds…" className="bg-panel border border-edge rounded-xl pl-10 pr-4 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 w-60 transition-all" />
                 <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-faint text-sm">⌕</span>
               </div>
-              <button className="bg-gradient-to-r from-arcane to-[#0ea5c4] text-void text-sm font-semibold rounded-xl px-5 py-2.5 hover:brightness-110 transition-all shadow-glow-cyan whitespace-nowrap">+ New World</button>
+              <button onClick={() => setShowNewWorld(true)} className="bg-gradient-to-r from-arcane to-[#0ea5c4] text-void text-sm font-semibold rounded-xl px-5 py-2.5 hover:brightness-110 transition-all shadow-glow-cyan whitespace-nowrap">+ New World</button>
             </div>
           </div>
         </header>
@@ -146,13 +166,36 @@ export function CreatorDashboard() {
                   <p className="text-4xl mb-4">✦</p>
                   <p className="font-prose text-xl mb-2">No worlds yet</p>
                   <p className="text-sm text-ink-dim mb-6">Every universe starts with a single scene.</p>
-                  <button className="bg-gradient-to-r from-arcane to-[#0ea5c4] text-void text-sm font-semibold rounded-xl px-6 py-3 hover:brightness-110 transition-all shadow-glow-cyan">Create your first world</button>
+                  <button onClick={() => setShowNewWorld(true)} className="bg-gradient-to-r from-arcane to-[#0ea5c4] text-void text-sm font-semibold rounded-xl px-6 py-3 hover:brightness-110 transition-all shadow-glow-cyan">Create your first world</button>
                 </div>
               )}
             </div>
           )}
         </div>
       </main>
+
+      {showNewWorld && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowNewWorld(false)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">New World</h3>
+            <p className="text-sm text-ink-dim mb-6">Give your universe a name.</p>
+            <form onSubmit={createWorld} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Title</label>
+                <input value={newTitle} onChange={(e) => setNewTitle(e.target.value)} required placeholder="The Shattered Crown" className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Description <span className="normal-case tracking-normal opacity-60">(optional)</span></label>
+                <textarea value={newDesc} onChange={(e) => setNewDesc(e.target.value)} rows={3} placeholder="A tale of broken kingdoms…" className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all resize-none" />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowNewWorld(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
+                <button type="submit" disabled={creating || !newTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creating ? 'Creating…' : 'Create World'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }

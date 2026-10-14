@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 export interface RegisterUserCommand {
   email: string;
   password: string;
+  role: 'creator' | 'reader';
 }
 
 export interface RegisteredUser {
@@ -38,7 +39,7 @@ export class RegisterUserUseCase {
       userId: new UserId(crypto.randomUUID()),
       email,
       passwordHash,
-      role: new UserRole('reader'),
+      role: new UserRole(command.role),
     });
 
     await this.authRepository.save(user);

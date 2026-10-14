@@ -32,6 +32,7 @@ const RegisterBody = z.object({
     .string()
     .min(8, { message: 'Password must be at least 8 characters' })
     .max(128, { message: 'Password must not exceed 128 characters' }),
+  role: z.enum(['creator', 'reader']).default('reader'),
 });
 
 const LoginBody = z.object({

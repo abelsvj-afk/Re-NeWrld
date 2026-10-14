@@ -104,6 +104,8 @@ export interface ChoiceSummary {
 
 export const worldsApi = {
   list: () => api<WorldSummary[]>('/worlds'),
+  create: (input: { title: string; description?: string }) =>
+    api<WorldSummary>('/worlds', { method: 'POST', body: input }),
   get: (id: string) => api<WorldSummary & { scenes: unknown[] }>(`/worlds/${id}`),
   scenes: (worldId: string) => api<SceneSummary[]>(`/worlds/${worldId}/scenes`),
   createScene: (worldId: string, input: { chapterId: string; title: string; prose: string; isEnding?: boolean }) =>
