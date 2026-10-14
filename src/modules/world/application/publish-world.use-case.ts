@@ -16,6 +16,7 @@ import {
 import {
   validateWorldGraph,
   validateChoiceReferences,
+  validateChoiceSemanticsForPublish,
 } from '../domain/services/graph-validator.js';
 import {
   WorldNotFoundError,
@@ -45,6 +46,8 @@ export function buildCanonData(world: World, scenes: Scene[], choices: Choice[])
   }
   return {
     canon_schema_version: 1,
+    // G1c validated every choice's grammar — this snapshot is marked v1.
+    condition_grammar_version: 1,
     world: {
       world_id: world.getWorldId().getValue(),
       title: world.getTitle(),
@@ -111,7 +114,9 @@ export class PublishWorldUseCase {
 
     const graph = validateWorldGraph(world, scenes, choices);
     const refs = validateChoiceReferences(scenes, choices);
-    const blockers = [...graph.errors, ...refs.dangling];
+    // G1c: grammar blockers (unknown ops, malformed shapes, {} conditions…)
+    const semantics = validateChoiceSemanticsForPublish(choices);
+    const blockers = [...graph.errors, ...refs.dangling, ...semantics.blockers];
     if (blockers.length > 0) {
       throw new PublishingValidationError({
         blockers,
