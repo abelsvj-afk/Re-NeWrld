@@ -8,7 +8,11 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 function Boot() {
   const hydrate = useAuth((s) => s.hydrate);
   useEffect(() => {
-    hydrate();
+    // Run in background; don't block UI if it fails/hangs
+    const timeout = setTimeout(() => {
+      useAuth.setState({ loading: false });
+    }, 3000);
+    hydrate().finally(() => clearTimeout(timeout));
   }, [hydrate]);
   return <App />;
 }
