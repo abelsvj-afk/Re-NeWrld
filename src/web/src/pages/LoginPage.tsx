@@ -90,7 +90,7 @@ export function LoginPage() {
             ].map(([title, desc]) => (
               <div key={title}>
                 <p className="text-sm font-semibold text-ink mb-1">{title}</p>
-                <p className="text-xs text-ink-faint">{desc}</p>
+                <p className="text-xs text-ink-dim">{desc}</p>
               </div>
             ))}
           </div>
