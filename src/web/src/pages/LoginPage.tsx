@@ -208,18 +208,11 @@ export function LoginPage() {
                   </motion.div>
                 )}
 
-                <AnimatePresence>
-                  {error && (
-                    <motion.p
-                      initial={{ opacity: 0, y: -8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
-                      className="text-blood text-sm bg-blood/10 border border-blood/25 rounded-xl px-4 py-3"
-                    >
+                {error && (
+                    <p className="text-blood text-sm bg-blood/10 border border-blood/25 rounded-xl px-4 py-3">
                       {error}
-                    </motion.p>
+                    </p>
                   )}
-                </AnimatePresence>
 
                 <button
                   type="submit"
