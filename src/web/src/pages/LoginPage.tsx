@@ -22,9 +22,13 @@ export function LoginPage() {
       window.location.href = '/';
     } catch (err) {
       console.error('Auth failed:', err);
-      const message = err instanceof ApiError
-        ? (err.message || `Request failed (${err.status})`)
-        : 'Something went wrong. Please try again.';
+      let message = 'Something went wrong. Please try again.';
+      if (err instanceof ApiError) {
+        if (err.status === 401) message = 'Incorrect email or password. Please try again.';
+        else if (err.status === 409) message = 'An account with this email already exists. Try signing in.';
+        else if (err.status === 422 || err.status === 400) message = err.message || 'Please check your details and try again.';
+        else message = err.message || message;
+      }
       setError(message);
     } finally {
       setBusy(false);
@@ -166,8 +170,9 @@ export function LoginPage() {
                     autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    className="w-full bg-panel border border-edge rounded-xl px-4 py-3.5 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all"
-                    placeholder="••••••••••"
+                    style={{ colorScheme: 'dark' }}
+                    className="w-full bg-panel border border-edge rounded-xl px-4 py-3.5 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all [-webkit-appearance:none] [appearance:none]"
+                    placeholder="Enter your password"
                   />
                 </div>
 

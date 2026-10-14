@@ -19,16 +19,18 @@ function RootLayout() {
 
 const rootRoute = createRootRoute({ component: RootLayout });
 
-// Helper to require auth
+// Helper to require auth — checks token first (hydrate may not have run yet)
 function requireAuth() {
   const { user } = useAuth.getState();
-  if (!user) throw redirect({ to: '/login' });
+  const hasToken = typeof localStorage !== 'undefined' && !!localStorage.getItem('renewrld_token');
+  if (!user && !hasToken) throw redirect({ to: '/login' });
 }
 
 // Helper to redirect authenticated users away from login
 function redirectIfAuthenticated() {
   const { user } = useAuth.getState();
-  if (user) throw redirect({ to: '/' });
+  const hasToken = typeof localStorage !== 'undefined' && !!localStorage.getItem('renewrld_token');
+  if (user || hasToken) throw redirect({ to: '/' });
 }
 
 const loginRoute = createRoute({
