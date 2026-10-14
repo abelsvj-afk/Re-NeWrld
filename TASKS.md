@@ -536,5 +536,23 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 - **Task M1: Implement Advanced Agent Simulation & Multiverse Branching**: Future living world multi-timeline outcome pooling and Overseer override engine. (*Deferred to Post-MVP*).
 
 ## 4. Technical Debt Register (STOP-5)
-- **H-facade**: Migrate the session module's 30 pre-existing Phase F deep world-module imports (value objects, ports, entities, errors — see STOP-3 evidence) to the `src/modules/world/application/index.ts` public facade. The 4 Phase G grammar imports already use the facade; the boundary test (`tests/unit/import-boundaries.test.ts`) currently enforces only `world/domain/services` and `world/infrastructure` paths. Estimate: 2–3 hours, safe refactor. Enforcement should extend to all deep paths after migration.
-- **H-idempotency-janitor**: Wire `PostgresIdempotencyRepository.deleteExpired()` into the server janitor (`src/server.ts`, adjacent to the password-reset cleanup). Expired `idempotency_keys` rows are currently reclaimed lazily on key reuse only; without a janitor the table grows unbounded. Stored responses contain reader-state-adjacent data (appliedMutations, availableChoices) — a data-retention concern at scale. TODO comment added in `src/server.ts`.
+- **H-facade**: ✅ COMPLETE 2026-10-14 — All 22 pre-existing deep imports migrated to `src/modules/world/application/index.ts` facade. Boundary test allowlist emptied; test now enforces zero deep `world/domain` imports.
+- **H-idempotency-janitor**: ✅ COMPLETE 2026-10-14 — `PostgresIdempotencyRepository.deleteExpired()` wired into the hourly janitor in `src/server.ts` alongside session and password-reset cleanup.
+
+## 5. Deferred UI/UX Items — DO NOT FORGET (user directive 2026-10-14)
+The following were explicitly deferred from Phase H MVP but the user requires them tracked permanently. Any agent working on frontend MUST consult this list before declaring UI work "complete." Source: user mockups (10 images, 2026-10-14) + `docs/proposed-creator-studio-ai-assistant-vision.md`.
+- **H-UI-polish**: Cinematic polish effects — glowing timeline nodes, animated particle backgrounds, glow-on-hover for cards, smooth scene-transition animations (Framer Motion). Deferred for MVP; layout/typography/color-system come first.
+- **H-UI-codex**: Character Codex UI — character profiles with tabs (overview/skills/biography), relationship webs, faction displays, world discoveries panel. Backend data exists; UI is post-MVP.
+- **H-UI-timeline-engine**: Chrono-Narrative Engine UI — branching timeline visualization with paths (e.g. Alliance vs Betrayal), node detail panels, consequence displays. Requires React Flow.
+- **H-UI-analytics**: Creator analytics dashboard — reader drop-off rates, popular choice paths, completion analytics (US-P04). Post-MVP.
+- **H-UI-world-bible**: Full World Bible UI — connected canon/lore/character/location/faction browser with cross-referencing (per Creator Studio vision §4). Post-MVP.
+- **H-UI-graph-advanced**: Advanced branching graph visualizer with simulation overlay — interactive scene/choice graph with path highlighting, dead-end detection display (US-C13). Post-MVP.
+- **H-UI-lore-inspection**: In-text lore keyword inspection — tappable lore terms within reading prose revealing world entries without breaking flow (US-R07). Post-MVP.
+- **H-UI-character-dialogue**: Character dialogue recall & journal view — past conversations and relationship milestones (US-R08). Post-MVP.
+- **H-UI-replay**: Replay & alternate path exploration — chapter checkpoints for exploring alternate choices (US-R10). Future.
+- **H-UI-ai-assistant**: Governed Creator AI writing assistant with Consult/Prepare/Execute/Autopilot permission tiers (per Creator Studio vision §2-3, US-C15). Future — depends on prompt-injection defense framework.
+- **H-UI-collab**: Collaborative multi-author workspace with granular role permissions (US-C16). Future.
+- **H-UI-monetization**: Creator subscriptions, premium chapters, monetization tools (US-P03). Future — depends on payment gateway decisions.
+- **H-UI-social**: Creator profiles, follows, ratings/reviews, story recommendations (US-P01, US-P02). Future.
+- **H-UI-mobile**: Companion mobile apps with offline reading + sync (vision §4 post-MVP). Future.
+- **H-UI-tts**: Audio TTS narration and dynamic generated scene illustrations (vision §4 post-MVP). Future.
