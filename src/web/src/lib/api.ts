@@ -18,18 +18,6 @@ export class ApiError extends Error {
   }
 }
 
-let authToken: string | null = localStorage.getItem('renewrld_token');
-
-export function setAuthToken(token: string | null) {
-  authToken = token;
-  if (token) localStorage.setItem('renewrld_token', token);
-  else localStorage.removeItem('renewrld_token');
-}
-
-export function getAuthToken(): string | null {
-  return authToken;
-}
-
 interface RequestOptions {
   method?: string;
   body?: unknown;
@@ -41,11 +29,11 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
     'Content-Type': 'application/json',
     ...opts.headers,
   };
-  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
   const res = await fetch(`${API_BASE}${path}`, {
     method: opts.method ?? 'GET',
     headers,
+    credentials: 'include',
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
 
@@ -72,16 +60,17 @@ export interface User {
 
 export const authApi = {
   login: (email: string, password: string) =>
-    api<{ token: string; user: User }>('/auth/login', {
+    api<User>('/auth/login', {
       method: 'POST',
       body: { email, password },
     }),
   register: (email: string, password: string, role: 'creator' | 'reader') =>
-    api<{ token: string; user: User }>('/auth/register', {
+    api<User>('/auth/register', {
       method: 'POST',
       body: { email, password, role },
     }),
   me: () => api<User>('/auth/me'),
+  logout: () => api<void>('/auth/logout', { method: 'POST' }),
 };
 
 // --- Worlds ---

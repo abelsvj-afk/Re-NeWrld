@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { authApi, setAuthToken, type User } from '../lib/api';
+import { authApi, type User } from '../lib/api';
 
 interface AuthState {
   user: User | null;
@@ -15,19 +15,17 @@ export const useAuth = create<AuthState>((set) => ({
   loading: true,
 
   login: async (email, password) => {
-    const { token, user } = await authApi.login(email, password);
-    setAuthToken(token);
+    const user = await authApi.login(email, password);
     set({ user, loading: false });
   },
 
   register: async (email, password, role) => {
-    const { token, user } = await authApi.register(email, password, role);
-    setAuthToken(token);
+    const user = await authApi.register(email, password, role);
     set({ user, loading: false });
   },
 
-  logout: () => {
-    setAuthToken(null);
+  logout: async () => {
+    try { await authApi.logout(); } catch { /* ignore */ }
     set({ user: null });
   },
 
@@ -36,7 +34,6 @@ export const useAuth = create<AuthState>((set) => ({
       const user = await authApi.me();
       set({ user, loading: false });
     } catch {
-      setAuthToken(null);
       set({ user: null, loading: false });
     }
   },

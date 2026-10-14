@@ -19,18 +19,20 @@ function RootLayout() {
 
 const rootRoute = createRootRoute({ component: RootLayout });
 
-// Helper to require auth — checks token first (hydrate may not have run yet)
+// Helper to require auth — relies on hydrate() having run in Boot.
+// Cookie is HTTP-only so we can't check it directly; the me() call validates.
 function requireAuth() {
-  const { user } = useAuth.getState();
-  const hasToken = typeof localStorage !== 'undefined' && !!localStorage.getItem('renewrld_token');
-  if (!user && !hasToken) throw redirect({ to: '/login' });
+  const { user, loading } = useAuth.getState();
+  // If still hydrating, allow the route — Boot will redirect if unauthenticated
+  if (loading) return;
+  if (!user) throw redirect({ to: '/login' });
 }
 
 // Helper to redirect authenticated users away from login
 function redirectIfAuthenticated() {
-  const { user } = useAuth.getState();
-  const hasToken = typeof localStorage !== 'undefined' && !!localStorage.getItem('renewrld_token');
-  if (user || hasToken) throw redirect({ to: '/' });
+  const { user, loading } = useAuth.getState();
+  if (loading) return;
+  if (user) throw redirect({ to: '/' });
 }
 
 const loginRoute = createRoute({
