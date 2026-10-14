@@ -89,8 +89,7 @@ function makeChoice(worldId: WorldId, fromSceneId: SceneId, targetSceneId: Scene
     sceneId: fromSceneId,
     targetSceneId,
     text: 'Go',
-    conditions: {},
-    mutations: {},
+    // G1: unconditional choice — conditions/mutations absent ({} is a G1c blocker).
     sortOrder: 0,
   });
 }

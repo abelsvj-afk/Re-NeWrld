@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@theme {
+  /* Re:NeWrld dark cinematic palette */
+  --color-void: #060609;
+  --color-abyss: #0b0b10;
+  --color-panel: #111118;
+  --color-panel-2: #16161f;
+  --color-edge: #23232e;
+  --color-edge-2: #2e2e3d;
+
+  --color-ink: #f2f0ea;
+  --color-ink-dim: #a8a5b8;
+  --color-ink-faint: #6b6878;
+
+  /* Accents: arcane cyan, ember amber, void purple */
+  --color-arcane: #22d3ee;
+  --color-arcane-dim: #0e7490;
+  --color-ember: #f59e0b;
+  --color-ember-dim: #92400e;
+  --color-voidlight: #a78bfa;
+  --color-blood: #f43f5e;
+
+  /* Serif for prose, sans for UI */
+  --font-prose: "Georgia", "Times New Roman", serif;
+  --font-ui: "Inter", system-ui, -apple-system, sans-serif;
+
+  --shadow-glow-cyan: 0 0 24px rgba(34, 211, 238, 0.25);
+  --shadow-glow-amber: 0 0 24px rgba(245, 158, 11, 0.22);
+  --shadow-panel: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-void);
+  color: var(--color-ink);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Prose reading surface */
+.prose-reading {
+  font-family: var(--font-prose);
+  font-size: 1.2rem;
+  line-height: 1.85;
+  color: var(--color-ink);
+  max-width: 42rem;
+}
+
+.prose-reading p + p {
+  margin-top: 1.4em;
+}
+
+/* Glass panel */
+.glass {
+  background: linear-gradient(160deg, rgba(22, 22, 31, 0.92), rgba(11, 11, 16, 0.96));
+  border: 1px solid var(--color-edge);
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(12px);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--color-abyss); }
+::-webkit-scrollbar-thumb { background: var(--color-edge-2); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #3d3d52; }

@@ -138,7 +138,7 @@ describeFn('Authentication & Session Management Integration (C2 Secure Hashing &
 
   it('should propagate database query failure as operational error during validation instead of returning null', async () => {
     const adminPool = new Pool({ connectionString });
-    const errDbName = `auth_err_db_${Date.now()}`;
+    const errDbName = `auth_err_db_${Date.now()}_test`;
     let testError: unknown;
     let dbCreated = false;
     try {
@@ -184,7 +184,7 @@ describeFn('Authentication & Session Management Integration (C2 Secure Hashing &
 
   it('should propagate database query failure as operational error during revocation instead of swallowing', async () => {
     const adminPool = new Pool({ connectionString });
-    const errDbName = `auth_err_db_rev_${Date.now()}`;
+    const errDbName = `auth_err_db_rev_${Date.now()}_test`;
     let testError: unknown;
     let dbCreated = false;
     try {

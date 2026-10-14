@@ -16,7 +16,9 @@ import { PostgresSceneRepository } from './modules/world/infrastructure/persiste
 import { PostgresChoiceRepository } from './modules/world/infrastructure/persistence/postgres-choice.repository.js';
 import { PostgresCanonRepository } from './modules/world/infrastructure/persistence/postgres-canon.repository.js';
 import { SessionRepositoryPort } from './modules/session/domain/ports/session.repository.port.js';
+import { IdempotencyRepositoryPort } from './modules/session/domain/ports/idempotency.repository.port.js';
 import { PostgresSessionRepository } from './modules/session/infrastructure/persistence/postgres-session.repository.js';
+import { PostgresIdempotencyRepository } from './modules/session/infrastructure/persistence/postgres-idempotency.repository.js';
 import { PostgresPasswordResetRepository } from './modules/auth/infrastructure/persistence/postgres-password-reset.repository.js';
 import { ResendEmailAdapter } from './modules/auth/infrastructure/email/resend-email.adapter.js';
 import { ConsoleEmailAdapter } from './modules/auth/infrastructure/email/console-email.adapter.js';
@@ -40,6 +42,7 @@ export interface AppDeps {
   choiceRepository?: ChoiceRepositoryPort;
   canonRepository?: CanonRepositoryPort;
   sessionRepository?: SessionRepositoryPort;
+  idempotencyRepository?: IdempotencyRepositoryPort;
   sessionService?: SessionServicePort;
   passwordService?: PasswordService;
   passwordResetRepository?: PasswordResetRepositoryPort;
@@ -132,6 +135,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const choiceRepository = deps?.choiceRepository ?? new PostgresChoiceRepository();
   const canonRepository = deps?.canonRepository ?? new PostgresCanonRepository();
   const sessionRepository = deps?.sessionRepository ?? new PostgresSessionRepository();
+  const idempotencyRepository = deps?.idempotencyRepository ?? new PostgresIdempotencyRepository();
   const sessionService = deps?.sessionService ?? new SessionService();
   const passwordService = deps?.passwordService ?? new PasswordService();
   const passwordResetRepository =
@@ -165,6 +169,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       sessionRepository,
       worldRepository,
       canonRepository,
+      idempotencyRepository,
       sessionVerifier: sessionService.getVerifier(),
     });
   });
@@ -174,6 +179,22 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
     request.log.info('Health check accessed');
     return { status: 'ok', timestamp: new Date().toISOString() };
   });
+
+  // Serve the React SPA (Phase H). API routes take precedence; unmatched
+  // GETs fall through to index.html for client-side routing.
+  const path = await import('node:path');
+  const fs = await import('node:fs');
+  const webDist = path.join(process.cwd(), 'src/web/dist');
+  if (fs.existsSync(path.join(webDist, 'index.html'))) {
+    const fastifyStatic = (await import('@fastify/static')).default;
+    await app.register(fastifyStatic, { root: webDist, prefix: '/' });
+    app.setNotFoundHandler((req, reply) => {
+      if (req.raw.method === 'GET' && !req.raw.url?.startsWith('/api')) {
+        return reply.sendFile('index.html');
+      }
+      reply.code(404).send({ error: 'Not found' });
+    });
+  }
 
   return app;
 }

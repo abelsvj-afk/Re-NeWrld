@@ -98,9 +98,19 @@ describe('World Domain: Value Objects & Entities', () => {
     it('should reject invalid top-level non-object payloads in schema validation', () => {
       expect(() => WorldMetadataSchema.parse('not-an-object')).toThrow();
       expect(() => WorldMetadataSchema.parse(null)).toThrow();
-      expect(() => ConditionSchema.parse([1, 2, 3])).toThrow();
-      expect(() => MutationSchema.parse(42)).toThrow();
       expect(() => CharacterAttributesSchema.parse(undefined)).toThrow();
+    });
+
+    it('G1: condition/mutation schemas accept any JSON value (loose transport)', () => {
+      // Arrays are valid now (mutations are arrays in the v1 grammar).
+      expect(ConditionSchema.parse([1, 2, 3])).toEqual([1, 2, 3]);
+      expect(MutationSchema.parse([{ op: 'set', var: 'x', value: 1 }])).toEqual([
+        { op: 'set', var: 'x', value: 1 },
+      ]);
+      // Non-JSON still rejected.
+      expect(() => ConditionSchema.parse(undefined)).toThrow();
+      expect(() => MutationSchema.parse(() => 1)).toThrow();
+      expect(() => ConditionSchema.parse(NaN)).toThrow();
     });
 
     it('should validate dedicated WorldMetadataSchema boundaries and depth definition', () => {
@@ -542,7 +552,7 @@ describe('World Domain: Value Objects & Entities', () => {
       // Verify failed update atomicity & updatedAt preservation
       const priorConds = choice.getConditions();
       const priorUpdatedAt = choice.getUpdatedAt();
-      expect(() => choice.updateConditions('not-an-object' as any)).toThrow();
+      expect(() => choice.updateConditions(undefined as any)).toThrow();
       expect(choice.getConditions()).toEqual(priorConds);
       expect(choice.getUpdatedAt().getTime()).toBe(priorUpdatedAt.getTime());
 

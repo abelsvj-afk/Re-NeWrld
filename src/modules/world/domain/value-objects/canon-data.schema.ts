@@ -49,8 +49,14 @@ const canonChoiceSchema = z
     scene_id: z.string().uuid(),
     target_scene_id: z.string().uuid(),
     text: z.string(),
-    conditions: z.record(z.unknown()),
-    mutations: z.record(z.unknown()),
+    // Absent = unconditional (ADR-015 §2). Loose (not grammar-validated)
+    // because this schema also READS legacy pre-G1 snapshots: legacy `{}`
+    // conditions are grandfathered as unconditional at runtime, and other
+    // legacy payloads fail closed per the marker policy. Strict grammar
+    // validation happens at publish time (G1c), not here.
+    conditions: z.unknown().optional(),
+    // Absent ≡ [] (ADR-015 B20). Same legacy-read leniency as conditions.
+    mutations: z.unknown().optional(),
     sort_order: z.number().int(),
   })
   .strict();
@@ -58,6 +64,11 @@ const canonChoiceSchema = z
 export const CanonDataSchema = z
   .object({
     canon_schema_version: z.literal(1),
+    // Grammar version marker (ADR-015 §10, B12): optional with NO default.
+    // Presence is tracked explicitly — a default would erase the
+    // legacy/validated distinction the runtime failure policy depends on.
+    // Newly published canon always carries `1` (G1c validated it).
+    condition_grammar_version: z.literal(1).optional(),
     world: canonWorldSchema,
     scenes: z.array(canonSceneSchema),
     choices: z.array(canonChoiceSchema),

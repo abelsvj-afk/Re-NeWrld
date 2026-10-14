@@ -3,6 +3,20 @@ const { Pool } = pkg;
 import { env } from '../../config/env.js';
 import { logger } from '../logger/pino.logger.js';
 
+// STOP-2: refuse to connect unless the database name ends with _test when
+// running in the test environment. This prevents the test suite from ever
+// running migrations or seed data against a production database, even if
+// DATABASE_URL is misconfigured.
+if (env.APP_ENV === 'test') {
+  const dbUrl = env.DATABASE_URL ?? '';
+  const dbName = dbUrl.split('/').pop()?.split('?')[0] ?? '';
+  if (!dbName.endsWith('_test') && dbName !== 'test' && dbName !== 'dummy') {
+    throw new Error(
+      `Refusing to run against non-test database '${dbName}' (APP_ENV=test requires a _test suffix)`
+    );
+  }
+}
+
 export let pool = new Pool({
   connectionString: env.DATABASE_URL,
   max: 20,
@@ -15,6 +29,16 @@ pool.on('error', (err) => {
 });
 
 export function setPool(connectionString: string): void {
+  // STOP-2: same guard for runtime pool swaps (integration tests use setPool
+  // with TEST_DATABASE_URL or a Testcontainers URI).
+  if (env.APP_ENV === 'test') {
+    const dbName = connectionString.split('/').pop()?.split('?')[0] ?? '';
+    if (!dbName.endsWith('_test') && dbName !== 'test' && dbName !== 'dummy') {
+      throw new Error(
+        `Refusing to run against non-test database '${dbName}' (APP_ENV=test requires a _test suffix)`
+      );
+    }
+  }
   try {
     pool.end();
   } catch {}

@@ -8,11 +8,12 @@ import { PostgresCanonRepository } from '../../src/modules/world/infrastructure/
 //
 // Note (F1b, ADR-014 D1): findLatestByWorldId is a read method — reads do not
 // violate append-only. The guard remains: no update or delete methods.
+// Note (G2c, ADR-015 D3 step 5): findById is likewise a read (pinned snapshot).
 describe('PostgresCanonRepository append-only surface', () => {
   it('exposes only reads and inserts — no update or delete', () => {
     const methods = Object.getOwnPropertyNames(PostgresCanonRepository.prototype).filter(
       (name) => name !== 'constructor'
     );
-    expect(methods.sort()).toEqual(['findLatestByWorldId', 'insert', 'nextVersion']);
+    expect(methods.sort()).toEqual(['findById', 'findLatestByWorldId', 'insert', 'nextVersion']);
   });
 });

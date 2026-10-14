@@ -1,6 +1,7 @@
 import { World } from '../entities/world.entity.js';
 import { Scene } from '../entities/scene.entity.js';
 import { Choice } from '../entities/choice.entity.js';
+import { validateChoiceSemantics } from './semantic-validator.js';
 
 /**
  * Blocker codes for the publishing-validation contract (ADR-013 §5,
@@ -210,4 +211,55 @@ export function validateChoiceReferences(
   }
 
   return { dangling };
+}
+
+export interface SemanticBlocker {
+  code: string;
+  choiceId: string;
+  sceneId: string;
+  payload: 'conditions' | 'mutations';
+  message: string;
+}
+
+export interface ChoiceSemanticValidationResult {
+  /**
+   * Every choice with a semantic violation, in input choice order.
+   * Empty means all choice grammars are valid. Each entry is a blocking
+   * error per ADR-015 (G1c extends E1b).
+   */
+  blockers: SemanticBlocker[];
+}
+
+/**
+ * Semantic choice validator for publishing (Task G1c, ADR-015).
+ *
+ * Validates every choice's conditions/mutations against the G1 grammar
+ * (ADR-015 §2): unknown operators, malformed shapes, overlong/unsafe var
+ * names, nesting beyond limits, non-finite literals, empty boolean arrays,
+ * and `{}` conditions are all BLOCKERS. Absent `conditions` (unconditional)
+ * and absent `mutations` (≡ []) are valid.
+ *
+ * Pure: no DB, no I/O, deterministic; does not mutate its inputs.
+ * Additive to E1a/E1b — those functions are untouched.
+ */
+export function validateChoiceSemanticsForPublish(
+  choices: Choice[]
+): ChoiceSemanticValidationResult {
+  const blockers: SemanticBlocker[] = [];
+  for (const choice of choices) {
+    const violations = validateChoiceSemantics(
+      choice.getConditions(),
+      choice.getMutations()
+    );
+    for (const v of violations) {
+      blockers.push({
+        code: v.code,
+        choiceId: choice.getChoiceId().getValue(),
+        sceneId: choice.getSceneId().getValue(),
+        payload: v.payload,
+        message: `Choice ${choice.getChoiceId().getValue()}: ${v.message}`,
+      });
+    }
+  }
+  return { blockers };
 }

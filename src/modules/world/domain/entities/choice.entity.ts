@@ -23,8 +23,8 @@ export class Choice {
   private readonly sceneId: SceneId;
   private targetSceneId: SceneId;
   private text: string;
-  private conditions: ConditionPayload;
-  private mutations: MutationPayload;
+  private conditions: ConditionPayload | undefined;
+  private mutations: MutationPayload | undefined;
   private sortOrder: number;
   private readonly createdAt: Date;
   private updatedAt: Date;
@@ -37,8 +37,14 @@ export class Choice {
     if (typeof order !== 'number' || !Number.isFinite(order)) {
       throw new WorldValidationError('Choice sortOrder must be a finite number');
     }
-    const validatedConditions = ConditionSchema.parse(props.conditions ?? {});
-    const validatedMutations = MutationSchema.parse(props.mutations ?? {});
+    // Absence is significant (ADR-015 §2, G1c): absent `conditions` means
+    // unconditional, absent `mutations` means []. We must NOT default to
+    // `{}` — that would conflate "unconditional" with the legacy empty
+    // object, which publish-time validation rejects as a blocker.
+    const validatedConditions =
+      props.conditions == null ? undefined : ConditionSchema.parse(props.conditions);
+    const validatedMutations =
+      props.mutations == null ? undefined : MutationSchema.parse(props.mutations);
 
     this.choiceId = props.choiceId;
     this.worldId = props.worldId;
@@ -76,12 +82,12 @@ export class Choice {
     return this.text;
   }
 
-  public getConditions(): ConditionPayload {
-    return structuredClone(this.conditions);
+  public getConditions(): ConditionPayload | undefined {
+    return this.conditions === undefined ? undefined : structuredClone(this.conditions);
   }
 
-  public getMutations(): MutationPayload {
-    return structuredClone(this.mutations);
+  public getMutations(): MutationPayload | undefined {
+    return this.mutations === undefined ? undefined : structuredClone(this.mutations);
   }
 
   public getSortOrder(): number {

@@ -126,4 +126,32 @@ export class PostgresCanonRepository implements CanonRepositoryPort {
       canonData: parsed.data,
     });
   }
+
+  public async findById(snapshotId: SnapshotId): Promise<CanonSnapshot | null> {
+    const result = await query(
+      `SELECT snapshot_id, world_id, version_number, canon_data
+       FROM published_canon_snapshots
+       WHERE snapshot_id = $1`,
+      [snapshotId.getValue()]
+    );
+    if (result.rowCount === 0) {
+      return null;
+    }
+    const row = result.rows[0] as {
+      snapshot_id: string;
+      world_id: string;
+      version_number: number;
+      canon_data: unknown;
+    };
+    const parsed = CanonDataSchema.safeParse(row.canon_data);
+    if (!parsed.success) {
+      throw new CorruptCanonSnapshotError(snapshotId.getValue());
+    }
+    return CanonSnapshot.create({
+      snapshotId: new SnapshotId(row.snapshot_id),
+      worldId: new WorldId(row.world_id),
+      versionNumber: Number(row.version_number),
+      canonData: parsed.data,
+    });
+  }
 }
