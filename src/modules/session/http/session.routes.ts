@@ -2,10 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, requireReader } from '../../../shared/middleware/auth.middleware.js';
 import type { SessionVerifier } from '../../../shared/middleware/auth.middleware.js';
-import { WorldId } from '../../world/domain/value-objects/world-id.value-object.js';
-import { ChoiceId } from '../../world/domain/value-objects/choice-id.value-object.js';
-import { CanonRepositoryPort } from '../../world/domain/ports/canon.repository.port.js';
-import { WorldRepositoryPort } from '../../world/domain/ports/world.repository.port.js';
+import {
+  WorldId,
+  ChoiceId,
+  CanonRepositoryPort,
+  WorldRepositoryPort,
+} from '../../world/application/index.js';
 import { StartReaderSessionUseCase } from '../application/start-reader-session.use-case.js';
 import { GetReaderSessionUseCase } from '../application/get-reader-session.use-case.js';
 import { SubmitChoiceUseCase } from '../application/submit-choice.use-case.js';
