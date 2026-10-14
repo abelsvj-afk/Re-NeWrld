@@ -4,7 +4,7 @@ import {
   createRootRoute,
   RouterProvider,
   Outlet,
-  Navigate,
+  redirect,
 } from '@tanstack/react-router';
 import { useAuth } from './stores/auth';
 import { LoginPage } from './pages/LoginPage';
@@ -14,58 +14,73 @@ import { SceneEditorPage } from './pages/SceneEditorPage';
 import { PublishPage } from './pages/PublishPage';
 
 function RootLayout() {
-  const { user } = useAuth();
-
-  // Render login directly instead of Navigate (avoids router issues)
-  if (!user) return <LoginPage />;
   return <Outlet />;
 }
 
 const rootRoute = createRootRoute({ component: RootLayout });
 
+// Helper to require auth
+function requireAuth() {
+  const { user } = useAuth.getState();
+  if (!user) throw redirect({ to: '/login' });
+}
+
+// Helper to redirect authenticated users away from login
+function redirectIfAuthenticated() {
+  const { user } = useAuth.getState();
+  if (user) throw redirect({ to: '/' });
+}
+
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/login',
+  beforeLoad: redirectIfAuthenticated,
   component: LoginPage,
 });
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
+  beforeLoad: requireAuth,
   component: function Index() {
     const { user } = useAuth();
-    if (user?.role === 'creator') return <Navigate to="/creator" />;
-    return <Navigate to="/read" />;
+    if (user?.role === 'creator') return <CreatorDashboard />;
+    return <ReaderPage />;
   },
 });
 
 const readerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/read',
+  beforeLoad: requireAuth,
   component: ReaderPage,
 });
 
 const readerSessionRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/read/$sessionId',
+  beforeLoad: requireAuth,
   component: ReaderPage,
 });
 
 const creatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/creator',
+  beforeLoad: requireAuth,
   component: CreatorDashboard,
 });
 
 const sceneEditorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/creator/worlds/$worldId/scenes',
+  beforeLoad: requireAuth,
   component: SceneEditorPage,
 });
 
 const publishRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/creator/worlds/$worldId/publish',
+  beforeLoad: requireAuth,
   component: PublishPage,
 });
 

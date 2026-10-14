@@ -27,8 +27,17 @@ export function ReaderPage() {
           const s = await sessionsApi.get(sessionId);
           setSession(s);
         } else {
-          const w = await worldsApi.list();
-          setWorlds(w.filter((x) => x.status === 'published'));
+          try {
+            const w = await worldsApi.list();
+            setWorlds(w.filter((x) => x.status === 'published'));
+          } catch (err) {
+            // 403 means reader can't list worlds (backend limitation) — show empty state
+            if (err instanceof ApiError && err.status === 403) {
+              setWorlds([]);
+            } else {
+              throw err;
+            }
+          }
         }
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Failed to load');

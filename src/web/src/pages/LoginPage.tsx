@@ -20,9 +20,14 @@ export function LoginPage() {
     try {
       if (mode === 'login') await login(email, password);
       else await register(email, password, role);
-      navigate({ to: '/' });
+      // Use window.location for reliable navigation after auth state change
+      window.location.href = '/';
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Something went wrong');
+      console.error('Auth failed:', err);
+      const message = err instanceof ApiError 
+        ? (err.message || `Request failed (${err.status})`)
+        : 'Something went wrong. Please try again.';
+      setError(message);
     } finally {
       setBusy(false);
     }
