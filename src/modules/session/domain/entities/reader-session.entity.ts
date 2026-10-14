@@ -9,6 +9,7 @@ import {
   SessionValidationError,
   IllegalSessionTransitionError,
 } from '../errors/session.errors.js';
+import { StateInvariantError } from '../errors/choice.errors.js';
 
 /** JSON-serializable gameplay state. NaN/Infinity, undefined, functions and symbols are rejected. */
 const JsonValueSchema: z.ZodType<unknown> = z.lazy(() =>
@@ -129,6 +130,38 @@ export class ReaderSession {
   public abandon(): void {
     this.requireActive('abandon');
     this.status = new SessionStatus('abandoned');
+    this.updatedAt = new Date();
+  }
+
+  /**
+   * Applies a choice execution result (Task G2b, ADR-015 D3 step 14).
+   *
+   * REPLACES the complete state with `newState` (not a merge — contrast
+   * `applyTransition`, which shallow-merges a diff and stays intact for
+   * F2a). Derives completion from `isEndingTarget`: an ending target
+   * completes the session with exactly one version increment.
+   *
+   * The caller (SubmitChoiceUseCase) validates `newState` first and throws
+   * `StateInvariantError` on failure; this method re-validates as domain
+   * defense-in-depth and throws the same error type — never a 422, because
+   * a non-JSON computed state is a server bug, not a client error.
+   */
+  public applyChoiceResult(
+    toSceneId: SceneId,
+    newState: SessionState,
+    opts: { isEndingTarget: boolean }
+  ): void {
+    this.requireActive('apply a choice result to');
+    const validated = SessionStateSchema.safeParse(newState);
+    if (!validated.success) {
+      throw new StateInvariantError('Choice result state failed JSON validation');
+    }
+    this.stateVariables = structuredClone(validated.data) as SessionState;
+    this.currentSceneId = toSceneId;
+    this.version += 1;
+    if (opts.isEndingTarget) {
+      this.status = new SessionStatus('completed');
+    }
     this.updatedAt = new Date();
   }
 
