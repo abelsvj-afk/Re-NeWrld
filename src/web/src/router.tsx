@@ -10,6 +10,7 @@ import { useAuth } from './stores/auth';
 import { LoginPage } from './pages/LoginPage';
 import { ReaderPage } from './pages/ReaderPage';
 import { CreatorDashboard } from './pages/CreatorDashboard';
+import { SceneEditorPage } from './pages/SceneEditorPage';
 
 function RootLayout() {
   const { user, loading } = useAuth();
@@ -62,12 +63,19 @@ const creatorRoute = createRoute({
   component: CreatorDashboard,
 });
 
+const sceneEditorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/creator/worlds/$worldId/scenes',
+  component: SceneEditorPage,
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   indexRoute,
   readerRoute,
   readerSessionRoute,
   creatorRoute,
+  sceneEditorRoute,
 ]);
 
 export const router = createRouter({ routeTree });

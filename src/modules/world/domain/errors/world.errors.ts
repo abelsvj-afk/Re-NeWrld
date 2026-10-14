@@ -14,6 +14,18 @@ export class WorldNotFoundError extends WorldError {
   }
 }
 
+export class SceneNotFoundError extends WorldError {
+  constructor(sceneId: string) {
+    super(`Scene not found: ${sceneId}`, 404);
+  }
+}
+
+export class ChoiceNotFoundError extends WorldError {
+  constructor(choiceId: string) {
+    super(`Choice not found: ${choiceId}`, 404);
+  }
+}
+
 export class WorldValidationError extends WorldError {
   constructor(message: string) {
     super(message, 400);

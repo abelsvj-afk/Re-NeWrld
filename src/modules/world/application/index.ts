@@ -48,4 +48,4 @@ export { SnapshotId } from '../domain/value-objects/snapshot-id.value-object.js'
 export { type WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
 export { type CanonRepositoryPort } from '../domain/ports/canon.repository.port.js';
 export { CanonSnapshot } from '../domain/entities/canon-snapshot.entity.js';
-export { WorldNotFoundError } from '../domain/errors/world.errors.js';
+export { WorldNotFoundError, SceneNotFoundError, ChoiceNotFoundError } from '../domain/errors/world.errors.js';

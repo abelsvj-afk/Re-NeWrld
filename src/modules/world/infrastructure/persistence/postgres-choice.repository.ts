@@ -19,11 +19,11 @@ interface ChoiceRow {
 }
 
 /**
- * Postgres read adapter for world choices (Task E2a).
+ * Postgres adapter for world choices.
  *
- * Read-only by design: E2a needs the world's choice set for validation and
- * canon serialization. Loads are always scoped to a single world so the
- * validators' same-world precondition holds by construction.
+ * Read paths from Task E2a; write paths added in Phase H (H1b).
+ * Loads are always scoped to a single world so the validators'
+ * same-world precondition holds by construction.
  */
 export class PostgresChoiceRepository implements ChoiceRepositoryPort {
   public async findByWorldId(worldId: WorldId): Promise<Choice[]> {
@@ -34,6 +34,46 @@ export class PostgresChoiceRepository implements ChoiceRepositoryPort {
     );
 
     return result.rows.map((row) => this.mapRowToChoice(row));
+  }
+
+  public async findById(choiceId: ChoiceId): Promise<Choice | null> {
+    const result = await query<ChoiceRow>(
+      `SELECT choice_id, world_id, scene_id, target_scene_id, text, conditions, mutations, sort_order, created_at, updated_at
+       FROM choices WHERE choice_id = $1`,
+      [choiceId.getValue()]
+    );
+    if (result.rows.length === 0) return null;
+    return this.mapRowToChoice(result.rows[0]);
+  }
+
+  public async save(choice: Choice): Promise<void> {
+    await query(
+      `INSERT INTO choices (choice_id, world_id, scene_id, target_scene_id, text, conditions, mutations, sort_order, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (choice_id) DO UPDATE SET
+         text = EXCLUDED.text,
+         target_scene_id = EXCLUDED.target_scene_id,
+         conditions = EXCLUDED.conditions,
+         mutations = EXCLUDED.mutations,
+         sort_order = EXCLUDED.sort_order,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        choice.getChoiceId().getValue(),
+        choice.getWorldId().getValue(),
+        choice.getSceneId().getValue(),
+        choice.getTargetSceneId().getValue(),
+        choice.getText(),
+        choice.getConditions() ? JSON.stringify(choice.getConditions()) : null,
+        choice.getMutations() ? JSON.stringify(choice.getMutations()) : null,
+        choice.getSortOrder(),
+        choice.getCreatedAt().toISOString(),
+        choice.getUpdatedAt().toISOString(),
+      ]
+    );
+  }
+
+  public async delete(choiceId: ChoiceId): Promise<void> {
+    await query(`DELETE FROM choices WHERE choice_id = $1`, [choiceId.getValue()]);
   }
 
   private mapRowToChoice(row: ChoiceRow): Choice {

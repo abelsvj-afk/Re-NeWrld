@@ -25,6 +25,7 @@
     "@testcontainers/postgresql": "^10.28.0",
     "@types/node": "^20.14.10",
     "@types/pg": "^8.23.1",
+    "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^2.1.9",
     "tsx": "^4.16.2",
     "typescript": "^5.5.3",

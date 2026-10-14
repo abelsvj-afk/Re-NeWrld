@@ -91,9 +91,39 @@ export interface WorldSummary {
   updatedAt: string;
 }
 
+export interface SceneSummary {
+  id: string;
+  worldId: string;
+  chapterId: string;
+  title: string;
+  prose: string;
+  isEnding: boolean;
+}
+
+export interface ChoiceSummary {
+  id: string;
+  worldId: string;
+  sceneId: string;
+  targetSceneId: string;
+  text: string;
+  conditions: unknown;
+  mutations: unknown;
+  sortOrder: number;
+}
+
 export const worldsApi = {
   list: () => api<WorldSummary[]>('/worlds'),
   get: (id: string) => api<WorldSummary & { scenes: unknown[] }>(`/worlds/${id}`),
+  scenes: (worldId: string) => api<SceneSummary[]>(`/worlds/${worldId}/scenes`),
+  createScene: (worldId: string, input: { chapterId: string; title: string; prose: string; isEnding?: boolean }) =>
+    api<{ sceneId: string }>(`/worlds/${worldId}/scenes`, { method: 'POST', body: input }),
+  updateScene: (worldId: string, sceneId: string, input: { title?: string; prose?: string; isEnding?: boolean }) =>
+    api<void>(`/worlds/${worldId}/scenes/${sceneId}`, { method: 'PATCH', body: input }),
+  choices: (worldId: string) => api<ChoiceSummary[]>(`/worlds/${worldId}/choices`),
+  createChoice: (worldId: string, input: { sceneId: string; targetSceneId: string; text: string; conditions?: unknown; mutations?: unknown }) =>
+    api<{ choiceId: string }>(`/worlds/${worldId}/choices`, { method: 'POST', body: input }),
+  publish: (worldId: string) =>
+    api<{ snapshotId: string; versionNumber: number; warnings: string[] }>(`/worlds/${worldId}/publish`, { method: 'POST' }),
 };
 
 // --- Sessions (reader) ---
