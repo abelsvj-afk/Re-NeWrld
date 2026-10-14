@@ -170,8 +170,7 @@ export function LoginPage() {
                     autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    style={{ colorScheme: 'dark' }}
-                    className="w-full bg-panel border border-edge rounded-xl px-4 py-3.5 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all [-webkit-appearance:none] [appearance:none]"
+                    className="w-full bg-panel border border-edge rounded-xl px-4 py-3.5 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all"
                     placeholder="Enter your password"
                   />
                 </div>
