@@ -11,6 +11,7 @@ import { LoginPage } from './pages/LoginPage';
 import { ReaderPage } from './pages/ReaderPage';
 import { CreatorDashboard } from './pages/CreatorDashboard';
 import { SceneEditorPage } from './pages/SceneEditorPage';
+import { PublishPage } from './pages/PublishPage';
 
 function RootLayout() {
   const { user, loading } = useAuth();
@@ -69,6 +70,12 @@ const sceneEditorRoute = createRoute({
   component: SceneEditorPage,
 });
 
+const publishRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/creator/worlds/$worldId/publish',
+  component: PublishPage,
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   indexRoute,
@@ -76,6 +83,7 @@ const routeTree = rootRoute.addChildren([
   readerSessionRoute,
   creatorRoute,
   sceneEditorRoute,
+  publishRoute,
 ]);
 
 export const router = createRouter({ routeTree });

@@ -180,5 +180,21 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
     return { status: 'ok', timestamp: new Date().toISOString() };
   });
 
+  // Serve the React SPA (Phase H). API routes take precedence; unmatched
+  // GETs fall through to index.html for client-side routing.
+  const path = await import('node:path');
+  const fs = await import('node:fs');
+  const webDist = path.join(process.cwd(), 'src/web/dist');
+  if (fs.existsSync(path.join(webDist, 'index.html'))) {
+    const fastifyStatic = (await import('@fastify/static')).default;
+    await app.register(fastifyStatic, { root: webDist, prefix: '/' });
+    app.setNotFoundHandler((req, reply) => {
+      if (req.raw.method === 'GET' && !req.raw.url?.startsWith('/api')) {
+        return reply.sendFile('index.html');
+      }
+      reply.code(404).send({ error: 'Not found' });
+    });
+  }
+
   return app;
 }

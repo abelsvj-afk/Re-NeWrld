@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from '@tanstack/react-router';
 import { motion } from 'framer-motion';
 import { worldsApi, ApiError, type WorldSummary } from '../lib/api';
 import { useAuth } from '../stores/auth';
@@ -18,6 +19,7 @@ function StatusBadge({ status }: { status: WorldSummary['status'] }) {
 
 export function CreatorDashboard() {
   const { logout, user } = useAuth();
+  const navigate = useNavigate();
   const [worlds, setWorlds] = useState<WorldSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -131,12 +133,20 @@ export function CreatorDashboard() {
                     </p>
                   </div>
                   <div className="flex gap-2 shrink-0">
-                    <button className="text-sm px-4 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-arcane transition">
-                      Manage
+                    <button
+                      onClick={() => navigate({ to: '/creator/worlds/$worldId/scenes', params: { worldId: w.id } })}
+                      className="text-sm px-4 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-arcane transition"
+                    >
+                      Edit Scenes
                     </button>
-                    <button className="text-sm px-4 py-2 rounded-lg bg-panel border border-edge-2 hover:border-ember/50 hover:text-ember transition">
-                      Preview
-                    </button>
+                    {w.status === 'draft' && (
+                      <button
+                        onClick={() => navigate({ to: '/creator/worlds/$worldId/publish', params: { worldId: w.id } })}
+                        className="text-sm px-4 py-2 rounded-lg bg-ember/15 border border-ember/30 text-ember hover:bg-ember/25 transition"
+                      >
+                        Publish
+                      </button>
+                    )}
                   </div>
                 </motion.div>
               ))}
