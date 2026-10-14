@@ -16,8 +16,12 @@ const jsonSchema: z.ZodType<JsonType> = z.lazy(() =>
 
 const jsonObjectSchema = z.record(jsonSchema);
 
-export const ConditionSchema = jsonObjectSchema;
-export const MutationSchema = jsonObjectSchema;
+// G1 (ADR-015 §10): conditions/mutations stay LOOSE at the authoring
+// boundary — any JSON value. Strict grammar validation is a publish-time
+// gate (G1c), not an authoring-time gate. In particular, mutations are
+// ARRAYS in the v1 grammar, which an object-only schema would reject.
+export const ConditionSchema: z.ZodType<JsonType> = jsonSchema;
+export const MutationSchema: z.ZodType<JsonType> = jsonSchema;
 export const CharacterAttributesSchema = jsonObjectSchema;
 export const SceneMetadataSchema = jsonObjectSchema;
 
