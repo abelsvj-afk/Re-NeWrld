@@ -1,0 +1,127 @@
+/**
+ * Provider-neutral API client for the Re:NeWrld backend.
+ * All requests go through here — no fetch() calls elsewhere in the app.
+ */
+
+const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+
+export class ApiError extends Error {
+  status: number;
+  code: string;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+let authToken: string | null = localStorage.getItem('renewrld_token');
+
+export function setAuthToken(token: string | null) {
+  authToken = token;
+  if (token) localStorage.setItem('renewrld_token', token);
+  else localStorage.removeItem('renewrld_token');
+}
+
+export function getAuthToken(): string | null {
+  return authToken;
+}
+
+interface RequestOptions {
+  method?: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
+export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...opts.headers,
+  };
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: opts.method ?? 'GET',
+    headers,
+    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+  });
+
+  if (res.status === 204) return undefined as T;
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new ApiError(
+      res.status,
+      data.code ?? 'UNKNOWN',
+      data.message ?? `Request failed with status ${res.status}`,
+    );
+  }
+  return data as T;
+}
+
+// --- Auth ---
+export interface User {
+  id: string;
+  email: string;
+  role: 'creator' | 'reader' | 'admin';
+}
+
+export const authApi = {
+  login: (email: string, password: string) =>
+    api<{ token: string; user: User }>('/auth/login', {
+      method: 'POST',
+      body: { email, password },
+    }),
+  register: (email: string, password: string, role: 'creator' | 'reader') =>
+    api<{ token: string; user: User }>('/auth/register', {
+      method: 'POST',
+      body: { email, password, role },
+    }),
+  me: () => api<User>('/auth/me'),
+};
+
+// --- Worlds ---
+export interface WorldSummary {
+  id: string;
+  title: string;
+  description: string;
+  status: 'draft' | 'published' | 'archived';
+  updatedAt: string;
+}
+
+export const worldsApi = {
+  list: () => api<WorldSummary[]>('/worlds'),
+  get: (id: string) => api<WorldSummary & { scenes: unknown[] }>(`/worlds/${id}`),
+};
+
+// --- Sessions (reader) ---
+export interface ChoiceOption {
+  id: string;
+  text: string;
+  available: boolean;
+  unavailableReason?: string;
+}
+
+export interface SessionState {
+  id: string;
+  worldId: string;
+  currentSceneId: string;
+  sceneText: string;
+  choices: ChoiceOption[];
+  variables: Record<string, unknown>;
+  version: number;
+}
+
+export const sessionsApi = {
+  start: (worldId: string) =>
+    api<SessionState>('/sessions', { method: 'POST', body: { worldId } }),
+  get: (id: string) => api<SessionState>(`/sessions/${id}`),
+  choose: (id: string, choiceId: string, version: number, idempotencyKey: string) =>
+    api<SessionState>(`/sessions/${id}/choices`, {
+      method: 'POST',
+      body: { choiceId, expectedVersion: version },
+      headers: { 'X-Idempotency-Key': idempotencyKey },
+    }),
+};

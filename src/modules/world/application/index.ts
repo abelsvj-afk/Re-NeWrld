@@ -1,5 +1,5 @@
 /**
- * World module public facade (STOP-3).
+ * World module public facade (STOP-3, expanded H-facade).
  *
  * This is the ONLY sanctioned entry point for cross-module imports from the
  * world module. Per docs/repository-architecture.md §B (Strict Isolation),
@@ -8,13 +8,16 @@
  * `world/infrastructure/...` from other modules are prohibited (enforced by
  * tests/unit/import-boundaries.test.ts).
  *
- * This facade exposes the MINIMUM surface the session module needs:
+ * Exposed surface:
  * - Grammar schema types and parsers (Condition, Mutation, Zod schemas)
  * - Grammar marker helper (getGrammarMarker)
+ * - Semantic validator (validateChoiceSemantics, parseMutations)
+ * - Value objects (WorldId, SceneId, ChoiceId, SnapshotId)
+ * - Repository ports (WorldRepositoryPort, CanonRepositoryPort)
+ * - Entities (CanonSnapshot)
+ * - Domain errors (WorldNotFoundError)
  *
- * It deliberately does NOT re-export entities, repositories, or infrastructure.
- * Session needs ports and value objects too, but those pre-date the facade
- * (Phase F debt, TASKS.md H-facade) and migrate separately.
+ * It deliberately does NOT re-export infrastructure adapters or private helpers.
  */
 export {
   ConditionSchema,
@@ -38,3 +41,11 @@ export {
   parseMutations,
   type SemanticViolation,
 } from '../domain/services/semantic-validator.js';
+export { WorldId } from '../domain/value-objects/world-id.value-object.js';
+export { SceneId } from '../domain/value-objects/scene-id.value-object.js';
+export { ChoiceId } from '../domain/value-objects/choice-id.value-object.js';
+export { SnapshotId } from '../domain/value-objects/snapshot-id.value-object.js';
+export { type WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
+export { type CanonRepositoryPort } from '../domain/ports/canon.repository.port.js';
+export { CanonSnapshot } from '../domain/entities/canon-snapshot.entity.js';
+export { WorldNotFoundError } from '../domain/errors/world.errors.js';

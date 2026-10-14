@@ -1,8 +1,10 @@
 import type pkg from 'pg';
 import { ReaderSession } from '../entities/reader-session.entity.js';
 import { SessionId } from '../value-objects/session-id.value-object.js';
-import { SceneId } from '../../../world/domain/value-objects/scene-id.value-object.js';
-import { ChoiceId } from '../../../world/domain/value-objects/choice-id.value-object.js';
+import {
+  SceneId,
+  ChoiceId,
+} from '../../../world/application/index.js';
 import { UserId } from '../../../auth/domain/value-objects/user-id.value-object.js';
 import type { AppliedMutation } from '../services/mutation-applier.js';
 

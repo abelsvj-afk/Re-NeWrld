@@ -1,9 +1,11 @@
-import { WorldRepositoryPort } from '../../world/domain/ports/world.repository.port.js';
-import { CanonRepositoryPort } from '../../world/domain/ports/canon.repository.port.js';
-import { CanonSnapshot } from '../../world/domain/entities/canon-snapshot.entity.js';
-import { WorldId } from '../../world/domain/value-objects/world-id.value-object.js';
-import { SceneId } from '../../world/domain/value-objects/scene-id.value-object.js';
-import { WorldNotFoundError } from '../../world/domain/errors/world.errors.js';
+import {
+  WorldRepositoryPort,
+  CanonRepositoryPort,
+  CanonSnapshot,
+  WorldId,
+  SceneId,
+  WorldNotFoundError,
+} from '../../world/application/index.js';
 import { UserId } from '../../auth/domain/value-objects/user-id.value-object.js';
 import { ReaderSession } from '../domain/entities/reader-session.entity.js';
 import { SessionId } from '../domain/value-objects/session-id.value-object.js';

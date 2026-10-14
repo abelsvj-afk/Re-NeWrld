@@ -36,30 +36,12 @@ function collectTsFiles(dir: string): string[] {
  * Pre-existing Phase F deep imports, allowlisted as H-facade debt.
  * Format: "relative/path/to/file.ts:imported-symbol".
  * These 22 were present before the facade existed; new code must use the facade.
+ *
+ * NOTE (H-facade complete 2026-10-14): All 22 have been migrated to the facade.
+ * This allowlist is now empty and retained only as documentation. The test
+ * enforces zero deep world/domain imports.
  */
-const ALLOWLIST = new Set([
-  'src/modules/session/application/start-reader-session.use-case.ts:WorldRepositoryPort',
-  'src/modules/session/application/start-reader-session.use-case.ts:CanonRepositoryPort',
-  'src/modules/session/application/start-reader-session.use-case.ts:CanonSnapshot',
-  'src/modules/session/application/start-reader-session.use-case.ts:WorldId',
-  'src/modules/session/application/start-reader-session.use-case.ts:SceneId',
-  'src/modules/session/application/start-reader-session.use-case.ts:WorldNotFoundError',
-  'src/modules/session/application/submit-choice.use-case.ts:SceneId',
-  'src/modules/session/application/submit-choice.use-case.ts:ChoiceId',
-  'src/modules/session/application/submit-choice.use-case.ts:CanonRepositoryPort',
-  'src/modules/session/domain/entities/reader-session.entity.ts:WorldId',
-  'src/modules/session/domain/entities/reader-session.entity.ts:SceneId',
-  'src/modules/session/domain/entities/reader-session.entity.ts:SnapshotId',
-  'src/modules/session/domain/ports/session.repository.port.ts:SceneId',
-  'src/modules/session/domain/ports/session.repository.port.ts:ChoiceId',
-  'src/modules/session/http/session.routes.ts:WorldId',
-  'src/modules/session/http/session.routes.ts:ChoiceId',
-  'src/modules/session/http/session.routes.ts:CanonRepositoryPort',
-  'src/modules/session/http/session.routes.ts:WorldRepositoryPort',
-  'src/modules/session/infrastructure/persistence/postgres-session.repository.ts:WorldId',
-  'src/modules/session/infrastructure/persistence/postgres-session.repository.ts:SceneId',
-  'src/modules/session/infrastructure/persistence/postgres-session.repository.ts:SnapshotId',
-  'src/modules/session/infrastructure/persistence/postgres-session.repository.ts:ChoiceId',
+const ALLOWLIST = new Set<string>([
 ]);
 
 describe('import boundaries (STOP-3, Fix 1)', () => {

@@ -2,6 +2,7 @@ import { buildApp } from './app.js';
 import { env } from './config/env.js';
 import { SessionService } from './modules/auth/infrastructure/services/session.service.js';
 import { PostgresPasswordResetRepository } from './modules/auth/infrastructure/persistence/postgres-password-reset.repository.js';
+import { PostgresIdempotencyRepository } from './modules/session/infrastructure/persistence/postgres-idempotency.repository.js';
 
 // Hourly cleanup of expired sessions and expired password-reset tokens (keeps
 // auth_sessions and password_reset_tokens from growing unbounded). In-process
@@ -12,6 +13,7 @@ const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 function startSessionJanitor(app: { log: { info: (o: object, m: string) => void; error: (o: object, m: string) => void } }): void {
   const sessionService = new SessionService();
   const resetRepository = new PostgresPasswordResetRepository();
+  const idempotencyRepository = new PostgresIdempotencyRepository();
 
   const run = async () => {
     try {
@@ -23,9 +25,10 @@ function startSessionJanitor(app: { log: { info: (o: object, m: string) => void;
       if (removedTokens > 0) {
         app.log.info({ removedTokens }, 'Cleaned up expired password-reset tokens');
       }
-      // TODO Phase H: idempotency janitor — see TASKS.md H-idempotency-janitor.
-      // PostgresIdempotencyRepository.deleteExpired() exists but is never
-      // called; expired idempotency_keys rows accumulate until wired here.
+      const removedKeys = await idempotencyRepository.deleteExpired();
+      if (removedKeys > 0) {
+        app.log.info({ removedKeys }, 'Cleaned up expired idempotency keys');
+      }
     } catch (err) {
       app.log.error({ err }, 'Expired session cleanup failed');
     }
