@@ -326,27 +326,86 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 ---
 
 ### Roadmap Phase G: Deterministic Narrative Execution
-- **Task G1: Implement Pure Condition Evaluation Engine**
+- **Design gate**: ADR-015 **APPROVED** 2026-10-13 (product owner). 8 review rounds, findings B1–B38 + C1–C3 all resolved. Level 3 change. No implementation until this approval — now authorized.
+- **Implementation status 2026-10-13**: All Phase G tasks implemented per ADR-015. **G1a** (`src/modules/world/domain/services/grammar.schema.ts`, `semantic-validator.ts`, `grammar-marker.ts` — grammar lives in world module per repository-architecture strict isolation; session→world is the established direction), **G1b** (`src/modules/session/domain/services/condition-evaluator.ts`, `mutation-applier.ts`; `choice.errors.ts` taxonomy), **G1c** (E1b extended; Choice entity preserves absent vs `{}`; canon schema marker; migration 007 nullable payloads), **G2a** (migration 006, fingerprint, idempotency repo), **G2b** (`applyChoiceResult`, terminal/idempotency errors), **G2c** (17-step use case + D3a), **G2d** (route + error mapping), **G2e** (timeline-consumer inventory: no production readers — closed). Verification: tsc clean; 343/343 tests (331 unit + 12 integration, real PG 16.2); 100% G1 coverage; p95 30.6ms. Awaiting product-owner review. Work uncommitted per no-commit rule.
+- **Task G1a: Grammar Schemas + Semantic Validator + Marker Helper (pure domain)**
   - **Phase**: Phase G (Deterministic Engine)
-  - **Prerequisites**: Task F1
-  - **Ownership**: `src/modules/session/domain/services/`
-  - **File Scope**: Condition evaluation domain service
-  - **Objective**: Implement pure function condition evaluation rules against reader state variable maps.
-  - **Traceability**: `docs/detailed-design.md`, `docs/service-specifications.md`
-  - **Acceptance Criteria**: Evaluates complex boolean and numeric conditions deterministically with zero side effects.
-  - **Required Tests**: 100% Vitest unit test coverage for condition evaluation edge cases.
-  - **Definition of Done**: Condition evaluator service fully tested and isolated.
-  - **Acceptance Criteria (added 2026-10-13, Option A)**: G1 defines condition/mutation semantic reference validation and its failure behavior (what happens at publish time and at runtime when a reference is invalid); the runtime handles invalid references safely rather than silently producing incorrect outcomes.
-- **Task G2: Implement State Transition & Narrative Choice Resolution Use Case**
+  - **Prerequisites**: ADR-015 approved
+  - **Ownership**: `src/modules/session/domain/services/` (new files)
+  - **File Scope**: `grammar.schema.ts` (Zod discriminated unions for Condition/Mutation per ADR-015 §2), `semantic-validator.ts` (publish-time walker), `grammar-marker.ts` (`hadMarker`/`effectiveVersion` helper, B12)
+  - **Objective**: Implement the versioned tagged-object grammar: condition ops (`and`/`or`/`not`/`eq`/`ne`/`gt`/`gte`/`lt`/`lte`/`has`/`in`), mutation ops (`set`/`inc`/`dec`/`toggle`/`unset`); operand types; `var` rules (non-empty, ≤128 chars, flat, reject `__proto__`/`constructor`/`prototype` per C3); non-empty `and`/`or`; absent `conditions` = unconditional; `{}` rejected; absent `mutations` ≡ `[]`; nesting limits (depth 10, 100 nodes, 50 mutations); finite numerics; marker `condition_grammar_version: z.literal(1).optional()` with NO schema default.
+  - **Traceability**: ADR-015 §2, D1a; FR-04; US-C05
+  - **Acceptance Criteria**: All §2 grammar rules enforced; unknown op/malformed shape/overlong var/excessive nesting/non-finite literal/empty boolean array/`{}` conditions/`__proto__` keys rejected; valid grammars pass; marker presence tracked separately from default.
+  - **Required Tests**: Unit tests for every rule + boundary (100% coverage gate per ADR-015 §8).
+  - **Definition of Done**: Schemas + validator + marker helper implemented, 100% line/branch/function/statement coverage.
+- **Task G1b: Condition Evaluator + Mutation Applier (pure domain)**
   - **Phase**: Phase G (Deterministic Engine)
-  - **Prerequisites**: Task F2, Task G1
+  - **Prerequisites**: Task G1a
+  - **Ownership**: `src/modules/session/domain/services/` (new files)
+  - **File Scope**: `condition-evaluator.ts`, `mutation-applier.ts`, error classes (`CanonInvariantError`, `LegacyPayloadRejectedError`, `MutationApplicationError`, `StateInvariantError` — B24/B37)
+  - **Objective**: Pure, deterministic, total evaluation: conditions never throw on data shape (missing var → false, type mismatch → false); two-phase mutation boundary (Phase 1 parse → marker-dependent policy: 500 marked / 422 legacy; Phase 2 applicability → 422 per-op table); applier works on deep copy, returns `{state, applied}` only on full success; `unset` reports `removed: boolean`; non-finite `by` = parse failure, non-finite result = 422; negative finite `by` allowed; legacy `{}` → unconditional; legacy unparsable → fail closed.
+  - **Traceability**: ADR-015 D1a, D1b; FR-08, FR-09; US-R03
+  - **Acceptance Criteria**: Truth tables for all ops; per-op missing-var table; discriminated `appliedMutations`; determinism (byte-identical repeats, no Math.random/Date/coercion); error-type separation preserved.
+  - **Required Tests**: 100% coverage (line+branch+function+statement) incl. parsers, marker helper, policy boundary (B29); performance benchmark (<10ms at max bounds).
+  - **Definition of Done**: Evaluator + applier + error classes implemented, coverage gate met, benchmark passing.
+- **Task G1c: E1b Publish-Time Semantic Validation Extension**
+  - **Phase**: Phase G (Deterministic Engine)
+  - **Prerequisites**: Task G1a
+  - **Ownership**: `src/modules/world/domain/services/graph-validator.ts` (additive)
+  - **File Scope**: Extend E1b validator with G1 semantic checks
+  - **Objective**: Walk every choice's conditions/mutations at publish time: unknown op, malformed shape, non-string/empty/overlong `var`, `__proto__` keys, nesting beyond §2 limits, non-finite literals, empty `and`/`or`, `{}` conditions → publishing blockers (422, FR-05 taxonomy). Absent `mutations` valid. Existing E1a/E1b tests unmodified.
+  - **Traceability**: ADR-015 §10 consequences; FR-05
+  - **Acceptance Criteria**: Each violation class blocks publishing with the correct error; valid grammars pass; legacy snapshots unaffected (publish-time only applies to new publishes).
+  - **Required Tests**: Unit tests per violation class.
+  - **Definition of Done**: E1b extended, all existing + new tests pass.
+- **Task G2a: Migration 006 + Idempotency Repository + Fingerprint Helper**
+  - **Phase**: Phase G (Deterministic Engine)
+  - **Prerequisites**: Task G1b
+  - **Ownership**: `db/migrations/`, `src/modules/session/infrastructure/persistence/`, `src/modules/session/domain/`
+  - **File Scope**: `006_idempotency_keys.sql`, `IdempotencyRepositoryPort` + Postgres impl, `fingerprint.ts` (canonical SHA-256, B35 test vectors)
+  - **Objective**: `idempotency_keys` table (UUID PK, session_id FK CASCADE, request_hash CHAR(64), response JSONB, created_at, expires_at; index on expires_at). Expiry predicate `expires_at <= now()` on DB clock everywhere (B34). Fingerprint: exact canonical bytes per ADR-015 step 2 + 3 normative test vectors. Refinement requirement (B32): specify isolation level (default READ COMMITTED) + exact reclamation SQL; verify via PG tests.
+  - **Traceability**: ADR-015 §7 (D6); ADR-013 D3
+  - **Acceptance Criteria**: Migration applies cleanly; fingerprint matches all 3 test vectors; reclamation protocol per §7.
+  - **Required Tests**: Unit tests for fingerprint (vectors, casing, ordering); integration tests for migration + reclamation races (B27).
+  - **Definition of Done**: Migration + repo + fingerprint implemented and tested.
+- **Task G2b: Entity applyChoiceResult + Error Classes**
+  - **Phase**: Phase G (Deterministic Engine)
+  - **Prerequisites**: Task G1b
+  - **Ownership**: `src/modules/session/domain/entities/reader-session.entity.ts` (additive), `src/modules/session/domain/errors/`
+  - **File Scope**: `applyChoiceResult(toSceneId, newState, { isEndingTarget })`, new error classes
+  - **Objective**: Atomic domain operation: active-check, `newState` vs `SessionStateSchema` (`StateInvariantError` → 500 on failure), wholesale state replacement (defensive copy), scene set, version +1 exactly once, `updatedAt`, status derived from `isEndingTarget` (B23). F2a `applyTransition` untouched. New errors: `CanonInvariantError` (500), `LegacyPayloadRejectedError` (422), `MutationApplicationError` (422), `StateInvariantError` (500), `StoredResponseCorruptError` (500), `ChoiceNotAttachedError` (422), `ChoiceNotAvailableError` (422, exists? verify).
+  - **Traceability**: ADR-015 D1b, D4
+  - **Acceptance Criteria**: Single version increment; terminal completion derived; invalid state → 500 pre-write; F2a tests unmodified and passing.
+  - **Required Tests**: Unit tests for the new method + error mappings.
+  - **Definition of Done**: Entity method + errors implemented, tested, F2a intact.
+- **Task G2c: SubmitChoiceUseCase (17-step flow)**
+  - **Phase**: Phase G (Deterministic Engine)
+  - **Prerequisites**: Tasks G2a, G2b
   - **Ownership**: `src/modules/session/application/`
-  - **File Scope**: Session application use case, narrative resolver service
-  - **Objective**: Execute deterministic session choice progression in the application layer: validate input, resolve condition, evaluate state transition, and append timeline within transaction boundaries, returning structured results without handling transport HTTP concerns.
-  - **Traceability**: `docs/runtime-design.md`, `docs/user-stories.md`
-  - **Acceptance Criteria**: Choice selection correctly updates reader state, logs timeline history, and returns next scene node.
-  - **Required Tests**: Integration tests verifying end-to-end choice progression and timeline logging.
-  - **Definition of Done**: Deterministic narrative execution engine fully operational.
+  - **File Scope**: `submit-choice.use-case.ts` (new)
+  - **Objective**: Implement ADR-015 D3 steps 1–17 exactly: auth/ownership (404-not-403), idempotency-key validation + fingerprint, early lookup (read-only), terminal fast-path, canon load (corrupt → 500), choice existence (404 pre-tx), tx: row lock → idempotency recheck (replay/409/expired-delete-in-tx) → active check → version check (409 + currentVersion) → placement check (422, B30) → conditions (422/500 marker-dependent) → mutations in-memory (two-phase) → `applyChoiceResult` → response construction in-memory (availableChoices: [] if ending; B16 policy otherwise) → persist (UPDATE incl. status + timeline envelope INSERT + idempotency INSERT) → COMMIT → D3a recovery on unique violation (rollback-first, replay/409/bounded retry, no recursion). Discard mutated entity on rollback (B26).
+  - **Traceability**: ADR-015 D3, D3a, D5; FR-08, FR-09; US-R03
+  - **Acceptance Criteria**: Every step's error contract per D4; zero committed writes on all failure paths; idempotency replay deep-equal; version precedence (stale + failing condition → 409).
+  - **Required Tests**: Unit tests with fakes (full D7 G2 matrix); integration tests (real PG): happy path, concurrency, idempotency races (B21), expiry+cleanup race (B27), construction failure (B28), legacy snapshots.
+  - **Definition of Done**: Use case implemented, all unit + integration tests pass.
+- **Task G2d: POST /sessions/:id/choices Route + Error Mapping + Wiring**
+  - **Phase**: Phase G (Deterministic Engine)
+  - **Prerequisites**: Task G2c
+  - **Ownership**: `src/modules/session/http/session.routes.ts` (additive), `src/app.ts` (error handler additive)
+  - **File Scope**: Route, Zod schemas (body: choiceId UUID + expectedVersion positive int, strict; header X-Idempotency-Key UUID required), error mapper
+  - **Objective**: `POST /sessions/:id/choices`, unprefixed; `authenticate` + reader ownership (404-not-403); exact D2 response schema (appliedMutations discriminated, availableChoices choiceId/text/sortOrder only, no stateVariables); error mapping preserves B24 classes (route-level test: marked parse → 500, legacy parse → 422, applicability → 422); DI wiring in `SessionRouteDeps`/`AppDeps`.
+  - **Traceability**: ADR-015 D2, D4; ADR-003
+  - **Acceptance Criteria**: All status codes per D4; spoilers never exposed; error-type boundary preserved end-to-end.
+  - **Required Tests**: Route unit tests (fakes); error-mapper test (B24).
+  - **Definition of Done**: Route implemented, wired, tested.
+- **Task G2e: Timeline Consumer Inventory Closure**
+  - **Phase**: Phase G (Deterministic Engine)
+  - **Prerequisites**: Task G2c
+  - **Ownership**: repo-wide
+  - **File Scope**: verification only (no code unless a consumer is found)
+  - **Objective**: (B25) Close the inventory: 2026-10-13 search found NO production readers of `reader_timelines.state_diff` (write-only audit column; only test assertions read it). Re-verify at implementation time; if any reader is found, add both-shapes test or documented justification.
+  - **Definition of Done**: Inventory re-verified and recorded.
+- **System Completeness Gate (Phase G slice)**: Security — ownership 404-not-403, strict Zod at boundaries, parameterized SQL, no secrets; Abuse — idempotency prevents duplicate mutations, rate limits already global (threat model: Planned); Reliability — transactions + rollback, D3a bounded recovery, no silent failures; Data Governance — 24h idempotency retention with `expires_at <= now()` predicate, CASCADE defensive (no session deletion in MVP); AI Safety — N/A (pure deterministic logic, no model involvement — ADR-015 §2); Product Completeness — N/A (backend phase; frontend is Phase H).
 
 ---
 
@@ -475,3 +534,7 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 ## 3. Post-MVP Implementation Backlog (Deferred / Future Extensions)
 - **Task L1: Implement Pluggable Background Job Queue (`IntfJobQueue`)**: Abstracted via `src/shared/ports/job-queue.interface.ts` (BullMQ / Redis per ADR-005) for asynchronous batch simulations. (*Deferred to Post-MVP*).
 - **Task M1: Implement Advanced Agent Simulation & Multiverse Branching**: Future living world multi-timeline outcome pooling and Overseer override engine. (*Deferred to Post-MVP*).
+
+## 4. Technical Debt Register (STOP-5)
+- **H-facade**: Migrate the session module's 30 pre-existing Phase F deep world-module imports (value objects, ports, entities, errors — see STOP-3 evidence) to the `src/modules/world/application/index.ts` public facade. The 4 Phase G grammar imports already use the facade; the boundary test (`tests/unit/import-boundaries.test.ts`) currently enforces only `world/domain/services` and `world/infrastructure` paths. Estimate: 2–3 hours, safe refactor. Enforcement should extend to all deep paths after migration.
+- **H-idempotency-janitor**: Wire `PostgresIdempotencyRepository.deleteExpired()` into the server janitor (`src/server.ts`, adjacent to the password-reset cleanup). Expired `idempotency_keys` rows are currently reclaimed lazily on key reuse only; without a janitor the table grows unbounded. Stored responses contain reader-state-adjacent data (appliedMutations, availableChoices) — a data-retention concern at scale. TODO comment added in `src/server.ts`.
