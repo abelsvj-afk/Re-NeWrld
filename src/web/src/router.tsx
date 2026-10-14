@@ -16,9 +16,8 @@ import { PublishPage } from './pages/PublishPage';
 function RootLayout() {
   const { user } = useAuth();
 
-  // Don't redirect if already on /login (prevents infinite loop)
-  const isLogin = typeof window !== 'undefined' && window.location.pathname === '/login';
-  if (!user && !isLogin) return <Navigate to="/login" />;
+  // Render login directly instead of Navigate (avoids router issues)
+  if (!user) return <LoginPage />;
   return <Outlet />;
 }
 
