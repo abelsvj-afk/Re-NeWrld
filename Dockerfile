@@ -30,6 +30,11 @@ COPY . .
 # Build application
 RUN npm run build
 
+# Build frontend SPA (src/web already copied via COPY . .)
+WORKDIR /app/src/web
+RUN npm ci --include=dev && npm run build
+WORKDIR /app
+
 # Remove development dependencies
 RUN npm prune --omit=dev
 
