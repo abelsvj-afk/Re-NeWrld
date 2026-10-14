@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import { App } from './router';
 import { useAuth } from './stores/auth';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 function Boot() {
   const hydrate = useAuth((s) => s.hydrate);
@@ -14,6 +15,8 @@ function Boot() {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <Boot />
+    <ErrorBoundary>
+      <Boot />
+    </ErrorBoundary>
   </StrictMode>,
 );

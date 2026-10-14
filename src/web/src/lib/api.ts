@@ -3,7 +3,9 @@
  * All requests go through here — no fetch() calls elsewhere in the app.
  */
 
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+const API_BASE = import.meta.env.VITE_API_URL ?? '';
+// Empty string = same origin. Correct when backend serves the frontend,
+// and VITE_API_URL overrides for dev (e.g. http://localhost:3000).
 
 export class ApiError extends Error {
   status: number;
