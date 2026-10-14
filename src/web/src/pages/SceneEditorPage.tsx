@@ -1,14 +1,21 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useParams } from '@tanstack/react-router';
+import { useParams, useNavigate } from '@tanstack/react-router';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { worldsApi, ApiError, type SceneSummary, type ChoiceSummary } from '../lib/api';
+import { useAuth } from '../stores/auth';
+
+const TABS = ['Scene', 'Script', 'Flow', 'Assets'] as const;
 
 export function SceneEditorPage() {
   const { worldId } = useParams({ strict: false }) as { worldId: string };
+  const navigate = useNavigate();
+  const { logout } = useAuth();
   const [scenes, setScenes] = useState<SceneSummary[]>([]);
   const [choices, setChoices] = useState<ChoiceSummary[]>([]);
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<typeof TABS[number]>('Scene');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -20,162 +27,142 @@ export function SceneEditorPage() {
   const editor = useEditor({
     extensions: [StarterKit],
     content: '',
-    editorProps: {
-      attributes: {
-        class: 'prose-reading focus:outline-none min-h-[300px]',
-      },
-    },
+    editorProps: { attributes: { class: 'scene-prose focus:outline-none min-h-[280px]' } },
   });
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, c] = await Promise.all([
-        worldsApi.scenes(worldId),
-        worldsApi.choices(worldId),
-      ]);
-      setScenes(s);
-      setChoices(c);
+      const [s, c] = await Promise.all([worldsApi.scenes(worldId), worldsApi.choices(worldId)]);
+      setScenes(s); setChoices(c);
       if (s.length > 0 && !activeSceneId) setActiveSceneId(s[0].id);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Failed to load');
-    } finally {
-      setLoading(false);
-    }
-  }, [worldId, activeSceneId]);
+    } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to load'); }
+    finally { setLoading(false); }
+  }, [worldId]);
 
+  useEffect(() => { load(); }, [worldId]);
   useEffect(() => {
-    load();
-  }, [worldId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (activeScene && editor) {
-      setTitle(activeScene.title);
-      editor.commands.setContent(activeScene.prose);
-    }
-  }, [activeSceneId]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (activeScene && editor) { setTitle(activeScene.title); editor.commands.setContent(activeScene.prose); }
+  }, [activeSceneId]);
 
   const save = async () => {
     if (!activeScene || !editor || saving) return;
-    setSaving(true);
-    setError(null);
+    setSaving(true); setError(null);
     try {
-      await worldsApi.updateScene(worldId, activeScene.id, {
-        title,
-        prose: editor.getHTML(),
-      });
-      setScenes((prev) =>
-        prev.map((s) => (s.id === activeScene.id ? { ...s, title } : s)),
-      );
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Save failed');
-    } finally {
-      setSaving(false);
-    }
+      await worldsApi.updateScene(worldId, activeScene.id, { title, prose: editor.getHTML() });
+      setScenes((prev) => prev.map((s) => (s.id === activeScene.id ? { ...s, title } : s)));
+    } catch (err) { setError(err instanceof ApiError ? err.message : 'Save failed'); }
+    finally { setSaving(false); }
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-void flex items-center justify-center">
-        <div className="text-ink-dim animate-pulse">Loading editor…</div>
-      </div>
-    );
-  }
+  if (loading) return <div className="min-h-screen bg-void flex items-center justify-center"><div className="text-ink-dim animate-pulse font-prose text-lg">Opening narrative arc…</div></div>;
+
+  const sceneNumber = activeScene ? scenes.findIndex(s => s.id === activeScene.id) + 1 : 0;
 
   return (
-    <div className="min-h-screen bg-void flex">
-      {/* Scene list */}
-      <aside className="w-72 shrink-0 border-r border-edge bg-abyss/60 flex flex-col">
-        <div className="px-5 py-4 border-b border-edge">
-          <h2 className="text-sm font-semibold uppercase tracking-widest text-ink-faint">
-            Scenes
-          </h2>
-        </div>
-        <div className="flex-1 overflow-auto p-3 space-y-1">
-          {scenes.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => setActiveSceneId(s.id)}
-              className={`w-full text-left px-4 py-3 rounded-lg text-sm transition ${
-                s.id === activeSceneId
-                  ? 'bg-arcane/10 border border-arcane/30 text-ink'
-                  : 'text-ink-dim hover:bg-panel hover:text-ink border border-transparent'
-              }`}
-            >
-              <div className="font-medium truncate">{s.title}</div>
-              {s.isEnding && (
-                <span className="text-xs text-ember">◆ Ending</span>
-              )}
+    <div className="min-h-screen bg-void flex flex-col">
+      <style>{`.scene-prose{font-family:Georgia,serif;font-size:1.05rem;line-height:1.9;color:#f2f0ea}.scene-prose p{margin-bottom:1em}.scene-prose:focus{outline:none}`}</style>
+
+      {/* Top bar */}
+      <header className="border-b border-edge/70 bg-abyss/60 backdrop-blur-xl">
+        <div className="flex items-center justify-between px-5 py-3">
+          <div className="flex items-center gap-4">
+            <button onClick={() => navigate({ to: '/creator' })} className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-arcane to-voidlight flex items-center justify-center"><span className="text-void font-bold text-sm">N</span></div>
+              <div className="text-left"><p className="text-[13px] font-bold tracking-[0.18em]">NARRATIVE ARC</p><p className="text-[10px] text-ink-faint">Project: {title || 'Untitled'}</p></div>
             </button>
-          ))}
-          {scenes.length === 0 && (
-            <p className="text-ink-faint text-sm px-4 py-6 text-center">
-              No scenes yet.
-            </p>
-          )}
-        </div>
-      </aside>
-
-      {/* Editor */}
-      <main className="flex-1 flex flex-col min-w-0">
-        <header className="border-b border-edge bg-abyss/40 px-8 py-4 flex items-center justify-between sticky top-0">
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Scene title"
-            className="bg-transparent text-xl font-semibold focus:outline-none focus:border-b focus:border-arcane/50 pb-1 w-full max-w-xl placeholder:text-ink-faint"
-          />
-          <button
-            onClick={save}
-            disabled={saving || !activeScene}
-            className="ml-4 shrink-0 bg-arcane text-void text-sm font-semibold rounded-lg px-6 py-2.5 hover:bg-arcane/90 disabled:opacity-50 transition shadow-glow-cyan"
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-        </header>
-
-        <div className="flex-1 overflow-auto">
-          <div className="max-w-3xl mx-auto px-8 py-10">
-            {error && (
-              <p className="text-blood text-sm bg-blood/10 border border-blood/20 rounded-lg px-4 py-3 mb-6">
-                {error}
-              </p>
-            )}
-            {activeScene ? (
-              <>
-                <EditorContent editor={editor} />
-                <div className="mt-12 border-t border-edge pt-8">
-                  <h3 className="text-sm font-semibold uppercase tracking-widest text-ink-faint mb-4">
-                    Choices ({sceneChoices.length})
-                  </h3>
-                  <div className="space-y-2">
-                    {sceneChoices.map((c) => (
-                      <div
-                        key={c.id}
-                        className="glass rounded-lg px-5 py-3.5 flex items-center justify-between"
-                      >
-                        <span className="text-sm">{c.text}</span>
-                        <span className="text-xs text-ink-faint font-mono">
-                          → {scenes.find((s) => s.id === c.targetSceneId)?.title ?? '…'}
-                        </span>
-                      </div>
-                    ))}
-                    {sceneChoices.length === 0 && (
-                      <p className="text-ink-faint text-sm">
-                        No choices on this scene yet.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </>
-            ) : (
-              <p className="text-ink-faint text-center py-20">
-                Select a scene to edit.
-              </p>
-            )}
+            <nav className="hidden md:flex items-center gap-1 ml-6 bg-panel/50 border border-edge/60 rounded-xl p-1">
+              {TABS.map(t => (
+                <button key={t} onClick={() => setActiveTab(t)} className={`px-4 py-1.5 rounded-lg text-[13px] font-medium transition-all ${activeTab === t ? 'bg-arcane/15 text-arcane border border-arcane/25' : 'text-ink-dim hover:text-ink border border-transparent'}`}>{t}</button>
+              ))}
+            </nav>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-ink-faint mr-2 hidden sm:block">{saving ? 'Saving…' : 'Saved'}</span>
+            <button onClick={save} disabled={saving} className="text-[13px] font-medium px-4 py-2 rounded-xl border border-edge bg-panel text-ink-dim hover:border-arcane/40 hover:text-arcane transition-all disabled:opacity-50">Save</button>
+            <button className="text-[13px] font-semibold px-4 py-2 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void hover:brightness-110 transition-all shadow-glow-cyan">Share</button>
+            <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition ml-2">Sign out</button>
           </div>
         </div>
-      </main>
+      </header>
+
+      <div className="flex-1 flex min-h-0">
+        {/* Project panel */}
+        <aside className="w-[260px] shrink-0 border-r border-edge/70 bg-abyss/40 hidden lg:flex flex-col">
+          <div className="px-5 py-4 border-b border-edge/60"><p className="text-[10px] uppercase tracking-[0.25em] text-ink-faint font-semibold">Project Panel</p></div>
+          <div className="flex-1 overflow-auto p-3">
+            <p className="px-3 py-2 text-[11px] font-semibold text-ember/90 uppercase tracking-widest">Act 1: The Beginning</p>
+            <div className="space-y-0.5">
+              {scenes.map((s, i) => (
+                <button key={s.id} onClick={() => setActiveSceneId(s.id)} className={`w-full text-left px-3 py-2.5 rounded-lg transition-all group ${s.id === activeSceneId ? 'bg-arcane/[0.08] border border-arcane/25' : 'border border-transparent hover:bg-panel'}`}>
+                  <div className="flex items-center gap-3">
+                    <span className={`text-[11px] font-mono w-7 ${s.id === activeSceneId ? 'text-arcane' : 'text-ink-faint'}`}>{String(i + 1).padStart(2, '0')}</span>
+                    <div className="min-w-0 flex-1"><p className={`text-[13px] truncate ${s.id === activeSceneId ? 'text-ink font-medium' : 'text-ink-dim group-hover:text-ink'}`}>{s.title}</p>{s.isEnding && <span className="text-[10px] text-ember">◆ Ending</span>}</div>
+                  </div>
+                </button>
+              ))}
+              {scenes.length === 0 && <p className="text-ink-faint text-[13px] px-3 py-8 text-center">No scenes yet.<br/>Create your first scene to begin.</p>}
+            </div>
+          </div>
+        </aside>
+
+        {/* Main scene content */}
+        <main className="flex-1 overflow-auto min-w-0 bg-[radial-gradient(ellipse_60%_40%_at_50%_0%,rgba(34,211,238,0.04),transparent)]">
+          <div className="max-w-3xl mx-auto px-8 py-10">
+            {error && <div className="bg-blood/10 border border-blood/25 rounded-xl p-4 text-blood text-sm mb-6">{error}</div>}
+            {activeScene ? (
+              <AnimatePresence mode="wait">
+                <motion.div key={activeScene.id} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+                  <div className="mb-8">
+                    <p className="text-[11px] uppercase tracking-[0.3em] text-arcane/80 font-semibold mb-2">Scene {sceneNumber}</p>
+                    <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Scene title" className="bg-transparent font-prose text-3xl md:text-4xl tracking-tight focus:outline-none w-full placeholder:text-ink-faint/50 border-b border-transparent focus:border-arcane/30 pb-2 transition-colors" />
+                  </div>
+                  <div className="bg-panel/40 border border-edge/60 rounded-2xl p-8 mb-8"><EditorContent editor={editor} /></div>
+
+                  {/* Branching choices */}
+                  <div className="mb-8">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-[11px] uppercase tracking-[0.25em] text-ink-faint font-semibold">Branching Choices</h3>
+                      <span className="text-xs text-ink-faint">{sceneChoices.length} choice{sceneChoices.length === 1 ? '' : 's'}</span>
+                    </div>
+                    <div className="space-y-3">
+                      {sceneChoices.map((c, i) => (
+                        <motion.div key={c.id} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.05 }} className="group relative bg-gradient-to-r from-ember/[0.06] to-transparent border border-edge/70 rounded-xl p-5 hover:border-ember/30 transition-all">
+                          <div className="flex items-start gap-4">
+                            <span className="w-8 h-8 rounded-lg bg-ember/10 border border-ember/25 text-ember text-sm font-bold flex items-center justify-center shrink-0">{i + 1}</span>
+                            <div className="flex-1 min-w-0"><p className="text-[15px] leading-relaxed mb-1">{c.text}</p><p className="text-xs text-ink-faint">→ {scenes.find((s) => s.id === c.targetSceneId)?.title ?? 'Unlinked'}</p></div>
+                          </div>
+                        </motion.div>
+                      ))}
+                      {sceneChoices.length === 0 && <div className="border border-dashed border-edge rounded-xl p-8 text-center"><p className="text-sm text-ink-faint">No branching choices yet.<br/>Add choices to let readers shape the story.</p></div>}
+                    </div>
+                  </div>
+                </motion.div>
+              </AnimatePresence>
+            ) : (
+              <div className="text-center py-24"><p className="font-prose text-2xl mb-3 text-ink-dim">Select a scene</p><p className="text-sm text-ink-faint">Choose from the project panel to begin editing.</p></div>
+            )}
+          </div>
+        </main>
+
+        {/* Scene conditions */}
+        <aside className="w-[280px] shrink-0 border-l border-edge/70 bg-abyss/40 hidden xl:flex flex-col">
+          <div className="px-5 py-4 border-b border-edge/60"><p className="text-[10px] uppercase tracking-[0.25em] text-ink-faint font-semibold">Scene Conditions</p></div>
+          <div className="flex-1 overflow-auto p-5 space-y-6">
+            <div><p className="text-xs text-ink-faint mb-1">Node</p><p className="font-mono text-sm text-arcane">1.{sceneNumber}</p></div>
+            <div><p className="text-[11px] uppercase tracking-widest text-ink-faint font-semibold mb-3">Inventory</p><div className="bg-panel/60 border border-edge/60 rounded-xl p-4"><p className="text-[13px] text-ink-dim">No requirements</p></div></div>
+            <div><p className="text-[11px] uppercase tracking-widest text-ink-faint font-semibold mb-3">Relationships</p><div className="bg-panel/60 border border-edge/60 rounded-xl p-4"><p className="text-[13px] text-ink-dim">No conditions</p></div></div>
+            <div><p className="text-[11px] uppercase tracking-widest text-ink-faint font-semibold mb-3">Objective</p><div className="bg-panel/60 border border-edge/60 rounded-xl p-4"><p className="text-[13px] text-ink-dim">Advance the narrative</p></div></div>
+            <div><p className="text-[11px] uppercase tracking-widest text-ink-faint font-semibold mb-3">Flow</p><div className="bg-panel/60 border border-edge/60 rounded-xl p-4 h-32 flex items-center justify-center"><div className="flex items-center gap-2">{scenes.slice(0, 5).map((s, i) => (<div key={s.id} className="flex items-center">{i > 0 && <div className="w-4 h-px bg-edge-2" />}<div className={`w-3 h-3 rounded-full border ${s.id === activeSceneId ? 'bg-arcane border-arcane shadow-glow-cyan' : 'bg-panel border-edge-2'}`} /></div>))}</div></div></div>
+          </div>
+        </aside>
+      </div>
+
+      {/* Status bar */}
+      <footer className="border-t border-edge/70 bg-abyss/60 px-5 py-2 flex items-center justify-between text-[11px] text-ink-faint">
+        <div className="flex items-center gap-4"><span>{scenes.length} scenes</span><span>{choices.length} choices</span></div>
+        <div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${saving ? 'bg-ember animate-pulse' : 'bg-emerald-400'}`} />{saving ? 'Saving…' : 'All changes saved'}</div>
+      </footer>
     </div>
   );
 }
