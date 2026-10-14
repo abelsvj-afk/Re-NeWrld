@@ -14,15 +14,7 @@ import { SceneEditorPage } from './pages/SceneEditorPage';
 import { PublishPage } from './pages/PublishPage';
 
 function RootLayout() {
-  const { user, loading } = useAuth();
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-void flex items-center justify-center">
-        <div className="text-ink-dim animate-pulse">Entering the world…</div>
-      </div>
-    );
-  }
+  const { user } = useAuth();
 
   if (!user) return <Navigate to="/login" />;
   return <Outlet />;
