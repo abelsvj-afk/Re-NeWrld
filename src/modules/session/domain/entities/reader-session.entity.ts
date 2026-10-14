@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import { SessionId } from '../value-objects/session-id.value-object.js';
 import { SessionStatus } from '../value-objects/session-status.value-object.js';
-import { WorldId } from '../../../world/domain/value-objects/world-id.value-object.js';
-import { SceneId } from '../../../world/domain/value-objects/scene-id.value-object.js';
-import { SnapshotId } from '../../../world/domain/value-objects/snapshot-id.value-object.js';
+import {
+  WorldId,
+  SceneId,
+  SnapshotId,
+} from '../../../world/application/index.js';
 import { UserId } from '../../../auth/domain/value-objects/user-id.value-object.js';
 import {
   SessionValidationError,
