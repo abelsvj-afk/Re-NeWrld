@@ -12,7 +12,7 @@ function newIdempotencyKey(): string {
 }
 
 export function ReaderPage() {
-  const { logout, user } = useAuth();
+  const { logout, user, becomeCreator } = useAuth();
   const params = useParams({ strict: false }) as { sessionId?: string };
   const navigate = useNavigate();
   const sessionId = params.sessionId;
@@ -22,6 +22,21 @@ export function ReaderPage() {
   const [loading, setLoading] = useState(true);
   const [choosing, setChoosing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [upgrading, setUpgrading] = useState(false);
+
+  const handleBecomeCreator = async () => {
+    if (upgrading) return;
+    setUpgrading(true);
+    setError(null);
+    try {
+      await becomeCreator();
+      navigate({ to: '/' });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Upgrade failed');
+    } finally {
+      setUpgrading(false);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -137,6 +152,7 @@ export function ReaderPage() {
           </div>
           <div className="flex items-center gap-3">
             {user?.role === 'creator' && <button onClick={() => navigate({ to: '/creator' })} className="text-xs font-medium px-3 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-ink transition">✦ Creator Studio</button>}
+            {user?.role === 'reader' && <button onClick={handleBecomeCreator} disabled={upgrading} className="text-xs font-medium px-3 py-2 rounded-lg bg-gradient-to-r from-arcane to-[#0ea5c4] text-void hover:brightness-110 disabled:opacity-50 transition">✦ {upgrading ? 'Upgrading…' : 'Become a Creator'}</button>}
             <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
           </div>
         </div>

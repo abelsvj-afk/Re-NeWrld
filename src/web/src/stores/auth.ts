@@ -8,6 +8,7 @@ interface AuthState {
   register: (email: string, password: string, role: 'creator' | 'reader') => Promise<void>;
   logout: () => void;
   hydrate: () => Promise<void>;
+  becomeCreator: () => Promise<void>;
 }
 
 export const useAuth = create<AuthState>((set) => ({
@@ -37,5 +38,10 @@ export const useAuth = create<AuthState>((set) => ({
     } catch {
       set({ user: null, loading: false });
     }
+  },
+
+  becomeCreator: async () => {
+    const user = await authApi.becomeCreator();
+    set({ user, loading: false });
   },
 }));

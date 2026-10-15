@@ -84,6 +84,8 @@ export const authApi = {
     }),
   me: () => api<User>('/auth/me'),
   logout: () => api<void>('/auth/logout', { method: 'POST' }),
+  becomeCreator: () =>
+    api<User>('/auth/become-creator', { method: 'POST' }),
 };
 
 // --- Worlds ---

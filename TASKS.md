@@ -427,6 +427,15 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 ---
 
 ### Roadmap Phase H: API & Frontend Integration
+
+- **Task H-UX1: Become-a-Creator self-service upgrade (Slice 1)** [APPROVED 2026-10-15]
+  - **Phase**: Phase H (API/Frontend) — Level 2
+  - **Prerequisites**: `POST /auth/become-creator` exists (verified idempotent, per-request role resolution)
+  - **File Scope**: `src/web/src/lib/api.ts`, `src/web/src/stores/auth.ts`, `src/web/src/pages/ReaderPage.tsx`
+  - **Objective**: Reader accounts get a "Become a Creator" button calling the existing endpoint; auth store updates on success; redirect to Creator Studio without re-login.
+  - **Acceptance Criteria**: Button visible only for `role === 'reader'`; success → role becomes `'creator'` → CreatorDashboard renders; already-creators unaffected (endpoint idempotent); unauthenticated → 401 (existing backend behavior).
+  - **Required Tests**: Unit test for auth-store upgrade action; backend `become-creator.use-case` already covered.
+  - **Definition of Done**: User's account can enter Creator Studio without re-registering. Live UX Gate on deployed URL.
 - **Task H1a: Implement Auth & Session REST API Controllers and Zod Validation**
   - **Phase**: Phase H (API/Frontend)
   - **Prerequisites**: Task C3, Task F1
