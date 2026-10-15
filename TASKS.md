@@ -445,6 +445,7 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Acceptance Criteria**: `GET /worlds/published` returns only published worlds, any authenticated role; drafts excluded; invalid genre → 400; genre/tag/search filters combine; search applied before pagination; deterministic ordering (publishedAt desc, id tiebreak); existing worlds without genre/tags appear under "All"/"Uncategorized"; no creator display name in MVP (UUID not exposed).
   - **Required Tests**: Unit (filter logic, schema validation, pagination); integration (multi-creator draft/published matrix) — CI only.
   - **Definition of Done**: Reader library shows published worlds from all creators with working genre/tag/search filters. Live UX Gate on deployed URL.
+  - **System Completeness Gate (2026-10-15)**: Security — new endpoint authenticated (any role), no RBAC change; search uses parameterized queries; genre validated against closed enum; global rate limits apply; Abuse — pagination bounded 1–100, deterministic ordering; Reliability — no migration, no schema change; Data Governance — no creator PII exposed (UUID not shown, display name omitted per decision); drafts excluded at query layer; AI Safety — N/A (deterministic catalog, no model involvement).
 - **Task H1a: Implement Auth & Session REST API Controllers and Zod Validation**
   - **Phase**: Phase H (API/Frontend)
   - **Prerequisites**: Task C3, Task F1
