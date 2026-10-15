@@ -436,6 +436,15 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Acceptance Criteria**: Button visible only for `role === 'reader'`; success → role becomes `'creator'` → CreatorDashboard renders; already-creators unaffected (endpoint idempotent); unauthenticated → 401 (existing backend behavior).
   - **Required Tests**: Unit test for auth-store upgrade action; backend `become-creator.use-case` already covered.
   - **Definition of Done**: User's account can enter Creator Studio without re-registering. Live UX Gate on deployed URL.
+
+- **Task H-UX2: Published-world catalog with genre/tag taxonomy (Slice 2)** [APPROVED 2026-10-15]
+  - **Phase**: Phase H (API/Frontend) — Level 2 (no migration: genre/tags in existing metadata JSONB; no auth-boundary change; new read endpoint within existing architecture)
+  - **Prerequisites**: Task H-UX1
+  - **File Scope**: `src/modules/world/domain/value-objects/world-schemas.ts`, `src/modules/world/application/list-published-worlds.use-case.ts` (new), `src/modules/world/domain/ports/world.repository.port.ts`, `src/modules/world/infrastructure/persistence/postgres-world.repository.ts`, `src/modules/world/http/world.routes.ts`, `src/web/src/lib/api.ts`, `src/web/src/pages/ReaderPage.tsx`, world create/edit forms
+  - **Objective**: Reader-accessible paginated catalog of published worlds across creators, with genre (closed enum of 10 + 'other') and tags (validated freeform). Creator can assign at create/edit. Reader can filter by genre/tag/search.
+  - **Acceptance Criteria**: `GET /worlds/published` returns only published worlds, any authenticated role; drafts excluded; invalid genre → 400; genre/tag/search filters combine; search applied before pagination; deterministic ordering (publishedAt desc, id tiebreak); existing worlds without genre/tags appear under "All"/"Uncategorized"; no creator display name in MVP (UUID not exposed).
+  - **Required Tests**: Unit (filter logic, schema validation, pagination); integration (multi-creator draft/published matrix) — CI only.
+  - **Definition of Done**: Reader library shows published worlds from all creators with working genre/tag/search filters. Live UX Gate on deployed URL.
 - **Task H1a: Implement Auth & Session REST API Controllers and Zod Validation**
   - **Phase**: Phase H (API/Frontend)
   - **Prerequisites**: Task C3, Task F1
