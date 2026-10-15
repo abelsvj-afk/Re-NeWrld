@@ -50,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Scene narration frontend (T2, ADR-016): dark-cinematic NarrationPlayer in the reader (play/pause, waveform progress, keyboard accessible); creator NarrationPanel in the scene editor (voice picker, per-scene Generate, quota bar with 80% alert).
 - Narration integration tests (T3, ADR-016): cache hit/miss, concurrent generation idempotency, quota exhaustion, draft-world reader blocking. ElevenLabs mocked.
 - Become-a-Creator self-service upgrade (Slice 1, H-UX1): reader accounts get an upgrade button in the library header calling POST /auth/become-creator; auth store updates without re-login.
+- Published-world catalog with genre/tag taxonomy (Slice 2, H-UX2): GET /worlds/published returns published worlds across creators with genre/tag/search filters; genre picker + tag input on world create/edit; 13 new unit tests (330/330 passing).
 
 ### Fixed
 - Centralized error handling: Zod errors → 400, typed domain errors → mapped status codes; fixed production startup script for missing `.env`.

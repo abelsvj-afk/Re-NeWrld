@@ -116,7 +116,7 @@ describe('World Domain: Value Objects & Entities', () => {
     it('should validate dedicated WorldMetadataSchema boundaries and depth definition', () => {
       // 1. Valid root object within limits (depth 1, primitives, arrays)
       const validMeta = {
-        genre: 'cyberpunk',
+        genre: 'sci-fi',
         tags: ['neon', 'dystopia'],
         rating: 5,
         isActive: true,
@@ -206,7 +206,7 @@ describe('World Domain: Value Objects & Entities', () => {
     it('should create and update World entity with input defensiveness, getter isolation, and failure atomicity', () => {
       const worldId = new WorldId(validUuid1);
       const creatorId = new UserId(validUuid2);
-      const inputMeta = { genre: 'cyberpunk', settings: { time: 'night' } };
+      const inputMeta = { genre: 'sci-fi', settings: { time: 'night' } };
       const world = World.create({
         worldId,
         creatorId,
@@ -217,19 +217,19 @@ describe('World Domain: Value Objects & Entities', () => {
 
       // Verify input mutation after create does not affect internal entity state
       inputMeta.genre = 'corrupted';
-      expect(world.getMetadata().genre).toBe('cyberpunk');
+      expect(world.getMetadata().genre).toBe('sci-fi');
 
       expect(world.getWorldId().equals(worldId)).toBe(true);
       expect(world.getCreatorId().equals(creatorId)).toBe(true);
       expect(world.getTitle()).toBe('Cyberpunk Neon City');
       expect(world.getDescription()).toBe('A dystopian metropolis');
-      expect(world.getMetadata()).toEqual({ genre: 'cyberpunk', settings: { time: 'night' } });
+      expect(world.getMetadata()).toEqual({ genre: 'sci-fi', settings: { time: 'night' } });
       expect(world.getStatus().getValue()).toBe('draft');
 
       // Verify nested deep cloning in getter prevents external mutation
       const meta = world.getMetadata();
       (meta.settings as any).time = 'morning';
-      expect(world.getMetadata()).toEqual({ genre: 'cyberpunk', settings: { time: 'night' } });
+      expect(world.getMetadata()).toEqual({ genre: 'sci-fi', settings: { time: 'night' } });
 
       // Verify failed update preserves existing state (atomicity) and updatedAt timestamp
       const priorMetadata = world.getMetadata();

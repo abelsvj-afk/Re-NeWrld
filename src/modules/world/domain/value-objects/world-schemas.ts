@@ -76,10 +76,54 @@ const worldMetadataDepth1ValueSchema = z.union([
 ]);
 
 // Root object: Max 50 top-level keys
-export const WorldMetadataSchema = z.record(worldMetadataDepth1ValueSchema).refine(
+const worldMetadataBaseSchema = z.record(worldMetadataDepth1ValueSchema).refine(
   (obj) => Object.keys(obj).length <= 50,
   { message: 'World metadata cannot exceed 50 top-level keys' }
 );
+
+// --- Discovery taxonomy (H-UX2) ---
+// Genre is a closed enum for coherent browsing; tags are validated freeform.
+// Both live in the existing metadata JSONB — no migration required.
+export const WorldGenreSchema = z.enum([
+  'fantasy',
+  'sci-fi',
+  'romance',
+  'mystery',
+  'horror',
+  'adventure',
+  'drama',
+  'comedy',
+  'historical',
+  'other',
+]);
+export type WorldGenre = z.infer<typeof WorldGenreSchema>;
+export const WORLD_GENRES: WorldGenre[] = WorldGenreSchema.options;
+
+export const WorldTagSchema = z.string()
+  .trim().toLowerCase()
+  .min(1, { message: 'Tag cannot be empty' })
+  .max(30, { message: 'Tag cannot exceed 30 characters' })
+  .regex(/^[a-z0-9-]+$/, { message: 'Tags must be lowercase alphanumeric with hyphens' });
+
+const worldTaxonomySchema = z.object({
+  genre: WorldGenreSchema.optional(),
+  tags: z.array(WorldTagSchema).max(10, { message: 'Cannot exceed 10 tags' }).optional(),
+});
+
+// Note: .and() intersection is not used here because the taxonomy side
+// applies transforms (trim/lowercase) that the base record side does not —
+// Zod intersections cannot merge differing outputs. Instead, validate and
+// normalize taxonomy keys in a transform after base validation.
+export const WorldMetadataSchema = worldMetadataBaseSchema.transform((obj) => {
+  const result: Record<string, unknown> = { ...obj };
+  if (result.genre !== undefined) {
+    result.genre = WorldGenreSchema.parse(result.genre);
+  }
+  if (result.tags !== undefined) {
+    result.tags = z.array(WorldTagSchema).max(10, { message: 'Cannot exceed 10 tags' }).parse(result.tags);
+  }
+  return result as z.infer<typeof worldTaxonomySchema> & Record<string, unknown>;
+});
 
 export type ConditionPayload = z.infer<typeof ConditionSchema>;
 export type MutationPayload = z.infer<typeof MutationSchema>;

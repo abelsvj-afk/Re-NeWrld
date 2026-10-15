@@ -1,4 +1,4 @@
-import { WorldRepositoryPort } from '../../domain/ports/world.repository.port.js';
+import { WorldRepositoryPort, PublishedWorldFilters } from '../../domain/ports/world.repository.port.js';
 import { World, WorldProps } from '../../domain/entities/world.entity.js';
 import { WorldId } from '../../domain/value-objects/world-id.value-object.js';
 import { SceneId } from '../../domain/value-objects/scene-id.value-object.js';
@@ -39,6 +39,39 @@ export class PostgresWorldRepository implements WorldRepositoryPort {
       `SELECT world_id, creator_id, title, description, metadata, status, start_scene_id, created_at, updated_at
        FROM worlds WHERE creator_id = $1 ORDER BY created_at DESC`,
       [creatorId.getValue()]
+    );
+
+    return result.rows.map((row) => this.mapRowToWorld(row));
+  }
+
+  public async findPublished(filters: PublishedWorldFilters): Promise<World[]> {
+    const conditions: string[] = [`status = 'published'`];
+    const params: unknown[] = [];
+    let idx = 1;
+
+    if (filters.genre) {
+      conditions.push(`metadata->>'genre' = $${idx++}`);
+      params.push(filters.genre);
+    }
+    if (filters.tag) {
+      conditions.push(`metadata->'tags' ? $${idx++}`);
+      params.push(filters.tag.toLowerCase());
+    }
+    if (filters.search) {
+      conditions.push(`(title ILIKE $${idx} OR description ILIKE $${idx})`);
+      params.push(`%${filters.search}%`);
+      idx++;
+    }
+
+    // Deterministic ordering: published_at DESC, world_id ASC tiebreak.
+    // Worlds table has no published_at; use updated_at (set on publish).
+    const result = await query<WorldRow>(
+      `SELECT world_id, creator_id, title, description, metadata, status, start_scene_id, created_at, updated_at
+       FROM worlds
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY updated_at DESC, world_id ASC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      [...params, filters.limit, filters.offset]
     );
 
     return result.rows.map((row) => this.mapRowToWorld(row));

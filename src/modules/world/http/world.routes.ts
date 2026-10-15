@@ -18,6 +18,7 @@ import { UpdateSceneUseCase } from '../application/update-scene.use-case.js';
 import { CreateChoiceUseCase } from '../application/create-choice.use-case.js';
 import { GenerateNarrationUseCase } from '../application/generate-narration.use-case.js';
 import { GetNarrationUseCase } from '../application/get-narration.use-case.js';
+import { ListPublishedWorldsUseCase } from '../application/list-published-worlds.use-case.js';
 import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
 import { ElevenLabsClient, proseToPlainText, sha256Hex } from '../infrastructure/elevenlabs.client.js';
 import { SessionVerifier } from '../../auth/domain/ports/session.port.js';
@@ -104,6 +105,22 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     const creatorId = request.user!.userId;
     const worlds = await getWorld.executeByCreator(creatorId);
     return { worlds: worlds.map(toWorldJson) };
+  });
+
+  // Reader catalog: published worlds across all creators (H-UX2).
+  // Any authenticated role; drafts never appear. Must precede /worlds/:id.
+  const PublishedQuery = z.object({
+    genre: z.string().optional(),
+    tag: z.string().optional(),
+    search: z.string().max(100).optional(),
+    limit: z.coerce.number().int().optional(),
+    offset: z.coerce.number().int().optional(),
+  });
+
+  app.get('/worlds/published', { preHandler: authenticate(deps.sessionVerifier) }, async (request) => {
+    const q = PublishedQuery.parse(request.query);
+    const listPublished = new ListPublishedWorldsUseCase(deps.worldRepository);
+    return listPublished.execute(q);
   });
 
   app.get('/worlds/:id', { preHandler: creatorOnly }, async (request) => {
