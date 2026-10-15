@@ -572,4 +572,10 @@ The following were explicitly deferred from Phase H MVP but the user requires th
 - **H-UI-monetization**: Creator subscriptions, premium chapters, monetization tools (US-P03). Future — depends on payment gateway decisions.
 - **H-UI-social**: Creator profiles, follows, ratings/reviews, story recommendations (US-P01, US-P02). Future.
 - **H-UI-mobile**: Companion mobile apps with offline reading + sync (vision §4 post-MVP). Future.
-- **H-UI-tts**: Audio TTS narration and dynamic generated scene illustrations (vision §4 post-MVP). Future.
+- **H-UI-tts**: Audio TTS narration and dynamic generated scene illustrations (vision §4 post-MVP). **PULLED FORWARD 2026-10-15** — Phase 21: ADR-016 (scene narration via ElevenLabs, v1 single narrator) approved by product owner; System Completeness Gate §8 evaluated PASS. Illustrations remain Future.
+  - **T1 (backend)**: `scene_narrations` migration; narration service (ElevenLabs proxy, content-hash cache, quota checks, circuit breaker); `POST /worlds/:id/scenes/:sceneId/narration` (creator), `GET` audio serve, `GET /worlds/:id/narration/quota` (creator).
+    - AC: generation triggered once per content hash; concurrent first-reads converge on one synthesis; quota exhausted → 402, reading unaffected; key never leaves server.
+  - **T2 (frontend)**: reader playback UI (play/pause + waveform progress, dark-cinematic, keyboard-accessible); creator voice picker with preview + per-scene "Generate" + quota bar; scene-list narration status icons.
+    - AC: Live UX Verification Gate (AGENTS.md §6) on the deployed URL; product-owner visual sign-off.
+  - **T3 (tests)**: unit (hash stability, quota logic, idempotent generation), integration (cache hit/miss, 402 path) — ElevenLabs calls mocked; live synthesis verified manually once.
+  - Prerequisites: ADR-016 approved ✅; completeness gate §8 PASS ✅; `ELEVENLABS_API_KEY` in env (Secure Vault, never committed).

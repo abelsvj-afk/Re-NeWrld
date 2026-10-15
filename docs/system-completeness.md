@@ -91,3 +91,20 @@ Governed by **Project Growth v1.1.0**.
 - **Overall Gate Result**: **PASS (CONDITIONAL PENDING SYSTEM ARCHITECTURE & CONTRACTS)**
 - **Audit Findings**: All required specifications (Idea, Vision, Requirements, User Stories, Future Vision, Governance) are fully documented, internally consistent, and strictly adhere to MVP scope boundaries, the 11 authority tiers, Canon vs. Experience separation, and the Backend Determinism principle.
 - **Unresolved Items**: Two administrative governance questions remain open (Moderation SLA and Cross-Timeline opt-out granularity), but these do not block Phase 5 System Architecture or MVP core engineering.
+
+---
+
+## 8. Scope Evaluation: ADR-016 Scene Narration via ElevenLabs TTS (2026-10-15)
+
+Scope: server-side ElevenLabs proxy, content-addressed permanent audio cache, per-scene lazy generation, creator voice picker, reader playback UI. Level 3 change, Phase 21 pull-forward of H-UI-tts.
+
+| # | Category | Applies | Evaluation / Justification |
+|---|---|---|---|
+| 1 | Security & Middleware | Yes | API key in env/Secure Vault only, never client-side. SSRF: ElevenLabs hostname allowlisted, no user-controlled URLs. Rate limiting on generation endpoints (creator-only). Request IDs on synthesis calls for tracing. |
+| 2 | AI Safety & Governance | Yes | Cost controls are the primary gate: pre-generation quota check, 5k char/scene cap, monthly spend ledger with 80% alert, circuit breaker after 3 failures (graceful degradation — reading never blocked). Approval: creator explicitly triggers each generation (no autonomous spend). |
+| 3 | Product Completeness | Yes | Reader playback UI (play/pause, waveform progress, dark-cinematic theme), creator voice picker with preview, quota bar, per-scene narration status icons. Live UX Verification Gate (AGENTS.md §6) applies before sign-off. WCAG: player keyboard-accessible. |
+| 4 | Reliability & Operations | Yes | 120s synthesis timeout, retry-once, idempotent generation (DB row lock on cache key — one synthesis per content hash even under concurrent first-reads). Health: narration marked degraded on circuit-breaker, serving continues from cache. Audio on persistent volume; included in backup scope. |
+| 5 | Data Governance & Privacy | Yes | New `scene_narrations` table (world_id, canon_version, scene_id, prose_hash, voice_id, model_id, audio_path, character_count, created_at). Owner: creator (tied to world). Retention: published-version audio permanent (canon immutability); draft audio deleted with scene/world deletion. Third-party vendor: ElevenLabs receives scene prose text (creator-authored content, no PII by design — prose is fiction). No reader data sent to ElevenLabs. |
+| 6 | AI Security (prompt injection etc.) | N/A | TTS input is creator-authored prose, not LLM prompts. No prompt construction, no tool use, no memory writes. Injection surface is limited to SSRF/validation, covered in #1. |
+
+**Gate result for this scope**: PASS — all applicable categories evaluated with controls defined in ADR-016 §§3,4,7. No implementation until TASKS.md task is created with acceptance criteria.
