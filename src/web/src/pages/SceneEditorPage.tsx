@@ -22,6 +22,7 @@ export function SceneEditorPage() {
   const [title, setTitle] = useState('');
   const [showNewScene, setShowNewScene] = useState(false);
   const [newSceneTitle, setNewSceneTitle] = useState('');
+  const [newSceneIsEnding, setNewSceneIsEnding] = useState(false);
   const [creatingScene, setCreatingScene] = useState(false);
   const [showNewChoice, setShowNewChoice] = useState(false);
   const [newChoiceText, setNewChoiceText] = useState('');
@@ -63,6 +64,20 @@ export function SceneEditorPage() {
     finally { setSaving(false); }
   };
 
+  const toggleEnding = async (scene: SceneSummary) => {
+    setError(null);
+    const next = !scene.isEnding;
+    // Optimistic update
+    setScenes((prev) => prev.map((s) => (s.id === scene.id ? { ...s, isEnding: next } : s)));
+    try {
+      await worldsApi.updateScene(worldId, scene.id, { isEnding: next });
+    } catch (err) {
+      // Roll back on failure
+      setScenes((prev) => prev.map((s) => (s.id === scene.id ? { ...s, isEnding: !next } : s)));
+      setError(err instanceof ApiError ? err.message : 'Failed to update ending flag');
+    }
+  };
+
   const createScene = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSceneTitle.trim() || creatingScene) return;
@@ -72,12 +87,14 @@ export function SceneEditorPage() {
         chapterId: crypto.randomUUID(),
         title: newSceneTitle.trim(),
         prose: '<p>Begin writing…</p>',
+        isEnding: newSceneIsEnding,
       });
-      const newScene: SceneSummary = { id: res.sceneId, title: newSceneTitle.trim(), isEnding: false } as SceneSummary;
+      const newScene: SceneSummary = { id: res.sceneId, title: newSceneTitle.trim(), isEnding: newSceneIsEnding } as SceneSummary;
       setScenes((prev) => [...prev, newScene]);
       setActiveSceneId(res.sceneId);
       setShowNewScene(false);
       setNewSceneTitle('');
+      setNewSceneIsEnding(false);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to create scene'); }
     finally { setCreatingScene(false); }
   };
@@ -159,9 +176,15 @@ export function SceneEditorPage() {
             {error && <div className="bg-blood/10 border border-blood/25 rounded-xl p-4 text-blood text-sm mb-6">{error}</div>}
             {activeScene ? (
               <AnimatePresence mode="wait">
-                <motion.div key={activeScene.id} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+                <motion.div key={activeScene.id} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.4 }}>
                   <div className="mb-8">
-                    <p className="text-[11px] uppercase tracking-[0.3em] text-arcane/80 font-semibold mb-2">Scene {sceneNumber}</p>
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-[11px] uppercase tracking-[0.3em] text-arcane/80 font-semibold">Scene {sceneNumber}</p>
+                      <label className="flex items-center gap-2 cursor-pointer select-none text-xs">
+                        <input type="checkbox" checked={!!activeScene.isEnding} onChange={() => toggleEnding(activeScene)} className="w-3.5 h-3.5 rounded accent-amber-500" />
+                        <span className={activeScene.isEnding ? 'text-ember font-medium' : 'text-ink-faint'}>◆ Ending</span>
+                      </label>
+                    </div>
                     <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Scene title" className="bg-transparent font-prose text-3xl md:text-4xl tracking-tight focus:outline-none w-full placeholder:text-ink-faint/50 border-b border-transparent focus:border-arcane/30 pb-2 transition-colors" />
                   </div>
                   <div className="bg-panel/40 border border-edge/60 rounded-2xl p-8 mb-8"><EditorContent editor={editor} /></div>
@@ -226,6 +249,10 @@ export function SceneEditorPage() {
                 <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Title</label>
                 <input value={newSceneTitle} onChange={(e) => setNewSceneTitle(e.target.value)} required placeholder="The Whispering Reef" autoFocus className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all" />
               </div>
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <input type="checkbox" checked={newSceneIsEnding} onChange={(e) => setNewSceneIsEnding(e.target.checked)} className="w-4 h-4 rounded accent-amber-500" />
+                <span className="text-sm text-ink-dim">This scene is an <span className="text-ember font-medium">ending</span> <span className="text-ink-faint">(publishing requires at least one)</span></span>
+              </label>
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewScene(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={creatingScene || !newSceneTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creatingScene ? 'Creating…' : 'Create Scene'}</button>

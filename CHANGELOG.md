@@ -43,6 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Publish page: pre-flight checklist showing scene/choice/ending counts with pass/fail indicators before validation
 - Creator dashboard: world edit (title/description modal) and delete (with confirmation) via worldsApi.update/remove
 - Scene editor 'Narrative Arc' redesign: top tabs, project panel, prose card, branching-choice cards, conditions sidebar, status bar
+- Scene editor: scenes can now be marked as endings — checkbox in the New Scene modal and a ◆ Ending toggle on the active scene (publishing requires at least one ending)
 
 ### Fixed
 - Centralized error handling: Zod errors → 400, typed domain errors → mapped status codes; fixed production startup script for missing `.env`.
