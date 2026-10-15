@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - TTS narration (H-UI-tts) pulled forward via Phase 21: ADR-016 approved, System Completeness Gate §8 PASS, TASKS.md task created (T1 backend, T2 frontend, T3 tests). v1 = single narrator voice per world via ElevenLabs.
 - Scene narration backend (T1, ADR-016): ElevenLabs TTS proxy with content-hash permanent cache, quota gates (monthly cap, per-scene 5k cap, provider check), circuit breaker; POST/GET narration endpoints + quota endpoint; scene_narrations migration.
 - Scene narration frontend (T2, ADR-016): dark-cinematic NarrationPlayer in the reader (play/pause, waveform progress, keyboard accessible); creator NarrationPanel in the scene editor (voice picker, per-scene Generate, quota bar with 80% alert).
+- Narration integration tests (T3, ADR-016): cache hit/miss, concurrent generation idempotency, quota exhaustion, draft-world reader blocking. ElevenLabs mocked.
 
 ### Fixed
 - Centralized error handling: Zod errors → 400, typed domain errors → mapped status codes; fixed production startup script for missing `.env`.
