@@ -42,6 +42,13 @@ const loginRoute = createRoute({
   component: LoginPage,
 });
 
+const signinRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/signin',
+  beforeLoad: () => { throw redirect({ to: '/login' }); },
+  component: LoginPage,
+});
+
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
@@ -99,6 +106,7 @@ const publishRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
+  signinRoute,
   indexRoute,
   readerRoute,
   readerSessionRoute,

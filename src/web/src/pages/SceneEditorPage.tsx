@@ -27,6 +27,7 @@ export function SceneEditorPage() {
   const [newChoiceText, setNewChoiceText] = useState('');
   const [newChoiceTarget, setNewChoiceTarget] = useState('');
   const [creatingChoice, setCreatingChoice] = useState(false);
+  const [worldTitle, setWorldTitle] = useState('');
 
   const activeScene = scenes.find((s) => s.id === activeSceneId) ?? null;
   const sceneChoices = choices.filter((c) => c.sceneId === activeSceneId);
@@ -40,8 +41,8 @@ export function SceneEditorPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, c] = await Promise.all([worldsApi.scenes(worldId), worldsApi.choices(worldId)]);
-      setScenes(s); setChoices(c);
+      const [s, c, w] = await Promise.all([worldsApi.scenes(worldId), worldsApi.choices(worldId), worldsApi.get(worldId)]);
+      setScenes(s); setChoices(c); setWorldTitle(w.title ?? '');
       if (s.length > 0 && !activeSceneId) setActiveSceneId(s[0].id);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to load'); }
     finally { setLoading(false); }
@@ -112,7 +113,7 @@ export function SceneEditorPage() {
           <div className="flex items-center gap-4">
             <button onClick={() => navigate({ to: '/creator' })} className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-arcane to-voidlight flex items-center justify-center"><span className="text-void font-bold text-sm">N</span></div>
-              <div className="text-left"><p className="text-[13px] font-bold tracking-[0.18em]">NARRATIVE ARC</p><p className="text-[10px] text-ink-faint">Project: {title || 'Untitled'}</p></div>
+              <div className="text-left"><p className="text-[13px] font-bold tracking-[0.18em]">NARRATIVE ARC</p><p className="text-[10px] text-ink-faint">Project: {worldTitle || 'Untitled'}</p></div>
             </button>
             <nav className="hidden md:flex items-center gap-1 ml-6 bg-panel/50 border border-edge/60 rounded-xl p-1">
               {TABS.map(t => (

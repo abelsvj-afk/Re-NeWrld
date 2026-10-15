@@ -138,7 +138,7 @@ export function CreatorDashboard() {
           </div>
           <div id="worlds-section" className="flex items-center justify-between mb-4 scroll-mt-6">
             <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-ink-dim">Your Worlds</h3>
-            <span className="text-xs text-ink-faint">{filtered.length} shown</span>
+            <span className="text-xs text-ink-faint">{loading ? 'Loading…' : `${filtered.length} shown`}</span>
           </div>
           {loading && <div className="space-y-4">{[1,2,3].map(i => <div key={i} className="bg-panel/40 border border-edge/50 rounded-2xl p-6 animate-pulse"><div className="h-5 bg-edge/50 rounded w-1/3 mb-3" /><div className="h-3 bg-edge/30 rounded w-1/2" /></div>)}</div>}
           {error && <div className="bg-blood/10 border border-blood/25 rounded-2xl p-6 text-blood text-sm">{error}</div>}
