@@ -65,3 +65,15 @@ Before proposing changes, executing tasks, or generating code within this worksp
 * **Pushing workflow files**: the owner's Termux git credential is an OAuth App token without the `workflow` scope — GitHub rejects pushes that create/update `.github/workflows/*` from it. Add or change workflow files via the github.com web UI instead.
 * **Agent pushes**: if the agent's GitHub integration returns 403 on write, do not retry blindly — hand the user a `git format-patch` file and let them `git am` + `git push` from their own terminal.
 * **Secrets**: `.env` is gitignored. `.env.example` must contain only placeholders — never commit real credentials, even for localhost-only dev databases.
+
+## 6. Live UX Verification Gate (mandatory after every deploy)
+
+The workflow's gates are backend-heavy. Past deploys broke in ways no gate caught (blank login from router crash, dead password field from CSS, scene-creation 500 from contract mismatch, missing ending toggle, missing start-scene API). Nothing is "done" until it passes this gate on the **live deployed URL** (not localhost):
+
+* **Full user-flow clickthrough**: every new/changed feature exercised in a real browser as a real user, end to end.
+* **Visual sign-off**: matches the dark-cinematic theme; no broken layouts, no dead buttons; loading, error, and empty states are designed, not browser defaults.
+* **Interactive component proof**: every new control (toggles, players, pickers, modals) clicked, its state change verified, persistence confirmed across reload.
+* **Cross-role check**: creator sees creator UI, reader sees reader UI; any role toggles work both directions.
+* **Quality bar**: "super professional, super clean" — like an app made by a top company, never vibe-coded. The product owner gives final visual sign-off.
+
+A feature that passes unit tests but fails this gate is not complete.
