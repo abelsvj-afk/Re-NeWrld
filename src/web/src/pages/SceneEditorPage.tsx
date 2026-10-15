@@ -23,6 +23,10 @@ export function SceneEditorPage() {
   const [showNewScene, setShowNewScene] = useState(false);
   const [newSceneTitle, setNewSceneTitle] = useState('');
   const [creatingScene, setCreatingScene] = useState(false);
+  const [showNewChoice, setShowNewChoice] = useState(false);
+  const [newChoiceText, setNewChoiceText] = useState('');
+  const [newChoiceTarget, setNewChoiceTarget] = useState('');
+  const [creatingChoice, setCreatingChoice] = useState(false);
 
   const activeScene = scenes.find((s) => s.id === activeSceneId) ?? null;
   const sceneChoices = choices.filter((c) => c.sceneId === activeSceneId);
@@ -75,6 +79,23 @@ export function SceneEditorPage() {
       setNewSceneTitle('');
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to create scene'); }
     finally { setCreatingScene(false); }
+  };
+
+  const createChoice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newChoiceText.trim() || !newChoiceTarget || !activeSceneId || creatingChoice) return;
+    setCreatingChoice(true); setError(null);
+    try {
+      const res = await worldsApi.createChoice(worldId, {
+        sceneId: activeSceneId,
+        targetSceneId: newChoiceTarget,
+        text: newChoiceText.trim(),
+      });
+      setChoices((prev) => [...prev, { id: res.choiceId, sceneId: activeSceneId, targetSceneId: newChoiceTarget, text: newChoiceText.trim() } as ChoiceSummary]);
+      setShowNewChoice(false);
+      setNewChoiceText(''); setNewChoiceTarget('');
+    } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to create choice'); }
+    finally { setCreatingChoice(false); }
   };
 
   if (loading) return <div className="min-h-screen bg-void flex items-center justify-center"><div className="text-ink-dim animate-pulse font-prose text-lg">Opening narrative arc…</div></div>;
@@ -148,7 +169,12 @@ export function SceneEditorPage() {
                   <div className="mb-8">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-[11px] uppercase tracking-[0.25em] text-ink-faint font-semibold">Branching Choices</h3>
-                      <span className="text-xs text-ink-faint">{sceneChoices.length} choice{sceneChoices.length === 1 ? '' : 's'}</span>
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs text-ink-faint">{sceneChoices.length} choice{sceneChoices.length === 1 ? '' : 's'}</span>
+                        {activeScene && scenes.length > 1 && (
+                          <button onClick={() => { setNewChoiceTarget(''); setShowNewChoice(true); }} className="text-xs font-medium text-ember hover:text-ember/80 transition">+ Add choice</button>
+                        )}
+                      </div>
                     </div>
                     <div className="space-y-3">
                       {sceneChoices.map((c, i) => (
@@ -202,6 +228,34 @@ export function SceneEditorPage() {
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewScene(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={creatingScene || !newSceneTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creatingScene ? 'Creating…' : 'Create Scene'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+
+      {showNewChoice && activeScene && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowNewChoice(false)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">New Choice</h3>
+            <p className="text-sm text-ink-dim mb-6">From <span className="text-ink font-medium">{activeScene.title}</span></p>
+            <form onSubmit={createChoice} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Choice text</label>
+                <input value={newChoiceText} onChange={(e) => setNewChoiceText(e.target.value)} required placeholder="Enter the dark corridor…" autoFocus className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-ember focus:outline-none focus:ring-2 focus:ring-ember/20 transition-all" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Leads to</label>
+                <select value={newChoiceTarget} onChange={(e) => setNewChoiceTarget(e.target.value)} required className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink focus:border-ember focus:outline-none focus:ring-2 focus:ring-ember/20 transition-all">
+                  <option value="">Select a scene…</option>
+                  {scenes.filter((s) => s.id !== activeSceneId).map((s) => (
+                    <option key={s.id} value={s.id}>{s.title}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowNewChoice(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
+                <button type="submit" disabled={creatingChoice || !newChoiceText.trim() || !newChoiceTarget} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-ember to-[#d97706] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-amber">{creatingChoice ? 'Creating…' : 'Create Choice'}</button>
               </div>
             </form>
           </motion.div>
