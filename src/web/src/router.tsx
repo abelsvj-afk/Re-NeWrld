@@ -47,7 +47,8 @@ const indexRoute = createRoute({
   path: '/',
   beforeLoad: requireAuth,
   component: function Index() {
-    const { user } = useAuth();
+    const { user, loading } = useAuth();
+    if (loading) return <div className="min-h-screen bg-void flex items-center justify-center"><div className="text-ink-dim animate-pulse">Loading…</div></div>;
     if (user?.role === 'creator') return <CreatorDashboard />;
     return <ReaderPage />;
   },
@@ -67,24 +68,32 @@ const readerSessionRoute = createRoute({
   component: ReaderPage,
 });
 
+// Helper to require creator role
+function requireCreator() {
+  const { user, loading } = useAuth.getState();
+  if (loading) return;
+  if (!user) throw redirect({ to: '/login' });
+  if (user.role !== 'creator') throw redirect({ to: '/read' });
+}
+
 const creatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/creator',
-  beforeLoad: requireAuth,
+  beforeLoad: requireCreator,
   component: CreatorDashboard,
 });
 
 const sceneEditorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/creator/worlds/$worldId/scenes',
-  beforeLoad: requireAuth,
+  beforeLoad: requireCreator,
   component: SceneEditorPage,
 });
 
 const publishRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/creator/worlds/$worldId/publish',
-  beforeLoad: requireAuth,
+  beforeLoad: requireCreator,
   component: PublishPage,
 });
 

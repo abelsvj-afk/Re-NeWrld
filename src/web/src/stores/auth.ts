@@ -27,6 +27,7 @@ export const useAuth = create<AuthState>((set) => ({
   logout: async () => {
     try { await authApi.logout(); } catch { /* ignore */ }
     set({ user: null });
+    window.location.href = '/login';
   },
 
   hydrate: async () => {
