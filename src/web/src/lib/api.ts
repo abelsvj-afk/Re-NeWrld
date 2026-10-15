@@ -145,7 +145,9 @@ export const worldsApi = {
   generateNarration: (worldId: string, sceneId: string, input: { voiceId: string; modelId?: string }) =>
     api<{ status: 'cached' | 'generated'; audioPath: string; characterCount: number }>(`/worlds/${worldId}/scenes/${sceneId}/narration`, { method: 'POST', body: input }),
   narrationAudioUrl: (worldId: string, sceneId: string) =>
-    `/worlds/${worldId}/scenes/${sceneId}/narration`,
+    `${API_BASE}/worlds/${worldId}/scenes/${sceneId}/narration`,
+  narrationStatus: (worldId: string) =>
+    api<Record<string, boolean>>(`/worlds/${worldId}/narration/status`),
 };
 
 // --- Sessions (reader) ---

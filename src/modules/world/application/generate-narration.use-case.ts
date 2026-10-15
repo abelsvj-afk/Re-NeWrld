@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'fs/promises';
+import { mkdir, writeFile, unlink } from 'fs/promises';
 import { join } from 'path';
 import { Narration, NarrationProps } from '../domain/entities/narration.entity.js';
 import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
@@ -101,7 +101,13 @@ export class GenerateNarrationUseCase {
       voiceId: input.voiceId, modelId, audioPath,
       characterCount: plainText.length,
     };
-    const saved = await this.deps.narrationRepository.save(Narration.create(props));
-    return { status: 'generated', audioPath: saved.getAudioPath(), characterCount: saved.getCharacterCount() };
+    try {
+      const saved = await this.deps.narrationRepository.save(Narration.create(props));
+      return { status: 'generated', audioPath: saved.getAudioPath(), characterCount: saved.getCharacterCount() };
+    } catch (err) {
+      // Don't orphan the MP3 if the DB write fails.
+      await unlink(audioPath).catch(() => {});
+      throw err;
+    }
   }
 }

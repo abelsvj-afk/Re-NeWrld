@@ -19,7 +19,7 @@ import { CreateChoiceUseCase } from '../application/create-choice.use-case.js';
 import { GenerateNarrationUseCase } from '../application/generate-narration.use-case.js';
 import { GetNarrationUseCase } from '../application/get-narration.use-case.js';
 import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
-import { ElevenLabsClient } from '../infrastructure/elevenlabs.client.js';
+import { ElevenLabsClient, proseToPlainText, sha256Hex } from '../infrastructure/elevenlabs.client.js';
 import { SessionVerifier } from '../../auth/domain/ports/session.port.js';
 import { authenticate, requireCreator } from '../../../shared/middleware/auth.middleware.js';
 import { BadRequestError } from '../../../shared/http/http.errors.js';
@@ -299,5 +299,20 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       return [];
     }
     return deps.elevenLabs.listVoices();
+  });
+
+  app.get('/worlds/:id/narration/status', { preHandler: creatorOnly }, async (request) => {
+    const params = WorldParams.parse(request.params);
+    const worldId = new WorldId(params.id);
+    const scenes = await deps.sceneRepository.findByWorldId(worldId);
+    const status: Record<string, boolean> = {};
+    for (const scene of scenes) {
+      const proseHash = sha256Hex(proseToPlainText(scene.getProse()));
+      const cached = await deps.narrationRepository.findLatestByScene(
+        worldId, 0, scene.getSceneId(), proseHash
+      );
+      status[scene.getSceneId().getValue()] = cached !== null;
+    }
+    return status;
   });
 }

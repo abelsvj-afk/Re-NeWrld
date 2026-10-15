@@ -14,6 +14,7 @@ export function SceneEditorPage() {
   const navigate = useNavigate();
   const { logout } = useAuth();
   const [scenes, setScenes] = useState<SceneSummary[]>([]);
+  const [narrationStatus, setNarrationStatus] = useState<Record<string, boolean>>({});
   const [choices, setChoices] = useState<ChoiceSummary[]>([]);
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<typeof TABS[number]>('Scene');
@@ -45,6 +46,7 @@ export function SceneEditorPage() {
     try {
       const [s, c, w] = await Promise.all([worldsApi.scenes(worldId), worldsApi.choices(worldId), worldsApi.get(worldId)]);
       setScenes(s); setChoices(c); setWorldTitle(w.title ?? '');
+      worldsApi.narrationStatus(worldId).then(setNarrationStatus).catch(() => {});
       if (s.length > 0 && !activeSceneId) setActiveSceneId(s[0].id);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to load'); }
     finally { setLoading(false); }
@@ -162,7 +164,7 @@ export function SceneEditorPage() {
                 <button key={s.id} onClick={() => setActiveSceneId(s.id)} className={`w-full text-left px-3 py-2.5 rounded-lg transition-all group ${s.id === activeSceneId ? 'bg-arcane/[0.08] border border-arcane/25' : 'border border-transparent hover:bg-panel'}`}>
                   <div className="flex items-center gap-3">
                     <span className={`text-[11px] font-mono w-7 ${s.id === activeSceneId ? 'text-arcane' : 'text-ink-faint'}`}>{String(i + 1).padStart(2, '0')}</span>
-                    <div className="min-w-0 flex-1"><p className={`text-[13px] truncate ${s.id === activeSceneId ? 'text-ink font-medium' : 'text-ink-dim group-hover:text-ink'}`}>{s.title}</p>{s.isEnding && <span className="text-[10px] text-ember">◆ Ending</span>}</div>
+                    <div className="min-w-0 flex-1"><p className={`text-[13px] truncate ${s.id === activeSceneId ? 'text-ink font-medium' : 'text-ink-dim group-hover:text-ink'}`}>{s.title}</p><div className="flex items-center gap-2">{s.isEnding && <span className="text-[10px] text-ember">◆ Ending</span>}{narrationStatus[s.id] && <span className="text-[10px] text-arcane" title="Narration generated">🎧</span>}</div></div>
                   </div>
                 </button>
               ))}
@@ -190,7 +192,7 @@ export function SceneEditorPage() {
                   </div>
                   <div className="bg-panel/40 border border-edge/60 rounded-2xl p-8 mb-8"><EditorContent editor={editor} /></div>
 
-                  <NarrationPanel worldId={worldId} sceneId={activeScene.id} sceneTitle={activeScene.title} />
+                  <NarrationPanel worldId={worldId} sceneId={activeScene.id} onGenerated={() => setNarrationStatus((prev) => ({ ...prev, [activeScene.id]: true }))} />
 
                   {/* Branching choices */}
                   <div className="mb-8">

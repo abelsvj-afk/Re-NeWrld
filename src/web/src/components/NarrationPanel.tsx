@@ -5,7 +5,7 @@ import { worldsApi, ApiError } from '../lib/api';
 interface NarrationPanelProps {
   worldId: string;
   sceneId: string;
-  sceneTitle: string;
+  onGenerated?: () => void;
 }
 
 interface Voice { voiceId: string; name: string; }
@@ -15,7 +15,7 @@ interface Quota { usedThisMonth: number; monthlyCap: number; providerRemaining: 
  * Creator narration controls (ADR-016, T2).
  * Voice picker, per-scene generation, quota bar.
  */
-export function NarrationPanel({ worldId, sceneId }: NarrationPanelProps) {
+export function NarrationPanel({ worldId, sceneId, onGenerated }: NarrationPanelProps) {
   const [voices, setVoices] = useState<Voice[]>([]);
   const [voiceId, setVoiceId] = useState('');
   const [quota, setQuota] = useState<Quota | null>(null);
@@ -56,6 +56,7 @@ export function NarrationPanel({ worldId, sceneId }: NarrationPanelProps) {
     try {
       const res = await worldsApi.generateNarration(worldId, sceneId, { voiceId });
       setStatus(res.status);
+      onGenerated?.();
       const q = await worldsApi.narrationQuota(worldId).catch(() => null);
       if (q) setQuota(q);
     } catch (err) {
