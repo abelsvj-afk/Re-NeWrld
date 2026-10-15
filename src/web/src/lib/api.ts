@@ -95,6 +95,7 @@ export interface WorldSummary {
   description: string;
   status: 'draft' | 'published' | 'archived';
   updatedAt: string;
+  metadata?: { genre?: string; tags?: string[] };
 }
 
 export interface SceneSummary {
@@ -122,10 +123,10 @@ export const worldsApi = {
     const res = await api<{ worlds: WorldSummary[] } | WorldSummary[]>('/worlds');
     return Array.isArray(res) ? res : res.worlds ?? [];
   },
-  create: (input: { title: string; description?: string }) =>
+  create: (input: { title: string; description?: string; metadata?: { genre?: string; tags?: string[] } }) =>
     api<WorldSummary>('/worlds', { method: 'POST', body: input }),
   get: (id: string) => api<WorldSummary & { scenes: unknown[] }>(`/worlds/${id}`),
-  update: (id: string, input: { title?: string; description?: string }) =>
+  update: (id: string, input: { title?: string; description?: string; metadata?: { genre?: string; tags?: string[] } }) =>
     api<void>(`/worlds/${id}`, { method: 'PATCH', body: input }),
   remove: (id: string) =>
     api<void>(`/worlds/${id}`, { method: 'DELETE' }),
@@ -150,7 +151,32 @@ export const worldsApi = {
     `${API_BASE}/worlds/${worldId}/scenes/${sceneId}/narration`,
   narrationStatus: (worldId: string) =>
     api<Record<string, boolean>>(`/worlds/${worldId}/narration/status`),
+  // --- Published catalog (H-UX2) ---
+  listPublished: (filters?: { genre?: string; tag?: string; search?: string; limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    if (filters?.genre) params.set('genre', filters.genre);
+    if (filters?.tag) params.set('tag', filters.tag);
+    if (filters?.search) params.set('search', filters.search);
+    if (filters?.limit) params.set('limit', String(filters.limit));
+    if (filters?.offset) params.set('offset', String(filters.offset));
+    const qs = params.toString();
+    return api<PublishedWorld[]>(`/worlds/published${qs ? `?${qs}` : ''}`);
+  },
 };
+
+export interface PublishedWorld {
+  id: string;
+  title: string;
+  description: string | null;
+  genre: string | null;
+  tags: string[];
+  updatedAt: string;
+}
+
+export const WORLD_GENRES = [
+  'fantasy', 'sci-fi', 'romance', 'mystery', 'horror',
+  'adventure', 'drama', 'comedy', 'historical', 'other',
+] as const;
 
 // --- Sessions (reader) ---
 export interface ChoiceOption {
