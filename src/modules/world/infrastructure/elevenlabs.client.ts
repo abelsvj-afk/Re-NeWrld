@@ -1,5 +1,10 @@
 import { createHash } from 'crypto';
 
+export interface VoiceSummary {
+  voiceId: string;
+  name: string;
+}
+
 /**
  * Minimal ElevenLabs TTS client (ADR-016).
  * Server-side only: the API key never leaves this service.
@@ -43,6 +48,16 @@ export class ElevenLabsClient {
     } catch {
       return null;
     }
+  }
+
+  public async listVoices(): Promise<VoiceSummary[]> {
+    const res = await this.request('GET', '/v1/voices');
+    const voices = (res as any)?.voices;
+    if (!Array.isArray(voices)) return [];
+    return voices.map((v: any) => ({
+      voiceId: String(v.voice_id ?? ''),
+      name: String(v.name ?? 'Unnamed'),
+    })).filter((v: VoiceSummary) => v.voiceId.length > 0);
   }
 
   public async synthesize(voiceId: string, text: string): Promise<Buffer> {

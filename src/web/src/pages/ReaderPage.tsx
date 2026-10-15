@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { sessionsApi, worldsApi, ApiError, type SessionState, type WorldSummary } from '../lib/api';
 import { useAuth } from '../stores/auth';
+import { NarrationPlayer } from '../components/NarrationPlayer';
 import { useParams, useNavigate } from '@tanstack/react-router';
 
 function newIdempotencyKey(): string {
@@ -11,7 +12,7 @@ function newIdempotencyKey(): string {
 }
 
 export function ReaderPage() {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const params = useParams({ strict: false }) as { sessionId?: string };
   const navigate = useNavigate();
   const sessionId = params.sessionId;
@@ -85,7 +86,10 @@ export function ReaderPage() {
             <button onClick={() => navigate({ to: '/read' })} className="text-sm text-ink-dim hover:text-arcane transition flex items-center gap-2">
               <span>←</span> Library
             </button>
-            <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
+            <div className="flex items-center gap-3">
+              {user?.role === 'creator' && <button onClick={() => navigate({ to: '/creator' })} className="text-xs font-medium px-3 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-ink transition">✦ Creator Studio</button>}
+              <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
+            </div>
           </div>
         </header>
         <main className="max-w-3xl mx-auto px-6 py-12">
@@ -94,6 +98,10 @@ export function ReaderPage() {
           {session && (
             <AnimatePresence mode="wait">
               <motion.article key={session.currentSceneId + '-' + session.version} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}>
+                <NarrationPlayer
+                  audioUrl={worldsApi.narrationAudioUrl(session.worldId, session.currentSceneId)}
+                  sceneTitle={session.sceneText.slice(0, 40)}
+                />
                 <div className="prose-reading mb-12 whitespace-pre-wrap">{session.sceneText}</div>
                 <div className="space-y-3">
                   <p className="text-[11px] uppercase tracking-[0.25em] text-ink-faint font-medium mb-4">Choose your path</p>
@@ -127,7 +135,10 @@ export function ReaderPage() {
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-arcane to-voidlight flex items-center justify-center shadow-glow-cyan"><span className="text-void font-bold">R</span></div>
             <div><h1 className="text-[15px] font-bold tracking-tight leading-none">Re<span className="text-arcane">:</span>NeWrld</h1><p className="text-[11px] text-ink-faint mt-0.5">Reader</p></div>
           </div>
-          <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
+          <div className="flex items-center gap-3">
+            {user?.role === 'creator' && <button onClick={() => navigate({ to: '/creator' })} className="text-xs font-medium px-3 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-ink transition">✦ Creator Studio</button>}
+            <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
+          </div>
         </div>
       </header>
       <main className="max-w-6xl mx-auto px-6 py-10 relative">

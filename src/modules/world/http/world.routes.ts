@@ -292,4 +292,12 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       configured: deps.elevenLabs !== null,
     };
   });
+
+  app.get('/worlds/:id/narration/voices', { preHandler: creatorOnly }, async (request) => {
+    WorldParams.parse(request.params);
+    if (!deps.elevenLabs) {
+      return [];
+    }
+    return deps.elevenLabs.listVoices();
+  });
 }

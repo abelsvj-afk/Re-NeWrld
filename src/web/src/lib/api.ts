@@ -137,6 +137,15 @@ export const worldsApi = {
     api<{ choiceId: string }>(`/worlds/${worldId}/choices`, { method: 'POST', body: input }),
   publish: (worldId: string) =>
     api<{ snapshotId: string; versionNumber: number; warnings: string[] }>(`/worlds/${worldId}/publish`, { method: 'POST' }),
+  // --- Narration (ADR-016) ---
+  narrationVoices: (worldId: string) =>
+    api<{ voiceId: string; name: string }[]>(`/worlds/${worldId}/narration/voices`),
+  narrationQuota: (worldId: string) =>
+    api<{ usedThisMonth: number; monthlyCap: number; providerRemaining: number | null; configured: boolean }>(`/worlds/${worldId}/narration/quota`),
+  generateNarration: (worldId: string, sceneId: string, input: { voiceId: string; modelId?: string }) =>
+    api<{ status: 'cached' | 'generated'; audioPath: string; characterCount: number }>(`/worlds/${worldId}/scenes/${sceneId}/narration`, { method: 'POST', body: input }),
+  narrationAudioUrl: (worldId: string, sceneId: string) =>
+    `/worlds/${worldId}/scenes/${sceneId}/narration`,
 };
 
 // --- Sessions (reader) ---

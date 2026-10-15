@@ -5,6 +5,7 @@ import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { worldsApi, ApiError, type SceneSummary, type ChoiceSummary } from '../lib/api';
 import { useAuth } from '../stores/auth';
+import { NarrationPanel } from '../components/NarrationPanel';
 
 const TABS = ['Scene', 'Script', 'Flow', 'Assets'] as const;
 
@@ -188,6 +189,8 @@ export function SceneEditorPage() {
                     <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Scene title" className="bg-transparent font-prose text-3xl md:text-4xl tracking-tight focus:outline-none w-full placeholder:text-ink-faint/50 border-b border-transparent focus:border-arcane/30 pb-2 transition-colors" />
                   </div>
                   <div className="bg-panel/40 border border-edge/60 rounded-2xl p-8 mb-8"><EditorContent editor={editor} /></div>
+
+                  <NarrationPanel worldId={worldId} sceneId={activeScene.id} sceneTitle={activeScene.title} />
 
                   {/* Branching choices */}
                   <div className="mb-8">
