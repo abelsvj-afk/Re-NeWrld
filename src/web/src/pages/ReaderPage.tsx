@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { sessionsApi, worldsApi, ApiError, type SessionState, type WorldSummary } from '../lib/api';
+import { sessionsApi, worldsApi, ApiError, WORLD_GENRES, type SessionState, type PublishedWorld } from '../lib/api';
 import { useAuth } from '../stores/auth';
 import { NarrationPlayer } from '../components/NarrationPlayer';
 import { useParams, useNavigate } from '@tanstack/react-router';
@@ -17,7 +17,10 @@ export function ReaderPage() {
   const navigate = useNavigate();
   const sessionId = params.sessionId;
 
-  const [worlds, setWorlds] = useState<WorldSummary[]>([]);
+  const [catalog, setCatalog] = useState<PublishedWorld[]>([]);
+  const [genreFilter, setGenreFilter] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
   const [session, setSession] = useState<SessionState | null>(null);
   const [loading, setLoading] = useState(true);
   const [choosing, setChoosing] = useState<string | null>(null);
@@ -72,13 +75,9 @@ export function ReaderPage() {
         if (sessionId) {
           setSession(await sessionsApi.get(sessionId));
         } else {
-          try {
-            const w = await worldsApi.list();
-            setWorlds(w.filter((x) => x.status === 'published'));
-          } catch (err) {
-            if (err instanceof ApiError && err.status === 403) setWorlds([]);
-            else throw err;
-          }
+          // Public catalog: published worlds across all creators (H-UX2).
+          const w = await worldsApi.listPublished();
+          setCatalog(w);
         }
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Failed to load');
@@ -87,6 +86,27 @@ export function ReaderPage() {
       }
     })();
   }, [sessionId]);
+
+  // Filtered catalog: genre chips + debounced search hit the API.
+  useEffect(() => {
+    if (sessionId) return;
+    const t = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const w = await worldsApi.listPublished({
+          genre: genreFilter ?? undefined,
+          search: searchQuery.trim() || undefined,
+        });
+        setCatalog(w);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Failed to load');
+      } finally {
+        setLoading(false);
+      }
+    }, searchQuery ? 400 : 0);
+    return () => clearTimeout(t);
+  }, [genreFilter, searchQuery, sessionId]);
 
   const startWorld = async (worldId: string) => {
     setError(null);
@@ -186,32 +206,75 @@ export function ReaderPage() {
         </div>
       </header>
       <main className="max-w-6xl mx-auto px-6 py-10 relative">
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }} className="mb-10">
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }} className="mb-8">
           <p className="text-[11px] uppercase tracking-[0.25em] text-arcane/80 font-medium mb-2">The Library</p>
           <h2 className="font-prose text-4xl tracking-tight mb-3">Choose your story</h2>
-          <p className="text-ink-dim max-w-xl">Living narratives that remember every choice. Pick a world and shape its fate.</p>
+          <p className="text-ink-dim max-w-xl mb-6">Living narratives that remember every choice. Pick a world and shape its fate.</p>
+          <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
+            <div className="relative flex-1 max-w-sm">
+              <input
+                value={searchInput}
+                onChange={(e) => { setSearchInput(e.target.value); setSearchQuery(e.target.value); }}
+                placeholder="Search worlds…"
+                aria-label="Search published worlds"
+                className="w-full bg-panel/60 border border-edge/70 rounded-xl px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint/60 focus:border-arcane/50 focus:outline-none transition"
+              />
+            </div>
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by genre">
+              <button
+                onClick={() => setGenreFilter(null)}
+                className={`text-xs px-3 py-1.5 rounded-full border transition ${genreFilter === null ? 'border-arcane bg-arcane/15 text-ink' : 'border-edge text-ink-dim hover:border-edge-2 hover:text-ink'}`}
+              >
+                All
+              </button>
+              {WORLD_GENRES.map((g) => (
+                <button
+                  key={g}
+                  onClick={() => setGenreFilter(genreFilter === g ? null : g)}
+                  className={`text-xs px-3 py-1.5 rounded-full border capitalize transition ${genreFilter === g ? 'border-arcane bg-arcane/15 text-ink' : 'border-edge text-ink-dim hover:border-edge-2 hover:text-ink'}`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          </div>
         </motion.div>
         {loading && <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">{[1,2,3].map(i => <div key={i} className="bg-panel/40 border border-edge/50 rounded-2xl p-6 animate-pulse h-48" />)}</div>}
         {error && <div className="bg-blood/10 border border-blood/25 rounded-2xl p-6 text-blood text-sm">{error}</div>}
         {!loading && !error && (
           <>
-            {worlds.length === 0 ? (
+            {catalog.length === 0 ? (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center py-20 border border-dashed border-edge rounded-2xl">
                 <p className="text-4xl mb-4 opacity-60">📚</p>
-                <p className="font-prose text-2xl mb-2">No published worlds yet</p>
-                <p className="text-sm text-ink-dim max-w-sm mx-auto">Stories are being crafted. Check back soon — or become a creator and write the first one.</p>
+                <p className="font-prose text-2xl mb-2">{genreFilter || searchQuery ? 'No worlds match your filters' : 'No published worlds yet'}</p>
+                <p className="text-sm text-ink-dim max-w-sm mx-auto">
+                  {genreFilter || searchQuery
+                    ? 'Try a different genre or search term.'
+                    : 'Stories are being crafted. Check back soon — or become a creator and write the first one.'}
+                </p>
+                {(genreFilter || searchQuery) && (
+                  <button onClick={() => { setGenreFilter(null); setSearchInput(''); setSearchQuery(''); }} className="mt-4 text-sm text-arcane hover:underline">Clear filters</button>
+                )}
               </motion.div>
             ) : (
               <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                {worlds.map((w, i) => (
+                {catalog.map((w, i) => (
                   <motion.div key={w.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i * 0.07, 0.4), duration: 0.5 }} className="group bg-panel/60 border border-edge/70 rounded-2xl overflow-hidden hover:border-arcane/30 hover:shadow-panel transition-all cursor-pointer" onClick={() => startWorld(w.id)}>
                     <div className="h-32 bg-gradient-to-br from-arcane/20 via-voidlight/10 to-transparent relative overflow-hidden">
                       <div className="absolute inset-0 flex items-center justify-center text-5xl opacity-40">📖</div>
                       <div className="absolute inset-0 bg-gradient-to-t from-panel via-transparent to-transparent" />
+                      {w.genre && <span className="absolute top-3 left-3 text-[10px] uppercase tracking-wider px-2 py-1 rounded-full bg-void/70 border border-edge/50 text-ink-dim capitalize">{w.genre}</span>}
                     </div>
                     <div className="p-6">
                       <h3 className="font-semibold text-lg tracking-tight mb-1 group-hover:text-arcane transition-colors">{w.title}</h3>
-                      <p className="text-sm text-ink-dim line-clamp-2 mb-4">{w.description || 'A story waiting to be told.'}</p>
+                      <p className="text-sm text-ink-dim line-clamp-2 mb-3">{w.description || 'A story waiting to be told.'}</p>
+                      {w.tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mb-4">
+                          {w.tags.slice(0, 3).map((t) => (
+                            <span key={t} className="text-[10px] px-2 py-0.5 rounded-full bg-abyss text-ink-faint">#{t}</span>
+                          ))}
+                        </div>
+                      )}
                       <span className="inline-flex items-center gap-2 text-sm text-arcane font-medium">Begin reading <span className="group-hover:translate-x-1 transition-transform">→</span></span>
                     </div>
                   </motion.div>
