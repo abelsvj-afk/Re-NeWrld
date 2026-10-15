@@ -16,6 +16,10 @@ import { CreateSceneUseCase } from '../application/create-scene.use-case.js';
 import { ChapterRepositoryPort } from '../domain/ports/chapter.repository.port.js';
 import { UpdateSceneUseCase } from '../application/update-scene.use-case.js';
 import { CreateChoiceUseCase } from '../application/create-choice.use-case.js';
+import { GenerateNarrationUseCase } from '../application/generate-narration.use-case.js';
+import { GetNarrationUseCase } from '../application/get-narration.use-case.js';
+import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
+import { ElevenLabsClient } from '../infrastructure/elevenlabs.client.js';
 import { SessionVerifier } from '../../auth/domain/ports/session.port.js';
 import { authenticate, requireCreator } from '../../../shared/middleware/auth.middleware.js';
 import { BadRequestError } from '../../../shared/http/http.errors.js';
@@ -26,6 +30,10 @@ export interface WorldRouteDeps {
   chapterRepository: ChapterRepositoryPort;
   choiceRepository: ChoiceRepositoryPort;
   canonRepository: CanonRepositoryPort;
+  narrationRepository: NarrationRepositoryPort;
+  elevenLabs: ElevenLabsClient | null;
+  narrationStoragePath: string;
+  narrationMonthlyCharCap: number;
   sessionVerifier: SessionVerifier;
 }
 
@@ -221,5 +229,67 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       mutations: c.getMutations() ?? null,
       sortOrder: c.getSortOrder(),
     }));
+  });
+
+  // --- Scene narration (ADR-016) ---
+  const GenerateNarrationBody = z.object({
+    voiceId: z.string().min(1, { message: 'voiceId is required' }).max(64),
+    modelId: z.string().min(1).max(64).optional(),
+  });
+
+  const NarrationParams = z.object({
+    id: z.string().uuid({ message: 'Invalid world id' }),
+    sceneId: z.string().uuid({ message: 'Invalid scene id' }),
+  });
+
+  app.post('/worlds/:id/scenes/:sceneId/narration', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = NarrationParams.parse({ ...request.params as object });
+    const body = GenerateNarrationBody.parse(request.body);
+    const generate = new GenerateNarrationUseCase({
+      narrationRepository: deps.narrationRepository,
+      sceneRepository: deps.sceneRepository,
+      worldRepository: deps.worldRepository,
+      elevenLabs: deps.elevenLabs,
+      storagePath: deps.narrationStoragePath,
+      monthlyCharCap: deps.narrationMonthlyCharCap,
+    });
+    const result = await generate.execute({
+      worldId: params.id,
+      sceneId: params.sceneId,
+      creatorId: request.user!.userId,
+      voiceId: body.voiceId,
+      modelId: body.modelId,
+    });
+    return reply.code(result.status === 'cached' ? 200 : 202).send(result);
+  });
+
+  app.get('/worlds/:id/scenes/:sceneId/narration', async (request, reply) => {
+    const params = NarrationParams.parse({ ...request.params as object });
+    const getNarration = new GetNarrationUseCase(
+      deps.narrationRepository,
+      deps.sceneRepository,
+      deps.worldRepository,
+    );
+    const result = await getNarration.execute(params.id, params.sceneId);
+    if (!result.found || !result.audio) {
+      return reply.code(404).send({ status: 'not_generated' });
+    }
+    return reply
+      .header('Content-Type', 'audio/mpeg')
+      .header('Cache-Control', 'public, max-age=31536000, immutable')
+      .send(result.audio);
+  });
+
+  app.get('/worlds/:id/narration/quota', { preHandler: creatorOnly }, async (request) => {
+    const params = WorldParams.parse(request.params);
+    const used = await deps.narrationRepository.sumCharactersThisMonth();
+    const remaining = deps.elevenLabs ? await deps.elevenLabs.getRemainingQuota() : null;
+    return {
+      worldId: params.id,
+      usedThisMonth: used,
+      monthlyCap: deps.narrationMonthlyCharCap,
+      providerRemaining: remaining,
+      configured: deps.elevenLabs !== null,
+    };
   });
 }

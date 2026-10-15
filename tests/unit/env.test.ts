@@ -28,6 +28,9 @@ describe('Environment Configuration & Validation', () => {
       EMAIL_FROM: 'Re:NeWrld <noreply@example.com>',
       APP_BASE_URL: 'http://localhost:8080',
       CORS_ORIGIN: undefined,
+      ELEVENLABS_API_KEY: undefined,
+      NARRATION_STORAGE_PATH: '/data/narrations',
+      NARRATION_MONTHLY_CHAR_CAP: 40000,
     });
   });
 
@@ -52,6 +55,9 @@ describe('Environment Configuration & Validation', () => {
       EMAIL_FROM: 'Re:NeWrld <noreply@example.com>',
       APP_BASE_URL: 'http://localhost:8080',
       CORS_ORIGIN: undefined,
+      ELEVENLABS_API_KEY: undefined,
+      NARRATION_STORAGE_PATH: '/data/narrations',
+      NARRATION_MONTHLY_CHAR_CAP: 40000,
     });
   });
 

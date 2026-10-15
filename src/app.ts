@@ -15,6 +15,9 @@ import { PostgresAuthRepository } from './modules/auth/infrastructure/persistenc
 import { PostgresWorldRepository } from './modules/world/infrastructure/persistence/postgres-world.repository.js';
 import { PostgresSceneRepository } from './modules/world/infrastructure/persistence/postgres-scene.repository.js';
 import { PostgresChapterRepository } from './modules/world/infrastructure/persistence/postgres-chapter.repository.js';
+import { PostgresNarrationRepository } from './modules/world/infrastructure/persistence/postgres-narration.repository.js';
+import { ElevenLabsClient } from './modules/world/infrastructure/elevenlabs.client.js';
+import { NarrationRepositoryPort } from './modules/world/domain/ports/narration.repository.port.js';
 import { PostgresChoiceRepository } from './modules/world/infrastructure/persistence/postgres-choice.repository.js';
 import { PostgresCanonRepository } from './modules/world/infrastructure/persistence/postgres-canon.repository.js';
 import { SessionRepositoryPort } from './modules/session/domain/ports/session.repository.port.js';
@@ -42,6 +45,7 @@ export interface AppDeps {
   worldRepository?: WorldRepositoryPort;
   sceneRepository?: SceneRepositoryPort;
   chapterRepository?: ChapterRepositoryPort;
+  narrationRepository?: NarrationRepositoryPort;
   choiceRepository?: ChoiceRepositoryPort;
   canonRepository?: CanonRepositoryPort;
   sessionRepository?: SessionRepositoryPort;
@@ -136,6 +140,10 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const worldRepository = deps?.worldRepository ?? new PostgresWorldRepository();
   const sceneRepository = deps?.sceneRepository ?? new PostgresSceneRepository();
   const chapterRepository = deps?.chapterRepository ?? new PostgresChapterRepository();
+  const narrationRepository = deps?.narrationRepository ?? new PostgresNarrationRepository();
+  const elevenLabs = env.ELEVENLABS_API_KEY
+    ? new ElevenLabsClient({ apiKey: env.ELEVENLABS_API_KEY })
+    : null;
   const choiceRepository = deps?.choiceRepository ?? new PostgresChoiceRepository();
   const canonRepository = deps?.canonRepository ?? new PostgresCanonRepository();
   const sessionRepository = deps?.sessionRepository ?? new PostgresSessionRepository();
@@ -166,6 +174,10 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       worldRepository,
       sceneRepository,
       chapterRepository,
+      narrationRepository,
+      elevenLabs,
+      narrationStoragePath: env.NARRATION_STORAGE_PATH,
+      narrationMonthlyCharCap: env.NARRATION_MONTHLY_CHAR_CAP,
       choiceRepository,
       canonRepository,
       sessionVerifier: sessionService.getVerifier(),
