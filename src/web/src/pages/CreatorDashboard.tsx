@@ -5,11 +5,8 @@ import { worldsApi, ApiError, type WorldSummary } from '../lib/api';
 import { useAuth } from '../stores/auth';
 
 const NAV = [
-  { label: 'Dashboard', icon: '◈', active: true },
-  { label: 'Worlds', icon: '◉', active: false },
-  { label: 'Characters', icon: '◎', active: false },
-  { label: 'Analytics', icon: '⬔', active: false },
-  { label: 'Settings', icon: '⚙', active: false },
+  { label: 'Dashboard', icon: '◈', active: true, action: 'dashboard' as const },
+  { label: 'Worlds', icon: '◉', active: false, action: 'worlds' as const },
 ];
 
 function StatusBadge({ status }: { status: WorldSummary['status'] }) {
@@ -95,9 +92,12 @@ export function CreatorDashboard() {
         <nav className="px-3 space-y-1 flex-1">
           <p className="px-3 mb-2 text-[10px] uppercase tracking-[0.2em] text-ink-faint font-medium">Workspace</p>
           {NAV.map((item) => (
-            <div key={item.label} className={`px-3 py-2.5 rounded-lg text-sm transition flex items-center gap-3 ${item.active ? 'bg-arcane/[0.08] text-arcane border border-arcane/20 font-medium' : 'text-ink-dim hover:bg-panel hover:text-ink cursor-pointer border border-transparent'}`}>
+            <button key={item.label} onClick={() => {
+              if (item.action === 'worlds') document.getElementById('worlds-section')?.scrollIntoView({ behavior: 'smooth' });
+              else window.scrollTo({ top: 0, behavior: 'smooth' });
+            }} className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition flex items-center gap-3 ${item.active ? 'bg-arcane/[0.08] text-arcane border border-arcane/20 font-medium' : 'text-ink-dim hover:bg-panel hover:text-ink cursor-pointer border border-transparent'}`}>
               <span className="text-base w-5 text-center opacity-80">{item.icon}</span>{item.label}
-            </div>
+            </button>
           ))}
         </nav>
         <div className="p-4 border-t border-edge/70">
@@ -136,7 +136,7 @@ export function CreatorDashboard() {
               </motion.div>
             ))}
           </div>
-          <div className="flex items-center justify-between mb-4">
+          <div id="worlds-section" className="flex items-center justify-between mb-4 scroll-mt-6">
             <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-ink-dim">Your Worlds</h3>
             <span className="text-xs text-ink-faint">{filtered.length} shown</span>
           </div>

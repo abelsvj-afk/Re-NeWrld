@@ -123,7 +123,7 @@ export function SceneEditorPage() {
           <div className="flex items-center gap-2">
             <span className="text-xs text-ink-faint mr-2 hidden sm:block">{saving ? 'Saving…' : 'Saved'}</span>
             <button onClick={save} disabled={saving} className="text-[13px] font-medium px-4 py-2 rounded-xl border border-edge bg-panel text-ink-dim hover:border-arcane/40 hover:text-arcane transition-all disabled:opacity-50">Save</button>
-            <button className="text-[13px] font-semibold px-4 py-2 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void hover:brightness-110 transition-all shadow-glow-cyan">Share</button>
+            <button onClick={() => navigate({ to: '/creator/worlds/$worldId/publish', params: { worldId } })} className="text-[13px] font-semibold px-4 py-2 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void hover:brightness-110 transition-all shadow-glow-cyan">Publish</button>
             <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition ml-2">Sign out</button>
           </div>
         </div>
