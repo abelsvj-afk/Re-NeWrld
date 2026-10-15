@@ -24,6 +24,7 @@ export function ReaderPage() {
   const [error, setError] = useState<string | null>(null);
   const [upgrading, setUpgrading] = useState(false);
   const [confirmUpgrade, setConfirmUpgrade] = useState(false);
+  const [showWelcomeToast, setShowWelcomeToast] = useState(false);
 
   const handleBecomeCreator = async () => {
     if (upgrading) return;
@@ -37,6 +38,9 @@ export function ReaderPage() {
     setError(null);
     try {
       await becomeCreator();
+      setShowWelcomeToast(true);
+      // Let the toast land before entering the studio.
+      await new Promise((r) => setTimeout(r, 1600));
       navigate({ to: '/' });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Upgrade failed');
@@ -159,6 +163,7 @@ export function ReaderPage() {
             </AnimatePresence>
           )}
         </main>
+        <CreatorWelcomeToast show={showWelcomeToast} />
       </div>
     );
   }
@@ -216,6 +221,31 @@ export function ReaderPage() {
           </>
         )}
       </main>
+      <CreatorWelcomeToast show={showWelcomeToast} />
     </div>
+  );
+}
+
+function CreatorWelcomeToast({ show }: { show: boolean }) {
+  return (
+    <AnimatePresence>
+      {show && (
+        <motion.div
+          initial={{ opacity: 0, y: 24, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 12, scale: 0.98 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 28 }}
+          className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-panel border border-arcane/40 rounded-2xl px-5 py-4 shadow-glow-cyan"
+          role="status"
+          aria-live="polite"
+        >
+          <span className="w-8 h-8 rounded-full bg-gradient-to-br from-arcane to-[#0ea5c4] flex items-center justify-center text-void font-bold">✦</span>
+          <div>
+            <p className="text-sm font-semibold text-ink">Welcome, Creator</p>
+            <p className="text-xs text-ink-dim">Your studio is ready — entering now…</p>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
