@@ -23,9 +23,16 @@ export function ReaderPage() {
   const [choosing, setChoosing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [upgrading, setUpgrading] = useState(false);
+  const [confirmUpgrade, setConfirmUpgrade] = useState(false);
 
   const handleBecomeCreator = async () => {
     if (upgrading) return;
+    if (!confirmUpgrade) {
+      setConfirmUpgrade(true);
+      // Auto-disarm after 5s so a stray tap doesn't linger.
+      setTimeout(() => setConfirmUpgrade(false), 5000);
+      return;
+    }
     setUpgrading(true);
     setError(null);
     try {
@@ -35,8 +42,23 @@ export function ReaderPage() {
       setError(err instanceof ApiError ? err.message : 'Upgrade failed');
     } finally {
       setUpgrading(false);
+      setConfirmUpgrade(false);
     }
   };
+
+  const becomeCreatorButton = user?.role === 'reader' ? (
+    <button
+      onClick={handleBecomeCreator}
+      disabled={upgrading}
+      className={`text-xs font-medium px-3 py-2 rounded-lg transition ${
+        confirmUpgrade
+          ? 'bg-blood/20 border border-blood/50 text-blood hover:bg-blood/30'
+          : 'bg-gradient-to-r from-arcane to-[#0ea5c4] text-void hover:brightness-110'
+      } disabled:opacity-50`}
+    >
+      {upgrading ? 'Upgrading…' : confirmUpgrade ? 'Tap again to confirm' : '✦ Become a Creator'}
+    </button>
+  ) : null;
 
   useEffect(() => {
     (async () => {
@@ -103,6 +125,7 @@ export function ReaderPage() {
             </button>
             <div className="flex items-center gap-3">
               {user?.role === 'creator' && <button onClick={() => navigate({ to: '/creator' })} className="text-xs font-medium px-3 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-ink transition">✦ Creator Studio</button>}
+              {becomeCreatorButton}
               <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
             </div>
           </div>
@@ -152,7 +175,7 @@ export function ReaderPage() {
           </div>
           <div className="flex items-center gap-3">
             {user?.role === 'creator' && <button onClick={() => navigate({ to: '/creator' })} className="text-xs font-medium px-3 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-ink transition">✦ Creator Studio</button>}
-            {user?.role === 'reader' && <button onClick={handleBecomeCreator} disabled={upgrading} className="text-xs font-medium px-3 py-2 rounded-lg bg-gradient-to-r from-arcane to-[#0ea5c4] text-void hover:brightness-110 disabled:opacity-50 transition">✦ {upgrading ? 'Upgrading…' : 'Become a Creator'}</button>}
+            {becomeCreatorButton}
             <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
           </div>
         </div>
