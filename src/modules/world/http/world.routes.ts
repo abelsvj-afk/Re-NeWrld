@@ -43,6 +43,7 @@ const UpdateWorldBody = z.object({
   title: z.string().min(1, { message: 'Title cannot be empty' }).max(255).optional(),
   description: z.string().max(10000).nullable().optional(),
   metadata: WorldMetadataSchema.optional(),
+  startSceneId: z.string().uuid({ message: 'Invalid start scene id' }).nullable().optional(),
 });
 
 function parseWorldId(raw: string): WorldId {
@@ -69,7 +70,7 @@ function toWorldJson(world: World) {
 export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): Promise<void> {
   const createWorld = new CreateWorldUseCase(deps.worldRepository);
   const getWorld = new GetWorldUseCase(deps.worldRepository);
-  const updateWorld = new UpdateWorldUseCase(deps.worldRepository);
+  const updateWorld = new UpdateWorldUseCase(deps.worldRepository, deps.sceneRepository);
   const deleteWorld = new DeleteWorldUseCase(deps.worldRepository);
   const publishWorld = new PublishWorldUseCase(
     deps.worldRepository,
@@ -112,6 +113,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       title: body.title,
       description: body.description,
       metadata: body.metadata,
+      startSceneId: body.startSceneId,
     });
     return toWorldJson(world);
   });
