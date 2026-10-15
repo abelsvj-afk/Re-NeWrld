@@ -20,6 +20,9 @@ export function SceneEditorPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [title, setTitle] = useState('');
+  const [showNewScene, setShowNewScene] = useState(false);
+  const [newSceneTitle, setNewSceneTitle] = useState('');
+  const [creatingScene, setCreatingScene] = useState(false);
 
   const activeScene = scenes.find((s) => s.id === activeSceneId) ?? null;
   const sceneChoices = choices.filter((c) => c.sceneId === activeSceneId);
@@ -53,6 +56,25 @@ export function SceneEditorPage() {
       setScenes((prev) => prev.map((s) => (s.id === activeScene.id ? { ...s, title } : s)));
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Save failed'); }
     finally { setSaving(false); }
+  };
+
+  const createScene = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSceneTitle.trim() || creatingScene) return;
+    setCreatingScene(true); setError(null);
+    try {
+      const res = await worldsApi.createScene(worldId, {
+        chapterId: crypto.randomUUID(),
+        title: newSceneTitle.trim(),
+        prose: '<p>Begin writing…</p>',
+      });
+      const newScene: SceneSummary = { id: res.sceneId, title: newSceneTitle.trim(), isEnding: false } as SceneSummary;
+      setScenes((prev) => [...prev, newScene]);
+      setActiveSceneId(res.sceneId);
+      setShowNewScene(false);
+      setNewSceneTitle('');
+    } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to create scene'); }
+    finally { setCreatingScene(false); }
   };
 
   if (loading) return <div className="min-h-screen bg-void flex items-center justify-center"><div className="text-ink-dim animate-pulse font-prose text-lg">Opening narrative arc…</div></div>;
@@ -89,7 +111,10 @@ export function SceneEditorPage() {
       <div className="flex-1 flex min-h-0">
         {/* Project panel */}
         <aside className="w-[260px] shrink-0 border-r border-edge/70 bg-abyss/40 hidden lg:flex flex-col">
-          <div className="px-5 py-4 border-b border-edge/60"><p className="text-[10px] uppercase tracking-[0.25em] text-ink-faint font-semibold">Project Panel</p></div>
+          <div className="px-5 py-4 border-b border-edge/60 flex items-center justify-between">
+            <p className="text-[10px] uppercase tracking-[0.25em] text-ink-faint font-semibold">Project Panel</p>
+            <button onClick={() => setShowNewScene(true)} className="text-arcane hover:text-arcane/80 text-lg leading-none font-bold" title="Add scene">+</button>
+          </div>
           <div className="flex-1 overflow-auto p-3">
             <p className="px-3 py-2 text-[11px] font-semibold text-ember/90 uppercase tracking-widest">Act 1: The Beginning</p>
             <div className="space-y-0.5">
@@ -101,7 +126,7 @@ export function SceneEditorPage() {
                   </div>
                 </button>
               ))}
-              {scenes.length === 0 && <p className="text-ink-faint text-[13px] px-3 py-8 text-center">No scenes yet.<br/>Create your first scene to begin.</p>}
+              {scenes.length === 0 && <div className="text-ink-faint text-[13px] px-3 py-8 text-center"><p className="mb-3">No scenes yet.<br/>Create your first scene to begin.</p><button onClick={() => setShowNewScene(true)} className="text-arcane text-[13px] font-medium hover:underline">+ Add scene</button></div>}
             </div>
           </div>
         </aside>
@@ -163,6 +188,25 @@ export function SceneEditorPage() {
         <div className="flex items-center gap-4"><span>{scenes.length} scenes</span><span>{choices.length} choices</span></div>
         <div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${saving ? 'bg-ember animate-pulse' : 'bg-emerald-400'}`} />{saving ? 'Saving…' : 'All changes saved'}</div>
       </footer>
+
+      {showNewScene && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowNewScene(false)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">New Scene</h3>
+            <p className="text-sm text-ink-dim mb-6">Add a scene to your narrative.</p>
+            <form onSubmit={createScene} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Title</label>
+                <input value={newSceneTitle} onChange={(e) => setNewSceneTitle(e.target.value)} required placeholder="The Whispering Reef" autoFocus className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all" />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowNewScene(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
+                <button type="submit" disabled={creatingScene || !newSceneTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creatingScene ? 'Creating…' : 'Create Scene'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }
