@@ -45,10 +45,23 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
     throw new ApiError(
       res.status,
       data.code ?? 'UNKNOWN',
-      data.message ?? `Request failed with status ${res.status}`,
+      data.message ?? friendlyErrorMessage(res.status),
     );
   }
   return data as T;
+}
+
+function friendlyErrorMessage(status: number): string {
+  switch (status) {
+    case 400: return 'Something wasn\u2019t quite right with that request. Check your input and try again.';
+    case 401: return 'You need to sign in to do that.';
+    case 403: return 'You don\u2019t have permission to do that.';
+    case 404: return 'We couldn\u2019t find what you were looking for.';
+    case 409: return 'That already exists \u2014 try a different name.';
+    case 429: return 'Too many attempts. Give it a moment and try again.';
+    case 500: return 'Something went wrong on our end. Please try again.';
+    default: return 'Something went wrong. Please try again.';
+  }
 }
 
 // --- Auth ---

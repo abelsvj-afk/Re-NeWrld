@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useParams } from '@tanstack/react-router';
 import { motion, AnimatePresence } from 'framer-motion';
 import { worldsApi, ApiError } from '../lib/api';
@@ -17,6 +17,23 @@ export function PublishPage() {
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [publishResult, setPublishResult] = useState<{ versionNumber: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [checklist, setChecklist] = useState<{ scenes: number; choices: number; endings: number } | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [scenes, choices] = await Promise.all([
+          worldsApi.scenes(worldId),
+          worldsApi.choices(worldId),
+        ]);
+        setChecklist({
+          scenes: scenes.length,
+          choices: choices.length,
+          endings: scenes.filter((s) => s.isEnding).length,
+        });
+      } catch { /* checklist is best-effort */ }
+    })();
+  }, [worldId]);
 
   const runValidation = async () => {
     setStep('validating');
@@ -74,6 +91,13 @@ export function PublishPage() {
                 ending reachability, and condition references. Invalid worlds
                 are rejected; valid worlds become immutable snapshots.
               </p>
+              {checklist && (
+                <div className="max-w-sm mx-auto mb-8 text-left space-y-2">
+                  <ChecklistItem ok={checklist.scenes > 0} label={`At least 1 scene (${checklist.scenes})`} />
+                  <ChecklistItem ok={checklist.choices > 0} label={`At least 1 choice (${checklist.choices})`} />
+                  <ChecklistItem ok={checklist.endings > 0} label={`At least 1 ending (${checklist.endings})`} />
+                </div>
+              )}
               <button
                 onClick={runValidation}
                 className="bg-arcane text-void font-semibold rounded-xl px-8 py-3.5 hover:bg-arcane/90 transition shadow-glow-cyan"
@@ -166,6 +190,15 @@ export function PublishPage() {
           )}
         </AnimatePresence>
       </main>
+    </div>
+  );
+}
+
+function ChecklistItem({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <div className={`flex items-center gap-3 px-4 py-2.5 rounded-xl border text-sm ${ok ? 'border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-300' : 'border-blood/25 bg-blood/[0.06] text-blood'}`}>
+      <span className="text-base">{ok ? '✓' : '✕'}</span>
+      <span>{label}</span>
     </div>
   );
 }
