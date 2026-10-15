@@ -325,9 +325,26 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 
 ---
 
+- **Task F3: Session abandon endpoint (ADR-015 §9.4 follow-up — tracked 2026-10-14)**
+  - **Phase**: Phase F (Reader Runtime) — follow-up
+  - **Prerequisites**: F1c, F2a
+  - **Ownership**: `src/modules/session/http/session.routes.ts`, `src/modules/session/application/`
+  - **File Scope**: New route + use case (or entity-delegated handler); `ReaderSession.abandon()` entity method already exists
+  - **Objective**: `POST /sessions/:id/abandon` — reader-initiated session abandonment per ADR-015 §9.4 (explicitly deferred out of G2 scope). Absorbing terminal state: `active → abandoned`; idempotent on already-abandoned/completed.
+  - **Traceability**: ADR-015 §9.4
+  - **Acceptance Criteria**:
+    - Authenticated owner only (404-not-403 for non-owners, per session ownership convention).
+    - Terminal states absorbing: abandoning an `abandoned`/`completed` session is a no-op success, not an error.
+    - Timeline entry appended for the abandonment transition.
+    - Optimistic-locking 409 contract honored if version supplied.
+  - **Required Tests**: Unit tests (entity transition, idempotent re-abandon, ownership); integration test UNVERIFIED until Docker/CI.
+  - **Definition of Done**: Route live, tests green, docs updated. Not started.
+
+---
+
 ### Roadmap Phase G: Deterministic Narrative Execution
 - **Design gate**: ADR-015 **APPROVED** 2026-10-13 (product owner). 8 review rounds, findings B1–B38 + C1–C3 all resolved. Level 3 change. No implementation until this approval — now authorized.
-- **Implementation status 2026-10-13**: All Phase G tasks implemented per ADR-015. **G1a** (`src/modules/world/domain/services/grammar.schema.ts`, `semantic-validator.ts`, `grammar-marker.ts` — grammar lives in world module per repository-architecture strict isolation; session→world is the established direction), **G1b** (`src/modules/session/domain/services/condition-evaluator.ts`, `mutation-applier.ts`; `choice.errors.ts` taxonomy), **G1c** (E1b extended; Choice entity preserves absent vs `{}`; canon schema marker; migration 007 nullable payloads), **G2a** (migration 006, fingerprint, idempotency repo), **G2b** (`applyChoiceResult`, terminal/idempotency errors), **G2c** (17-step use case + D3a), **G2d** (route + error mapping), **G2e** (timeline-consumer inventory: no production readers — closed). Verification: tsc clean; 343/343 tests (331 unit + 12 integration, real PG 16.2); 100% G1 coverage; p95 30.6ms. Awaiting product-owner review. Work uncommitted per no-commit rule.
+- **Implementation status 2026-10-14**: ACCEPTED (commit c4b85ae; merged PR #2 b9b215a). All Phase G tasks implemented per ADR-015. **G1a** (`src/modules/world/domain/services/grammar.schema.ts`, `semantic-validator.ts`, `grammar-marker.ts` — grammar lives in world module per repository-architecture strict isolation; session→world is the established direction), **G1b** (`src/modules/session/domain/services/condition-evaluator.ts`, `mutation-applier.ts`; `choice.errors.ts` taxonomy), **G1c** (E1b extended; Choice entity preserves absent vs `{}`; canon schema marker; migration 007 nullable payloads), **G2a** (migration 006, fingerprint, idempotency repo), **G2b** (`applyChoiceResult`, terminal/idempotency errors), **G2c** (17-step use case + D3a), **G2d** (route + error mapping), **G2e** (timeline-consumer inventory: no production readers — closed). Verification 2026-10-14: tsc clean (backend + frontend); 302/302 unit tests pass (33 files); 46 integration tests exist but UNVERIFIED here (no Docker); 100% G1 line/branch coverage claimed per ADR-015 gate (not re-verified in this pass); p95 30.6ms per prior report (no retained benchmark artifact).
 - **Task G1a: Grammar Schemas + Semantic Validator + Marker Helper (pure domain)**
   - **Phase**: Phase G (Deterministic Engine)
   - **Prerequisites**: ADR-015 approved

@@ -37,6 +37,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Phase G (ADR-015)**: Choice submission system. **G1**: Tagged-object condition/mutation grammar (Zod schemas), semantic validator (nesting limits, publish-time blockers), marker helper; pure condition evaluator and mutation applier (100% unit coverage); E1b extended with publish-time grammar validation; Choice entity preserves absent vs {} conditions; canon schema adds optional condition_grammar_version marker; migration 007 makes choice conditions/mutations nullable. **G2**: Migration 006 idempotency_keys table; SHA-256 request fingerprinting (B35 vectors); idempotency repository; ReaderSession.applyChoiceResult (state replace + derived completion); 17-step SubmitChoiceUseCase with D3a unique-violation recovery; POST /sessions/:id/choices route (X-Idempotency-Key required); discriminated timeline envelope {kind: choice-execution-v1, applied}. Verified: 343/343 tests (real PostgreSQL 16.2), G1 pure 0.086ms, full-path p95 30.6ms.
 - **Phase G review fixes (STOP-1..5)**: readerId added to idempotency fingerprint hash (per-reader key namespace, closes existence oracle); package.json test scripts no longer hardcode DATABASE_URL (unit uses dummy, integration loads .env.test via vitest.config.ts); db.ts refuses non-test databases in APP_ENV=test; world application facade (src/modules/world/application/index.ts) for grammar surface with import-boundary enforcement test; migration 008 adds trg_reader_timelines_immutable (closes H6); TASKS.md debt register (H-facade, H-idempotency-janitor).
 - **Phase G (ACCEPTED 2026-10-14, commit 1c62898)**: Task G1 — submit-choice use case (condition evaluator, mutation applier, grammar schemas, semantic validator). Task G2 — idempotency hardening (readerId in fingerprint hash, .env.test via vitest.config.ts, db.ts _test guard). Task G3 — world public facade (src/modules/world/application/index.ts, import boundary test with 22-allowlist). Migration 008 — trg_reader_timelines_immutable (P0001, closes H6). ADR-015 amended — 4-field fingerprint spec (B36). TASKS.md debt register — H-facade (30 pre-existing imports), H-idempotency-janitor. Integration tests UNVERIFIED (PG unavailable; last known 348/348).
+- Creator dashboard: working '+ New World' button with title/description modal; creates the world and navigates to the scene editor
+- Scene editor: 'Add Scene' button in project panel header plus New Scene modal; scenes can now be created (was previously impossible)
+- Scene editor: 'Add Choice' button with modal (choice text + target scene picker); branching choices can now be created
+- Publish page: pre-flight checklist showing scene/choice/ending counts with pass/fail indicators before validation
+- Creator dashboard: world edit (title/description modal) and delete (with confirmation) via worldsApi.update/remove
+- Scene editor 'Narrative Arc' redesign: top tabs, project panel, prose card, branching-choice cards, conditions sidebar, status bar
 
 ### Fixed
 - Centralized error handling: Zod errors → 400, typed domain errors → mapped status codes; fixed production startup script for missing `.env`.
@@ -48,6 +54,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `package-lock.json` committed for `@fastify/rate-limit` and `@fastify/cors`.
 - PostgreSQL integration VERIFIED 2026-10-13: 30/30 tests across all 7 integration files passed against real PostgreSQL 16.2 (new TEST_DATABASE_URL env fallback in each file; Testcontainers remains default). Fixed two genuine test bugs exposed by the run: session-persistence seed FK violation, migration.test hardcoded-email conflict. No production code changed. Item 4 (concurrent publishing advisory-lock) still has no integration test.
 - Rerun-safety of integration test seeds against a reused database: session-persistence, canon-immutability, and auth-session tests used fixed seed emails/user IDs with ON CONFLICT DO NOTHING, so reruns against the same DB failed (worlds_creator_id_fkey violations; accumulated auth_sessions rows). Seed identities are now unique per run. Test-only changes; no production code affected.
+- Auth: switched frontend to cookie-based sessions (backend never returned tokens; frontend incorrectly expected {token, user} and stored a phantom Bearer token)
+- Signup role selection: backend hardcoded every new user to 'reader'; creator accounts now receive the selected role (fixes 403 on /worlds)
+- Dashboard crash 'r.filter is not a function': frontend now unwraps the {worlds} envelope returned by GET /worlds
+- Sign out now navigates to /login; creator routes (/creator, scene editor, publish) require creator role with redirect for readers; home view no longer flashes between reader/creator during hydration
+- Creator sidebar nav items now scroll to sections (were dead divs); removed Characters/Analytics/Settings nav items (no routes exist yet); Share button now navigates to publish page
+- API errors now human-readable (e.g. 'You do not have permission') instead of raw 'Request failed with status 400/403/404'
+- Scene editor header shows the actual world title (was 'Project: Untitled'); /signin now redirects to /login; world count shows loading state instead of flashing '0 shown'
+- Password input: removed [-webkit-appearance:none]/[appearance:none] classes that prevented all text entry
 
 ### Security
 - scrypt password hashing (N=16384, r=8, p=1, 64-byte key, per-hash salt, timing-safe verify).

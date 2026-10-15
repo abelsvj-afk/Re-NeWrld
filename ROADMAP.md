@@ -66,7 +66,7 @@ This roadmap defines the authoritative implementation plan for **Re:NeWrld**. It
 - **Gate**: 100% unit test coverage for pure condition evaluation and state transition functions.
 - **Deliverables**: `modules/session/domain/services/condition-evaluator.ts` and `state-transition.service.ts`.
 - **Completion Criteria**: Narrative progression executes deterministically based on player choices and variable maps.
-- **Status 2026-10-13**: Implemented per ADR-015 (Accepted). G1 (grammar, evaluator, applier, publish validation) + G2 (idempotency, SubmitChoiceUseCase, POST /sessions/:id/choices). Note: grammar schemas live in `modules/world/domain/services/` per strict module isolation (session→world established direction); evaluator/applier in session. 100% G1 coverage; 343/343 tests pass (real PG 16.2). Awaiting product-owner review.
+- **Status 2026-10-14**: ACCEPTED (commit c4b85ae; merged PR #2 b9b215a). Implemented per ADR-015 (Accepted). G1 (grammar, evaluator, applier, publish validation) + G2 (idempotency, SubmitChoiceUseCase, POST /sessions/:id/choices). Note: grammar schemas live in `modules/world/domain/services/` per strict module isolation (session→world established direction); evaluator/applier in session. 100% G1 coverage. Verified 2026-10-14: 302/302 unit tests pass (33 files), tsc clean (backend + frontend); 46 integration tests exist but UNVERIFIED in this environment (no Docker); no retained evidence of prior PG 16.2 run in repo.
 
 ### Phase H: API & Frontend Integration
 - **Objective**: Wire Fastify REST controllers with Zod request/response validation contracts (ADR-003) and build the React SPA frontend communicating via provider-neutral API client services (ADR-001).
