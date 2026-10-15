@@ -13,6 +13,7 @@ import { UpdateWorldUseCase } from '../application/update-world.use-case.js';
 import { DeleteWorldUseCase } from '../application/delete-world.use-case.js';
 import { PublishWorldUseCase } from '../application/publish-world.use-case.js';
 import { CreateSceneUseCase } from '../application/create-scene.use-case.js';
+import { ChapterRepositoryPort } from '../domain/ports/chapter.repository.port.js';
 import { UpdateSceneUseCase } from '../application/update-scene.use-case.js';
 import { CreateChoiceUseCase } from '../application/create-choice.use-case.js';
 import { SessionVerifier } from '../../auth/domain/ports/session.port.js';
@@ -22,6 +23,7 @@ import { BadRequestError } from '../../../shared/http/http.errors.js';
 export interface WorldRouteDeps {
   worldRepository: WorldRepositoryPort;
   sceneRepository: SceneRepositoryPort;
+  chapterRepository: ChapterRepositoryPort;
   choiceRepository: ChoiceRepositoryPort;
   canonRepository: CanonRepositoryPort;
   sessionVerifier: SessionVerifier;
@@ -147,7 +149,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
   app.post('/worlds/:id/scenes', { preHandler: creatorOnly }, async (request, reply) => {
     const params = WorldParams.parse(request.params);
     const body = CreateSceneBody.parse(request.body);
-    const createScene = new CreateSceneUseCase(deps.sceneRepository, deps.worldRepository);
+    const createScene = new CreateSceneUseCase(deps.sceneRepository, deps.worldRepository, deps.chapterRepository);
     const result = await createScene.execute({ worldId: params.id, ...body });
     return reply.code(201).send(result);
   });

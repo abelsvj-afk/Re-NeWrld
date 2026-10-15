@@ -7,12 +7,14 @@ import { logger } from './shared/logger/pino.logger.js';
 import { AuthRepositoryPort } from './modules/auth/domain/ports/auth.repository.port.js';
 import { WorldRepositoryPort } from './modules/world/domain/ports/world.repository.port.js';
 import { SceneRepositoryPort } from './modules/world/domain/ports/scene.repository.port.js';
+import { ChapterRepositoryPort } from './modules/world/domain/ports/chapter.repository.port.js';
 import { ChoiceRepositoryPort } from './modules/world/domain/ports/choice.repository.port.js';
 import { CanonRepositoryPort } from './modules/world/domain/ports/canon.repository.port.js';
 import { SessionServicePort } from './modules/auth/domain/ports/session.port.js';
 import { PostgresAuthRepository } from './modules/auth/infrastructure/persistence/postgres-auth.repository.js';
 import { PostgresWorldRepository } from './modules/world/infrastructure/persistence/postgres-world.repository.js';
 import { PostgresSceneRepository } from './modules/world/infrastructure/persistence/postgres-scene.repository.js';
+import { PostgresChapterRepository } from './modules/world/infrastructure/persistence/postgres-chapter.repository.js';
 import { PostgresChoiceRepository } from './modules/world/infrastructure/persistence/postgres-choice.repository.js';
 import { PostgresCanonRepository } from './modules/world/infrastructure/persistence/postgres-canon.repository.js';
 import { SessionRepositoryPort } from './modules/session/domain/ports/session.repository.port.js';
@@ -39,6 +41,7 @@ export interface AppDeps {
   authRepository?: AuthRepositoryPort;
   worldRepository?: WorldRepositoryPort;
   sceneRepository?: SceneRepositoryPort;
+  chapterRepository?: ChapterRepositoryPort;
   choiceRepository?: ChoiceRepositoryPort;
   canonRepository?: CanonRepositoryPort;
   sessionRepository?: SessionRepositoryPort;
@@ -132,6 +135,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const authRepository = deps?.authRepository ?? new PostgresAuthRepository();
   const worldRepository = deps?.worldRepository ?? new PostgresWorldRepository();
   const sceneRepository = deps?.sceneRepository ?? new PostgresSceneRepository();
+  const chapterRepository = deps?.chapterRepository ?? new PostgresChapterRepository();
   const choiceRepository = deps?.choiceRepository ?? new PostgresChoiceRepository();
   const canonRepository = deps?.canonRepository ?? new PostgresCanonRepository();
   const sessionRepository = deps?.sessionRepository ?? new PostgresSessionRepository();
@@ -161,6 +165,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
     await worldRoutes(instance, {
       worldRepository,
       sceneRepository,
+      chapterRepository,
       choiceRepository,
       canonRepository,
       sessionVerifier: sessionService.getVerifier(),
