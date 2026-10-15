@@ -123,6 +123,10 @@ export const worldsApi = {
   create: (input: { title: string; description?: string }) =>
     api<WorldSummary>('/worlds', { method: 'POST', body: input }),
   get: (id: string) => api<WorldSummary & { scenes: unknown[] }>(`/worlds/${id}`),
+  update: (id: string, input: { title?: string; description?: string }) =>
+    api<void>(`/worlds/${id}`, { method: 'PATCH', body: input }),
+  remove: (id: string) =>
+    api<void>(`/worlds/${id}`, { method: 'DELETE' }),
   scenes: (worldId: string) => api<SceneSummary[]>(`/worlds/${worldId}/scenes`),
   createScene: (worldId: string, input: { chapterId: string; title: string; prose: string; isEnding?: boolean }) =>
     api<{ sceneId: string }>(`/worlds/${worldId}/scenes`, { method: 'POST', body: input }),

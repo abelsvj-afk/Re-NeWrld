@@ -43,6 +43,39 @@ export function CreatorDashboard() {
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [creating, setCreating] = useState(false);
+  const [editingWorld, setEditingWorld] = useState<WorldSummary | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDesc, setEditDesc] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const startEdit = (w: WorldSummary) => {
+    setEditingWorld(w);
+    setEditTitle(w.title);
+    setEditDesc(w.description ?? '');
+  };
+
+  const saveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingWorld || !editTitle.trim() || savingEdit) return;
+    setSavingEdit(true);
+    try {
+      await worldsApi.update(editingWorld.id, { title: editTitle.trim(), description: editDesc.trim() || undefined });
+      setWorlds((prev) => prev.map((w) => w.id === editingWorld.id ? { ...w, title: editTitle.trim(), description: editDesc.trim() } : w));
+      setEditingWorld(null);
+    } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to update world'); }
+    finally { setSavingEdit(false); }
+  };
+
+  const deleteWorld = async (w: WorldSummary) => {
+    if (!confirm(`Delete "${w.title}"? This cannot be undone.`)) return;
+    setDeletingId(w.id);
+    try {
+      await worldsApi.remove(w.id);
+      setWorlds((prev) => prev.filter((x) => x.id !== w.id));
+    } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to delete world'); }
+    finally { setDeletingId(null); }
+  };
 
   useEffect(() => {
     (async () => {
@@ -157,6 +190,8 @@ export function CreatorDashboard() {
                     <div className="flex gap-2 shrink-0">
                       <button onClick={() => navigate({ to: '/creator/worlds/$worldId/scenes', params: { worldId: w.id } })} className="text-sm font-medium px-4 py-2.5 rounded-xl border border-edge bg-abyss/50 text-ink-dim hover:border-arcane/50 hover:text-arcane transition-all">Edit Scenes</button>
                       {w.status === 'draft' && <button onClick={() => navigate({ to: '/creator/worlds/$worldId/publish', params: { worldId: w.id } })} className="text-sm font-medium px-4 py-2.5 rounded-xl bg-ember/10 border border-ember/30 text-ember hover:bg-ember/20 transition-all">Publish</button>}
+                      <button onClick={() => startEdit(w)} className="text-sm font-medium px-3 py-2.5 rounded-xl border border-edge bg-abyss/50 text-ink-faint hover:border-edge-2 hover:text-ink transition-all" title="Edit world details">✎</button>
+                      <button onClick={() => deleteWorld(w)} disabled={deletingId === w.id} className="text-sm font-medium px-3 py-2.5 rounded-xl border border-edge bg-abyss/50 text-ink-faint hover:border-blood/50 hover:text-blood transition-all disabled:opacity-50" title="Delete world">🗑</button>
                     </div>
                   </div>
                 </motion.div>
@@ -191,6 +226,29 @@ export function CreatorDashboard() {
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewWorld(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={creating || !newTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creating ? 'Creating…' : 'Create World'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+
+      {editingWorld && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setEditingWorld(null)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">Edit World</h3>
+            <p className="text-sm text-ink-dim mb-6">Update your world's details.</p>
+            <form onSubmit={saveEdit} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Title</label>
+                <input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} required className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Description <span className="normal-case tracking-normal opacity-60">(optional)</span></label>
+                <textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} rows={3} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all resize-none" />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setEditingWorld(null)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
+                <button type="submit" disabled={savingEdit || !editTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{savingEdit ? 'Saving…' : 'Save Changes'}</button>
               </div>
             </form>
           </motion.div>
