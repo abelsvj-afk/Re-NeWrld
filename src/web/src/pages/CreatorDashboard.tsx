@@ -3,6 +3,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { motion } from 'framer-motion';
 import { worldsApi, ApiError, type WorldSummary } from '../lib/api';
 import { useAuth } from '../stores/auth';
+import { TaxonomyInputs, parseTags } from '../components/TaxonomyInputs';
 
 const NAV = [
   { label: 'Dashboard', icon: '◈', active: true, action: 'dashboard' as const },
@@ -42,10 +43,14 @@ export function CreatorDashboard() {
   const [showNewWorld, setShowNewWorld] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [newGenre, setNewGenre] = useState('');
+  const [newTags, setNewTags] = useState('');
   const [creating, setCreating] = useState(false);
   const [editingWorld, setEditingWorld] = useState<WorldSummary | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editDesc, setEditDesc] = useState('');
+  const [editGenre, setEditGenre] = useState('');
+  const [editTags, setEditTags] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
@@ -53,6 +58,16 @@ export function CreatorDashboard() {
     setEditingWorld(w);
     setEditTitle(w.title);
     setEditDesc(w.description ?? '');
+    setEditGenre(w.metadata?.genre ?? '');
+    setEditTags((w.metadata?.tags ?? []).join(', '));
+  };
+
+  const buildMetadata = (genre: string, tagsInput: string) => {
+    const metadata: { genre?: string; tags?: string[] } = {};
+    if (genre) metadata.genre = genre;
+    const tags = parseTags(tagsInput);
+    if (tags.length > 0) metadata.tags = tags;
+    return Object.keys(metadata).length > 0 ? metadata : undefined;
   };
 
   const saveEdit = async (e: React.FormEvent) => {
@@ -60,8 +75,9 @@ export function CreatorDashboard() {
     if (!editingWorld || !editTitle.trim() || savingEdit) return;
     setSavingEdit(true);
     try {
-      await worldsApi.update(editingWorld.id, { title: editTitle.trim(), description: editDesc.trim() || undefined });
-      setWorlds((prev) => prev.map((w) => w.id === editingWorld.id ? { ...w, title: editTitle.trim(), description: editDesc.trim() } : w));
+      const metadata = buildMetadata(editGenre, editTags);
+      await worldsApi.update(editingWorld.id, { title: editTitle.trim(), description: editDesc.trim() || undefined, metadata });
+      setWorlds((prev) => prev.map((w) => w.id === editingWorld.id ? { ...w, title: editTitle.trim(), description: editDesc.trim(), metadata: metadata ?? w.metadata } : w));
       setEditingWorld(null);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to update world'); }
     finally { setSavingEdit(false); }
@@ -90,9 +106,10 @@ export function CreatorDashboard() {
     if (!newTitle.trim() || creating) return;
     setCreating(true);
     try {
-      const w = await worldsApi.create({ title: newTitle.trim(), description: newDesc.trim() || undefined });
+      const metadata = buildMetadata(newGenre, newTags);
+      const w = await worldsApi.create({ title: newTitle.trim(), description: newDesc.trim() || undefined, metadata });
       setShowNewWorld(false);
-      setNewTitle(''); setNewDesc('');
+      setNewTitle(''); setNewDesc(''); setNewGenre(''); setNewTags('');
       navigate({ to: '/creator/worlds/$worldId/scenes', params: { worldId: w.id } });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to create world');
@@ -223,6 +240,7 @@ export function CreatorDashboard() {
                 <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Description <span className="normal-case tracking-normal opacity-60">(optional)</span></label>
                 <textarea value={newDesc} onChange={(e) => setNewDesc(e.target.value)} rows={3} placeholder="A tale of broken kingdoms…" className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all resize-none" />
               </div>
+              <TaxonomyInputs genre={newGenre} setGenre={setNewGenre} tagsInput={newTags} setTagsInput={setNewTags} />
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewWorld(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={creating || !newTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creating ? 'Creating…' : 'Create World'}</button>
@@ -246,6 +264,7 @@ export function CreatorDashboard() {
                 <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Description <span className="normal-case tracking-normal opacity-60">(optional)</span></label>
                 <textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} rows={3} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all resize-none" />
               </div>
+              <TaxonomyInputs genre={editGenre} setGenre={setEditGenre} tagsInput={editTags} setTagsInput={setEditTags} />
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setEditingWorld(null)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={savingEdit || !editTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{savingEdit ? 'Saving…' : 'Save Changes'}</button>
