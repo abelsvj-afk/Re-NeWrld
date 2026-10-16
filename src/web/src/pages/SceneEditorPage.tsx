@@ -72,7 +72,7 @@ export function SceneEditorPage() {
   const [newChoiceTarget, setNewChoiceTarget] = useState('');
   const [creatingChoice, setCreatingChoice] = useState(false);
   const [newCondVar, setNewCondVar] = useState('');
-  const [newCondOp, setNewCondOp] = useState('==');
+  const [newCondOp, setNewCondOp] = useState('eq');
   const [newCondVal, setNewCondVal] = useState('');
   const [newMutVar, setNewMutVar] = useState('');
   const [newMutOp, setNewMutOp] = useState('set');
@@ -305,7 +305,13 @@ export function SceneEditorPage() {
       let mutations: unknown = undefined;
       if (newMutVar.trim()) {
         const val = isNaN(Number(newMutVal)) ? newMutVal : Number(newMutVal);
-        mutations = [{ op: newMutOp, var: newMutVar.trim(), value: val }];
+        if (newMutOp === 'set') {
+          mutations = [{ op: 'set', var: newMutVar.trim(), value: val }];
+        } else {
+          // inc/dec use 'by' with a numeric amount
+          const by = typeof val === 'number' ? val : 1;
+          mutations = [{ op: newMutOp, var: newMutVar.trim(), by }];
+        }
       }
       const res = await worldsApi.createChoice(worldId, {
         sceneId: activeSceneId,
@@ -605,12 +611,12 @@ export function SceneEditorPage() {
                         className="flex-1 min-w-0 bg-abyss border border-edge rounded-lg px-3 py-2 text-sm text-ink placeholder:text-ink-faint/60 focus:border-ember focus:outline-none"
                       />
                       <select value={newCondOp} onChange={(e) => setNewCondOp(e.target.value)} className="bg-abyss border border-edge rounded-lg px-2 py-2 text-sm text-ink focus:border-ember focus:outline-none">
-                        <option value="==">==</option>
-                        <option value="!=">!=</option>
-                        <option value=">">&gt;</option>
-                        <option value="<">&lt;</option>
-                        <option value=">=">&gt;=</option>
-                        <option value="<=">&lt;=</option>
+                        <option value="eq">==</option>
+                        <option value="ne">!=</option>
+                        <option value="gt">&gt;</option>
+                        <option value="lt">&lt;</option>
+                        <option value="gte">&gt;=</option>
+                        <option value="lte">&lt;=</option>
                       </select>
                       <input
                         value={newCondVal} onChange={(e) => setNewCondVal(e.target.value)}
@@ -629,8 +635,8 @@ export function SceneEditorPage() {
                       />
                       <select value={newMutOp} onChange={(e) => setNewMutOp(e.target.value)} className="bg-abyss border border-edge rounded-lg px-2 py-2 text-sm text-ink focus:border-ember focus:outline-none">
                         <option value="set">set to</option>
-                        <option value="increment">+ by</option>
-                        <option value="decrement">− by</option>
+                        <option value="inc">+ by</option>
+                        <option value="dec">− by</option>
                       </select>
                       <input
                         value={newMutVal} onChange={(e) => setNewMutVal(e.target.value)}

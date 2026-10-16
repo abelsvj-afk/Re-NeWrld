@@ -72,7 +72,9 @@ export class PostgresCharacterRepository implements CharacterRepositoryPort {
       worldId: new WorldId(row.world_id),
       name: row.name,
       roleTypes: (Array.isArray(row.role_types) ? row.role_types : []).map(
-        (r: any) => new CharacterRole(typeof r === 'string' ? r : r.role_type)
+        (r: any) => typeof r === 'string'
+          ? new CharacterRole(r)
+          : new CharacterRole(r.role_type, r.custom_role_name ?? null)
       ),
       description: row.description,
       attributes: typeof row.attributes === 'string' ? JSON.parse(row.attributes) : row.attributes ?? {},
