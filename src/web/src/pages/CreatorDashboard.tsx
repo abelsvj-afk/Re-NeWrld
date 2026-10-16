@@ -52,6 +52,8 @@ export function CreatorDashboard() {
   const [editDesc, setEditDesc] = useState('');
   const [editGenre, setEditGenre] = useState('');
   const [editTags, setEditTags] = useState('');
+  const [editCoverUrl, setEditCoverUrl] = useState('');
+  const [uploadingCover, setUploadingCover] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
@@ -61,6 +63,21 @@ export function CreatorDashboard() {
     setEditDesc(w.description ?? '');
     setEditGenre(w.metadata?.genre ?? '');
     setEditTags((w.metadata?.tags ?? []).join(', '));
+    setEditCoverUrl((w.metadata as any)?.coverArtUrl ?? '');
+  };
+
+  const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !editingWorld) return;
+    setUploadingCover(true);
+    try {
+      const res = await worldsApi.uploadMedia(editingWorld.id, file);
+      setEditCoverUrl(res.url);
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : 'Upload failed');
+    } finally {
+      setUploadingCover(false);
+    }
   };
 
   const buildMetadata = (genre: string, tagsInput: string) => {
@@ -90,8 +107,9 @@ export function CreatorDashboard() {
         editingWorld.metadata as Record<string, unknown> | undefined,
         editGenre,
         editTags
-      );
-      await worldsApi.update(editingWorld.id, { title: editTitle.trim(), description: editDesc.trim() || undefined, metadata: metadata as { genre?: string; tags?: string[] } });
+      ) as Record<string, unknown>;
+      if (editCoverUrl) metadata.coverArtUrl = editCoverUrl;
+      await worldsApi.update(editingWorld.id, { title: editTitle.trim(), description: editDesc.trim() || undefined, metadata: metadata as { genre?: string; tags?: string[]; coverArtUrl?: string } });
       setWorlds((prev) => prev.map((w) => w.id === editingWorld.id ? { ...w, title: editTitle.trim(), description: editDesc.trim(), metadata } : w));
       setEditingWorld(null);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to update world'); }
@@ -281,6 +299,23 @@ export function CreatorDashboard() {
                 <textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} rows={3} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all resize-none" />
               </div>
               <TaxonomyInputs genre={editGenre} setGenre={setEditGenre} tagsInput={editTags} setTagsInput={setEditTags} />
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Cover Art</label>
+                <div className="flex items-start gap-4">
+                  {editCoverUrl ? (
+                    <img src={editCoverUrl} alt="Cover" className="w-20 h-28 object-cover rounded-lg border border-edge" />
+                  ) : (
+                    <div className="w-20 h-28 rounded-lg border border-dashed border-edge flex items-center justify-center text-ink-faint text-xs text-center px-2">No cover</div>
+                  )}
+                  <div className="flex-1">
+                    <label className="inline-block px-4 py-2.5 rounded-xl border border-edge text-ink-dim hover:border-arcane hover:text-ink transition-all text-sm font-medium cursor-pointer">
+                      {uploadingCover ? 'Uploading…' : 'Upload Cover'}
+                      <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={handleCoverUpload} disabled={uploadingCover} className="hidden" />
+                    </label>
+                    <p className="text-[11px] text-ink-faint mt-2">JPEG, PNG, WebP or GIF. Max 10MB.</p>
+                  </div>
+                </div>
+              </div>
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setEditingWorld(null)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={savingEdit || !editTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{savingEdit ? 'Saving…' : 'Save Changes'}</button>
