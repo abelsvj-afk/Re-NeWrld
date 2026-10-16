@@ -45,7 +45,7 @@ export function SceneEditorPage() {
     setLoading(true);
     try {
       const [s, c, w] = await Promise.all([worldsApi.scenes(worldId), worldsApi.choices(worldId), worldsApi.get(worldId)]);
-      setScenes(s); setChoices(c); setWorldTitle(w.title ?? '');
+      setScenes(s); setChoices(c); setWorldTitle(w.title ?? ''); setStartSceneId(w.startSceneId ?? null);
       worldsApi.narrationStatus(worldId).then(setNarrationStatus).catch(() => {});
       if (s.length > 0 && !activeSceneId) setActiveSceneId(s[0].id);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to load'); }
@@ -69,6 +69,21 @@ export function SceneEditorPage() {
 
   const [deletingSceneId, setDeletingSceneId] = useState<string | null>(null);
   const [deletingChoiceId, setDeletingChoiceId] = useState<string | null>(null);
+  const [startSceneId, setStartSceneId] = useState<string | null>(null);
+  const [settingStart, setSettingStart] = useState(false);
+
+  const setAsStartScene = async (sceneId: string) => {
+    setSettingStart(true);
+    setError(null);
+    try {
+      await worldsApi.update(worldId, { startSceneId: sceneId });
+      setStartSceneId(sceneId);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to set start scene');
+    } finally {
+      setSettingStart(false);
+    }
+  };
 
   const deleteScene = async (sceneId: string) => {
     if (!window.confirm('Delete this scene? Its choices will be orphaned. This cannot be undone.')) return;
@@ -228,10 +243,24 @@ export function SceneEditorPage() {
                   <div className="mb-8">
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-[11px] uppercase tracking-[0.3em] text-arcane/80 font-semibold">Scene {sceneNumber}</p>
-                      <label className="flex items-center gap-2 cursor-pointer select-none text-xs">
+                      <div className="flex items-center gap-3">
+                        {startSceneId === activeScene.id ? (
+                          <span className="text-xs text-emerald-300 font-medium" title="Readers begin here">▶ Start Scene</span>
+                        ) : (
+                          <button
+                            onClick={() => setAsStartScene(activeScene.id)}
+                            disabled={settingStart}
+                            className="text-xs text-ink-faint hover:text-emerald-300 transition disabled:opacity-50"
+                            title="Set as the scene where readers begin"
+                          >
+                            {settingStart ? 'Setting…' : 'Set as Start'}
+                          </button>
+                        )}
+                        <label className="flex items-center gap-2 cursor-pointer select-none text-xs">
                         <input type="checkbox" checked={!!activeScene.isEnding} onChange={() => toggleEnding(activeScene)} className="w-3.5 h-3.5 rounded accent-amber-500" />
                         <span className={activeScene.isEnding ? 'text-ember font-medium' : 'text-ink-faint'}>◆ Ending</span>
-                      </label>
+                        </label>
+                      </div>
                     </div>
                     <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Scene title" className="bg-transparent font-prose text-3xl md:text-4xl tracking-tight focus:outline-none w-full placeholder:text-ink-faint/50 border-b border-transparent focus:border-arcane/30 pb-2 transition-colors" />
                   </div>

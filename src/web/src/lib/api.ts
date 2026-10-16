@@ -110,6 +110,7 @@ export interface WorldSummary {
   status: 'draft' | 'published' | 'archived';
   updatedAt: string;
   metadata?: { genre?: string; tags?: string[] };
+  startSceneId?: string | null;
 }
 
 export interface SceneSummary {
@@ -140,7 +141,7 @@ export const worldsApi = {
   create: (input: { title: string; description?: string; metadata?: { genre?: string; tags?: string[] } }) =>
     api<WorldSummary>('/worlds', { method: 'POST', body: input }),
   get: (id: string) => api<WorldSummary & { scenes: unknown[] }>(`/worlds/${id}`),
-  update: (id: string, input: { title?: string; description?: string; metadata?: { genre?: string; tags?: string[] } }) =>
+  update: (id: string, input: { title?: string; description?: string; metadata?: { genre?: string; tags?: string[] }; startSceneId?: string | null }) =>
     api<void>(`/worlds/${id}`, { method: 'PATCH', body: input }),
   remove: (id: string) =>
     api<void>(`/worlds/${id}`, { method: 'DELETE' }),
