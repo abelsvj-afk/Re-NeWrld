@@ -1,6 +1,7 @@
 import { WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
 import { SceneRepositoryPort } from '../domain/ports/scene.repository.port.js';
 import { ChoiceRepositoryPort } from '../domain/ports/choice.repository.port.js';
+import { WorldVariableRepositoryPort } from '../domain/ports/world-variable.repository.port.js';
 import { WorldId } from '../domain/value-objects/world-id.value-object.js';
 import { UserId } from '../../auth/domain/value-objects/user-id.value-object.js';
 import { WorldNotFoundError } from '../domain/errors/world.errors.js';
@@ -30,6 +31,7 @@ export class ValidateWorldUseCase {
     private readonly worlds: WorldRepositoryPort,
     private readonly scenes: SceneRepositoryPort,
     private readonly choices: ChoiceRepositoryPort,
+    private readonly variables?: WorldVariableRepositoryPort,
   ) {}
 
   public async execute(command: ValidateWorldCommand): Promise<ValidateWorldResult> {
@@ -51,10 +53,57 @@ export class ValidateWorldUseCase {
       typeof b === 'string' ? b : b.message ?? JSON.stringify(b);
     const blockers = [...graph.errors, ...refs.dangling, ...semantics.blockers].map(toMessage);
 
+    // Match publish-world.use-case.ts: warn on unregistered variable references
+    const variableWarnings: string[] = [];
+    if (this.variables) {
+      const registered = await this.variables.findByWorldId(world.getWorldId());
+      const registeredNames = new Set(registered.map((v) => v.getName()));
+      const referencedNames = new Set<string>();
+      for (const choice of choices) {
+        for (const name of extractVariableNames(choice.getConditions())) {
+          referencedNames.add(name);
+        }
+        for (const name of extractVariableNames(choice.getMutations())) {
+          referencedNames.add(name);
+        }
+      }
+      for (const name of referencedNames) {
+        if (!registeredNames.has(name)) {
+          variableWarnings.push(`Variable "${name}" is used in conditions/mutations but not registered in the variable registry`);
+        }
+      }
+    }
+
     return {
       valid: blockers.length === 0,
       blockers,
-      warnings: graph.unreachable,
+      warnings: [...graph.unreachable, ...variableWarnings],
     };
   }
+}
+
+/**
+ * Recursively extract variable names from condition/mutation payloads.
+ * Duplicated from publish-world.use-case.ts — keep in sync.
+ */
+function extractVariableNames(payload: unknown): string[] {
+  const names: string[] = [];
+  function walk(node: unknown): void {
+    if (node === null || node === undefined) return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (typeof node === 'object') {
+      const obj = node as Record<string, unknown>;
+      if (typeof obj.var === 'string') {
+        names.push(obj.var);
+      }
+      for (const value of Object.values(obj)) {
+        walk(value);
+      }
+    }
+  }
+  walk(payload);
+  return names;
 }

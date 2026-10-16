@@ -5,6 +5,7 @@ import { ChoiceRepositoryPort } from '../domain/ports/choice.repository.port.js'
 import { WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
 import { SceneRepositoryPort } from '../domain/ports/scene.repository.port.js';
 import { WorldNotFoundError, ChoiceNotFoundError, SceneNotFoundError } from '../domain/errors/world.errors.js';
+import { UserId } from '../../auth/domain/value-objects/user-id.value-object.js';
 
 export interface UpdateChoiceInput {
   worldId: string;
@@ -15,6 +16,7 @@ export interface UpdateChoiceInput {
   mutations?: unknown;
   sortOrder?: number;
   visibility?: 'hide' | 'show_locked';
+  creatorId: UserId;
 }
 
 export interface UpdateChoiceOutput {
@@ -35,21 +37,26 @@ export class UpdateChoiceUseCase {
   public async execute(input: UpdateChoiceInput): Promise<UpdateChoiceOutput> {
     const worldId = new WorldId(input.worldId);
     const world = await this.worldRepository.findById(worldId);
-    if (!world) throw new WorldNotFoundError(input.worldId);
-    if (world.getStatus().getValue() === 'published') {
-      world.revertToDraft();
-      await this.worldRepository.save(world);
+    if (!world || !world.getCreatorId().equals(input.creatorId)) {
+      throw new WorldNotFoundError(input.worldId);
     }
 
     const choice = await this.choiceRepository.findById(new ChoiceId(input.choiceId));
     if (!choice) throw new ChoiceNotFoundError(input.choiceId);
+    if (!choice.getWorldId().equals(worldId)) {
+      throw new ChoiceNotFoundError(input.choiceId);
+    }
 
+    // Validate all updates BEFORE reverting world — failed validation must not mutate status
     if (input.text !== undefined) {
       choice.updateText(input.text);
     }
     if (input.targetSceneId !== undefined) {
       const targetScene = await this.sceneRepository.findById(new SceneId(input.targetSceneId));
       if (!targetScene) throw new SceneNotFoundError(input.targetSceneId);
+      if (!targetScene.getWorldId().equals(worldId)) {
+        throw new SceneNotFoundError(input.targetSceneId);
+      }
       choice.updateTargetSceneId(new SceneId(input.targetSceneId));
     }
     if (input.conditions !== undefined) {
@@ -63,6 +70,11 @@ export class UpdateChoiceUseCase {
     }
     if (input.visibility !== undefined) {
       choice.updateVisibility(input.visibility);
+    }
+
+    if (world.getStatus().getValue() === 'published') {
+      world.revertToDraft();
+      await this.worldRepository.save(world);
     }
 
     await this.choiceRepository.save(choice);

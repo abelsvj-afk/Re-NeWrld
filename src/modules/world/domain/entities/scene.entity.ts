@@ -3,6 +3,7 @@ import { SceneId } from '../value-objects/scene-id.value-object.js';
 import { WorldId } from '../value-objects/world-id.value-object.js';
 import { ChapterId } from '../value-objects/chapter-id.value-object.js';
 import { SceneMetadata, SceneMetadataSchema } from '../value-objects/world-schemas.js';
+import { validateProseTemplate } from '../services/prose-template.js';
 
 export interface SceneProps {
   sceneId: SceneId;
@@ -40,6 +41,10 @@ export class Scene {
     this.worldId = props.worldId;
     this.chapterId = props.chapterId;
     this.title = props.title.trim();
+    const templateError = validateProseTemplate(props.prose);
+    if (templateError) {
+      throw new WorldValidationError(`Invalid prose template: ${templateError}`);
+    }
     this.prose = props.prose;
     this.metadata = structuredClone(validatedMetadata);
     this.isEnding = props.isEnding ?? false;
@@ -98,6 +103,11 @@ export class Scene {
   public updateProse(prose: string): void {
     if (typeof prose !== 'string') {
       throw new WorldValidationError('Scene prose must be a string');
+    }
+    // Item A: validate template syntax at save time (fail loud, not at read time)
+    const templateError = validateProseTemplate(prose);
+    if (templateError) {
+      throw new WorldValidationError(`Invalid prose template: ${templateError}`);
     }
     this.prose = prose;
     this.updatedAt = new Date();

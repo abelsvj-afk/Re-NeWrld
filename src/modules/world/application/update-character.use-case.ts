@@ -37,6 +37,9 @@ export class UpdateCharacterUseCase {
     if (!character) {
       throw new WorldNotFoundError();
     }
+    if (!character.getWorldId().equals(worldId)) {
+      throw new WorldNotFoundError();
+    }
 
     if (input.name !== undefined) {
       character.updateName(input.name);

@@ -5,6 +5,7 @@ import { SceneRepositoryPort } from '../domain/ports/scene.repository.port.js';
 import { WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
 import { WorldNotFoundError } from '../domain/errors/world.errors.js';
 import { SceneNotFoundError } from '../domain/errors/world.errors.js';
+import { UserId } from '../../auth/domain/value-objects/user-id.value-object.js';
 
 export interface UpdateSceneInput {
   sceneId: string;
@@ -13,6 +14,7 @@ export interface UpdateSceneInput {
   chapterId?: string;
   isEnding?: boolean;
   metadata?: Record<string, unknown>;
+  creatorId: UserId;
 }
 
 /**
@@ -31,17 +33,21 @@ export class UpdateSceneUseCase {
     if (!scene) throw new SceneNotFoundError(input.sceneId);
 
     const world = await this.worldRepository.findById(scene.getWorldId());
-    if (!world) throw new WorldNotFoundError(scene.getWorldId().getValue());
-    if (world.getStatus().getValue() === 'published') {
-      world.revertToDraft();
-      await this.worldRepository.save(world);
+    if (!world || !world.getCreatorId().equals(input.creatorId)) {
+      throw new WorldNotFoundError(scene.getWorldId().getValue());
     }
 
+    // Validate all updates BEFORE reverting world — failed validation must not mutate status
     if (input.title !== undefined) scene.updateTitle(input.title);
     if (input.prose !== undefined) scene.updateProse(input.prose);
     if (input.chapterId !== undefined) scene.updateChapterId(new ChapterId(input.chapterId));
     if (input.isEnding !== undefined) scene.setIsEnding(input.isEnding);
     if (input.metadata !== undefined) scene.updateMetadata(input.metadata as Record<string, any>);
+
+    if (world.getStatus().getValue() === 'published') {
+      world.revertToDraft();
+      await this.worldRepository.save(world);
+    }
 
     await this.sceneRepository.save(scene);
   }
