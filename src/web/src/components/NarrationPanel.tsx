@@ -17,6 +17,7 @@ interface Quota { usedThisMonth: number; monthlyCap: number; providerRemaining: 
  */
 export function NarrationPanel({ worldId, sceneId, onGenerated }: NarrationPanelProps) {
   const [voices, setVoices] = useState<Voice[]>([]);
+  const [voicesLoading, setVoicesLoading] = useState(true);
   const [voiceId, setVoiceId] = useState('');
   const [quota, setQuota] = useState<Quota | null>(null);
   const [generating, setGenerating] = useState(false);
@@ -35,6 +36,7 @@ export function NarrationPanel({ worldId, sceneId, onGenerated }: NarrationPanel
           setVoices(v);
           if (v.length > 0 && !voiceId) setVoiceId(v[0].voiceId);
           setQuota(q);
+          setVoicesLoading(false);
         }
       } catch { /* narration unavailable — panel stays hidden */ }
     })();
@@ -87,7 +89,8 @@ export function NarrationPanel({ worldId, sceneId, onGenerated }: NarrationPanel
           {voices.map((v) => (
             <option key={v.voiceId} value={v.voiceId}>{v.name}</option>
           ))}
-          {voices.length === 0 && <option value="">Loading voices…</option>}
+          {voicesLoading && <option value="">Loading voices…</option>}
+          {!voicesLoading && voices.length === 0 && <option value="">No voices available</option>}
         </select>
         <button
           onClick={generate}
