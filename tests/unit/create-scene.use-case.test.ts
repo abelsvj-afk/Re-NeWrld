@@ -57,6 +57,7 @@ describe('CreateSceneUseCase — chapter provisioning', () => {
       chapterId: '33333333-3333-4333-8333-333333333333',
       title: 'Scene One',
       prose: 'Once upon a time…',
+      creatorId: new UserId(CREATOR_ID),
     });
 
     expect(result.sceneId).toBeTruthy();
@@ -87,6 +88,7 @@ describe('CreateSceneUseCase — chapter provisioning', () => {
       chapterId: '55555555-5555-4555-8555-555555555555',
       title: 'Scene Two',
       prose: 'More story…',
+      creatorId: new UserId(CREATOR_ID),
     });
 
     expect(chapterRepository.save).not.toHaveBeenCalled();
@@ -112,6 +114,7 @@ describe('CreateSceneUseCase — chapter provisioning', () => {
       chapterId: '66666666-6666-4666-8666-666666666666',
       title: 'Scene Three',
       prose: 'Even more…',
+      creatorId: new UserId(CREATOR_ID),
     });
 
     expect(chapterRepository.save).not.toHaveBeenCalled();
@@ -144,6 +147,7 @@ describe('CreateSceneUseCase — chapter provisioning', () => {
       chapterId: '77777777-7777-4777-8777-777777777777',
       title: 'Scene Four',
       prose: 'Story…',
+      creatorId: new UserId(CREATOR_ID),
     });
 
     // Must NOT use the foreign chapter; default was provisioned instead.
@@ -167,6 +171,7 @@ describe('CreateSceneUseCase — chapter provisioning', () => {
         chapterId: '99999999-9999-4999-8999-999999999999',
         title: `Scene ${i}`,
         prose: 'x',
+        creatorId: new UserId(CREATOR_ID),
       });
     }
     expect(ids).toHaveLength(2);
