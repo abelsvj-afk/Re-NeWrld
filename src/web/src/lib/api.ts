@@ -86,6 +86,16 @@ export const authApi = {
   logout: () => api<void>('/auth/logout', { method: 'POST' }),
   becomeCreator: () =>
     api<User>('/auth/become-creator', { method: 'POST' }),
+  requestPasswordReset: (email: string) =>
+    api<{ ok: boolean }>('/auth/password-reset/request', {
+      method: 'POST',
+      body: { email },
+    }),
+  confirmPasswordReset: (token: string, newPassword: string) =>
+    api<{ ok: boolean }>('/auth/password-reset/confirm', {
+      method: 'POST',
+      body: { token, newPassword },
+    }),
 };
 
 // --- Worlds ---
@@ -131,15 +141,21 @@ export const worldsApi = {
   remove: (id: string) =>
     api<void>(`/worlds/${id}`, { method: 'DELETE' }),
   scenes: (worldId: string) => api<SceneSummary[]>(`/worlds/${worldId}/scenes`),
-  createScene: (worldId: string, input: { chapterId: string; title: string; prose: string; isEnding?: boolean }) =>
+  createScene: (worldId: string, input: { chapterId?: string; title: string; prose: string; isEnding?: boolean }) =>
     api<{ sceneId: string }>(`/worlds/${worldId}/scenes`, { method: 'POST', body: input }),
+  deleteScene: (worldId: string, sceneId: string) =>
+    api<void>(`/worlds/${worldId}/scenes/${sceneId}`, { method: 'DELETE' }),
   updateScene: (worldId: string, sceneId: string, input: { title?: string; prose?: string; isEnding?: boolean }) =>
     api<void>(`/worlds/${worldId}/scenes/${sceneId}`, { method: 'PATCH', body: input }),
   choices: (worldId: string) => api<ChoiceSummary[]>(`/worlds/${worldId}/choices`),
   createChoice: (worldId: string, input: { sceneId: string; targetSceneId: string; text: string; conditions?: unknown; mutations?: unknown }) =>
     api<{ choiceId: string }>(`/worlds/${worldId}/choices`, { method: 'POST', body: input }),
+  deleteChoice: (worldId: string, choiceId: string) =>
+    api<void>(`/worlds/${worldId}/choices/${choiceId}`, { method: 'DELETE' }),
   publish: (worldId: string) =>
     api<{ snapshotId: string; versionNumber: number; warnings: string[] }>(`/worlds/${worldId}/publish`, { method: 'POST' }),
+  validate: (worldId: string) =>
+    api<{ valid: boolean; blockers: string[]; warnings: string[] }>(`/worlds/${worldId}/validate`, { method: 'POST' }),
   // --- Narration (ADR-016) ---
   narrationVoices: (worldId: string) =>
     api<{ voiceId: string; name: string }[]>(`/worlds/${worldId}/narration/voices`),
