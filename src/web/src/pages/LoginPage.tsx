@@ -1,15 +1,21 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../stores/auth';
-import { ApiError } from '../lib/api';
+import { ApiError, authApi } from '../lib/api';
+
+type Mode = 'login' | 'register' | 'forgot' | 'reset';
 
 export function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<Mode>('login');
   const [role, setRole] = useState<'creator' | 'reader'>('reader');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [resetToken, setResetToken] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [resetSent, setResetSent] = useState(false);
+  const [resetDone, setResetDone] = useState(false);
   const { login, register } = useAuth();
 
   const submit = async (e: React.FormEvent) => {
@@ -17,9 +23,20 @@ export function LoginPage() {
     setError(null);
     setBusy(true);
     try {
-      if (mode === 'login') await login(email, password);
-      else await register(email, password, role);
-      window.location.href = '/';
+      if (mode === 'login') {
+        await login(email, password);
+        window.location.href = '/';
+      } else if (mode === 'register') {
+        await register(email, password, role);
+        window.location.href = '/';
+      } else if (mode === 'forgot' && !resetSent) {
+        await authApi.requestPasswordReset(email);
+        setResetSent(true);
+      } else {
+        // forgot+resetSent or reset mode → confirm with token + new password
+        await authApi.confirmPasswordReset(resetToken, newPassword);
+        setResetDone(true);
+      }
     } catch (err) {
       console.error('Auth failed:', err);
       let message = 'Something went wrong. Please try again.';
@@ -137,14 +154,69 @@ export function LoginPage() {
               transition={{ duration: 0.3, ease: 'easeOut' }}
             >
               <h2 className="font-prose text-3xl mb-2">
-                {mode === 'login' ? 'Welcome back' : 'Begin your journey'}
+                {mode === 'login' ? 'Welcome back' : mode === 'register' ? 'Begin your journey' : mode === 'forgot' ? 'Reset password' : 'Set new password'}
               </h2>
               <p className="text-ink-dim text-sm mb-8">
                 {mode === 'login'
                   ? 'Return to your stories — they\'ve been waiting.'
-                  : 'Create your account to read and craft worlds.'}
+                  : mode === 'register'
+                    ? 'Create your account to read and craft worlds.'
+                    : mode === 'forgot'
+                      ? resetSent
+                        ? 'Check your email for a reset token, then enter it below.'
+                        : 'Enter your email and we\'ll send a reset token.'
+                      : 'Enter your reset token and choose a new password.'}
               </p>
 
+              {(mode === 'forgot' || mode === 'reset') ? (
+                <form onSubmit={submit} className="space-y-5">
+                  {mode === 'forgot' && !resetSent && (
+                    <div>
+                      <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Email</label>
+                      <input
+                        type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
+                        placeholder="you@example.com" autoComplete="email"
+                        className="w-full bg-panel border border-edge rounded-xl px-4 py-3.5 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all"
+                      />
+                    </div>
+                  )}
+                  {(mode === 'reset' || (mode === 'forgot' && resetSent)) && (
+                    <>
+                      <div>
+                        <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Reset token</label>
+                        <input
+                          value={resetToken} onChange={(e) => setResetToken(e.target.value)} required
+                          placeholder="Paste the token from your email"
+                          className="w-full bg-panel border border-edge rounded-xl px-4 py-3.5 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all font-mono text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">New password</label>
+                        <input
+                          type="password" required minLength={8} value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                          placeholder="At least 8 characters" autoComplete="new-password"
+                          className="w-full bg-panel border border-edge rounded-xl px-4 py-3.5 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all"
+                        />
+                      </div>
+                    </>
+                  )}
+                  {error && <p className="text-blood text-sm bg-blood/10 border border-blood/25 rounded-xl px-4 py-3">{error}</p>}
+                  {resetDone && <p className="text-emerald-300 text-sm bg-emerald-500/10 border border-emerald-500/25 rounded-xl px-4 py-3">Password reset. You can now sign in.</p>}
+                  {!resetDone && (
+                    <button
+                      type="submit" disabled={busy}
+                      className="w-full bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold rounded-xl px-4 py-3.5 hover:brightness-110 disabled:opacity-50 transition-all shadow-glow-cyan"
+                    >
+                      {busy ? 'Please wait…' : mode === 'forgot' && !resetSent ? 'Send reset token' : 'Set new password'}
+                    </button>
+                  )}
+                  <div className="text-center">
+                    <button type="button" onClick={() => { setMode('login'); setError(null); setResetSent(false); setResetDone(false); }} className="text-sm text-ink-dim hover:text-arcane transition-colors">
+                      Back to sign in
+                    </button>
+                  </div>
+                </form>
+              ) : (
               <form onSubmit={submit} className="space-y-5">
                 <div>
                   <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">
@@ -231,6 +303,7 @@ export function LoginPage() {
                   )}
                 </button>
               </form>
+              )}
 
               <div className="mt-8 pt-6 border-t border-edge/60 text-center">
                 <button
@@ -246,6 +319,17 @@ export function LoginPage() {
                     <>Already have an account? <span className="text-arcane font-medium">Sign in</span></>
                   )}
                 </button>
+                {mode === 'login' && (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => { setMode('forgot'); setError(null); }}
+                      className="text-sm text-ink-faint hover:text-arcane transition-colors"
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
+                )}
               </div>
             </motion.div>
           </AnimatePresence>
