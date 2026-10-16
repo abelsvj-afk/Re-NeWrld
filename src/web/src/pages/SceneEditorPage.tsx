@@ -163,6 +163,11 @@ export function SceneEditorPage() {
   const [newCharName, setNewCharName] = useState('');
   const [newCharRole, setNewCharRole] = useState('protagonist');
   const [newCharDesc, setNewCharDesc] = useState('');
+  const [editingCharacter, setEditingCharacter] = useState<{ id: string; name: string; roleTypes: string[]; description: string | null } | null>(null);
+  const [editCharName, setEditCharName] = useState('');
+  const [editCharRole, setEditCharRole] = useState('protagonist');
+  const [editCharDesc, setEditCharDesc] = useState('');
+  const [savingCharEdit, setSavingCharEdit] = useState(false);
   const [creatingChar, setCreatingChar] = useState(false);
   const [chapters, setChapters] = useState<Array<{ id: string; title: string; sortOrder: number }>>([]);
   const [showNewChapter, setShowNewChapter] = useState(false);
@@ -242,6 +247,26 @@ export function SceneEditorPage() {
       setCharacters((prev) => prev.filter((c) => c.id !== characterId));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to delete character');
+    }
+  };
+
+  const saveCharacterEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCharacter) return;
+    setSavingCharEdit(true);
+    setError(null);
+    try {
+      await worldsApi.updateCharacter(worldId, editingCharacter.id, {
+        name: editCharName.trim(),
+        roleTypes: [editCharRole],
+        description: editCharDesc.trim() || null,
+      });
+      setCharacters((prev) => prev.map((c) => c.id === editingCharacter.id ? { ...c, name: editCharName.trim(), roleTypes: [editCharRole], description: editCharDesc.trim() || null } : c));
+      setEditingCharacter(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to update character');
+    } finally {
+      setSavingCharEdit(false);
     }
   };
 
@@ -477,6 +502,13 @@ export function SceneEditorPage() {
                       <p className="text-[13px] truncate text-ink-dim group-hover:text-ink">{ch.name}</p>
                       <p className="text-[10px] text-ink-faint capitalize">{ch.roleTypes.join(', ')}</p>
                     </div>
+                    <button
+                      onClick={() => { setEditingCharacter(ch); setEditCharName(ch.name); setEditCharRole(ch.roleTypes[0] || 'protagonist'); setEditCharDesc(ch.description || ''); }}
+                      className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-arcane text-xs px-1 transition-all"
+                      title="Edit character"
+                    >
+                      ✎
+                    </button>
                     <button
                       onClick={() => deleteCharacter(ch.id)}
                       className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-blood text-xs px-1 transition-all"
@@ -889,6 +921,39 @@ export function SceneEditorPage() {
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewCharacter(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm">Cancel</button>
                 <button type="submit" disabled={creatingChar || !newCharName.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creatingChar ? 'Creating…' : 'Create Character'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+
+      {editingCharacter && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setEditingCharacter(null)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">Edit Character</h3>
+            <p className="text-sm text-ink-dim mb-6">Update character details</p>
+            <form onSubmit={saveCharacterEdit} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Name</label>
+                <input value={editCharName} onChange={(e) => setEditCharName(e.target.value)} required autoFocus className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Role</label>
+                <select value={editCharRole} onChange={(e) => setEditCharRole(e.target.value)} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all">
+                  <option value="protagonist">Protagonist</option>
+                  <option value="antagonist">Antagonist</option>
+                  <option value="supporting">Supporting</option>
+                  <option value="mentor">Mentor</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Description</label>
+                <textarea value={editCharDesc} onChange={(e) => setEditCharDesc(e.target.value)} placeholder="Who are they? What drives them?…" rows={3} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all resize-none" />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setEditingCharacter(null)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm">Cancel</button>
+                <button type="submit" disabled={savingCharEdit || !editCharName.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{savingCharEdit ? 'Saving…' : 'Save Changes'}</button>
               </div>
             </form>
           </motion.div>
