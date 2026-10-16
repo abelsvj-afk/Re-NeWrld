@@ -127,15 +127,16 @@ export function SceneEditorPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, c, w, chars, chaps] = await Promise.all([
+      const [s, c, w, chars, chaps, vars] = await Promise.all([
         worldsApi.scenes(worldId),
         worldsApi.choices(worldId),
         worldsApi.get(worldId),
         worldsApi.characters(worldId).catch(() => []),
         worldsApi.chapters(worldId).catch(() => []),
+        worldsApi.variables(worldId).catch(() => []),
       ]);
       setScenes(s); setChoices(c); setWorldTitle(w.title ?? ''); setStartSceneId(w.startSceneId ?? null);
-      setCharacters(chars); setChapters(chaps);
+      setCharacters(chars); setChapters(chaps); setVariables(vars);
       worldsApi.narrationStatus(worldId).then(setNarrationStatus).catch(() => {});
       if (s.length > 0 && !activeSceneId) setActiveSceneId(s[0].id);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to load'); }
@@ -151,13 +152,22 @@ export function SceneEditorPage() {
     if (!activeScene || !editor || saving) return;
     setSaving(true); setError(null);
     try {
-      await worldsApi.updateScene(worldId, activeScene.id, { title, prose: editor.getHTML() });
-      setScenes((prev) => prev.map((s) => (s.id === activeScene.id ? { ...s, title } : s)));
+      const newProse = editor.getHTML();
+      await worldsApi.updateScene(worldId, activeScene.id, { title, prose: newProse });
+      setScenes((prev) => prev.map((s) => (s.id === activeScene.id ? { ...s, title, prose: newProse } : s)));
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Save failed'); }
     finally { setSaving(false); }
   };
 
   const [characters, setCharacters] = useState<Array<{ id: string; name: string; roleTypes: string[]; description: string | null }>>([]);
+  const [variables, setVariables] = useState<Array<{ id: string; name: string; type: string; defaultValue: unknown; label: string; description: string | null; category: string }>>([]);
+  const [showNewVariable, setShowNewVariable] = useState(false);
+  const [newVarName, setNewVarName] = useState('');
+  const [newVarType, setNewVarType] = useState('number');
+  const [newVarLabel, setNewVarLabel] = useState('');
+  const [newVarDefault, setNewVarDefault] = useState('');
+  const [newVarCategory, setNewVarCategory] = useState('other');
+  const [creatingVariable, setCreatingVariable] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [previewSceneId, setPreviewSceneId] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string[]>([]);
@@ -239,6 +249,58 @@ export function SceneEditorPage() {
       setError(err instanceof ApiError ? err.message : 'Failed to create character');
     } finally {
       setCreatingChar(false);
+    }
+  };
+
+  const createVariable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newVarName.trim() || !newVarLabel.trim() || creatingVariable) return;
+    setCreatingVariable(true);
+    setError(null);
+    try {
+      let defaultValue: unknown;
+      if (newVarDefault.trim()) {
+        if (newVarType === 'number') {
+          defaultValue = Number(newVarDefault);
+          if (Number.isNaN(defaultValue)) throw new Error('Default must be a number');
+        } else if (newVarType === 'boolean') {
+          defaultValue = newVarDefault.toLowerCase() === 'true';
+        } else {
+          defaultValue = newVarDefault;
+        }
+      }
+      const res = await worldsApi.createVariable(worldId, {
+        name: newVarName.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+        type: newVarType,
+        label: newVarLabel.trim(),
+        defaultValue,
+        category: newVarCategory,
+      });
+      setVariables((prev) => [...prev, {
+        id: res.variableId,
+        name: newVarName.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+        type: newVarType,
+        defaultValue: defaultValue ?? null,
+        label: newVarLabel.trim(),
+        description: null,
+        category: newVarCategory,
+      }]);
+      setShowNewVariable(false);
+      setNewVarName(''); setNewVarLabel(''); setNewVarDefault(''); setNewVarType('number'); setNewVarCategory('other');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Failed to create variable');
+    } finally {
+      setCreatingVariable(false);
+    }
+  };
+
+  const deleteVariable = async (variableId: string) => {
+    if (!window.confirm('Delete this variable? Conditions referencing it will show warnings.')) return;
+    try {
+      await worldsApi.deleteVariable(worldId, variableId);
+      setVariables((prev) => prev.filter((v) => v.id !== variableId));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to delete variable');
     }
   };
 
@@ -357,12 +419,24 @@ export function SceneEditorPage() {
     if (!newSceneTitle.trim() || creatingScene) return;
     setCreatingScene(true); setError(null);
     try {
+      const newTitle = newSceneTitle.trim();
+      const newProse = '<p>Begin writing…</p>';
       const res = await worldsApi.createScene(worldId, {
-        title: newSceneTitle.trim(),
-        prose: '<p>Begin writing…</p>',
+        title: newTitle,
+        prose: newProse,
         isEnding: newSceneIsEnding,
       });
-      const newScene: SceneSummary = { id: res.sceneId, title: newSceneTitle.trim(), isEnding: newSceneIsEnding } as SceneSummary;
+      const newScene: SceneSummary = {
+        id: res.sceneId,
+        worldId,
+        chapterId: '',
+        title: newTitle,
+        prose: newProse,
+        isEnding: newSceneIsEnding,
+        metadata: {},
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
       setScenes((prev) => [...prev, newScene]);
       setActiveSceneId(res.sceneId);
       setShowNewScene(false);
@@ -527,6 +601,37 @@ export function SceneEditorPage() {
                 )}
               </div>
             </div>
+
+            {/* Variables */}
+            <div className="mt-6">
+              <div className="flex items-center justify-between px-3 py-1">
+                <span className="text-[10px] text-ink-faint uppercase tracking-widest">Variables</span>
+                <button onClick={() => setShowNewVariable(true)} className="text-arcane hover:text-arcane/80 text-sm leading-none" title="Add variable">+ New</button>
+              </div>
+              <div className="space-y-0.5">
+                {variables.map((v) => (
+                  <div key={v.id} className="group flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-panel">
+                    <div className="w-7 h-7 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-[10px] font-bold text-emerald-400 shrink-0">
+                      {v.type.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] truncate text-ink-dim group-hover:text-ink font-mono">{v.name}</p>
+                      <p className="text-[10px] text-ink-faint truncate">{v.label} · {v.type}</p>
+                    </div>
+                    <button
+                      onClick={() => deleteVariable(v.id)}
+                      className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-blood text-xs px-1 transition-all"
+                      title="Delete variable"
+                    >
+                      🗑
+                    </button>
+                  </div>
+                ))}
+                {variables.length === 0 && (
+                  <p className="text-[12px] text-ink-faint px-2 py-2">No variables yet. Register story variables to prevent typos.</p>
+                )}
+              </div>
+            </div>
           </div>
         </aside>
 
@@ -617,7 +722,7 @@ export function SceneEditorPage() {
                             <span className="w-8 h-8 rounded-lg bg-ember/10 border border-ember/25 text-ember text-sm font-bold flex items-center justify-center shrink-0">{i + 1}</span>
                             <div className="flex-1 min-w-0"><p className="text-[15px] leading-relaxed mb-1">{c.text}</p><p className="text-xs text-ink-faint">→ {scenes.find((s) => s.id === c.targetSceneId)?.title ?? 'Unlinked'}</p></div>
                             <button
-                              onClick={() => { setEditingChoice({ id: c.id, text: c.text, targetSceneId: c.targetSceneId, visibility: (c as any).visibility }); setEditChoiceText(c.text); setEditChoiceTarget(c.targetSceneId); setEditChoiceVisibility(((c as any).visibility as 'hide' | 'show_locked') || 'hide'); }}
+                              onClick={() => { setEditingChoice({ id: c.id, text: c.text, targetSceneId: c.targetSceneId, visibility: c.visibility }); setEditChoiceText(c.text); setEditChoiceTarget(c.targetSceneId); setEditChoiceVisibility(c.visibility || 'hide'); }}
                               aria-label="Edit choice"
                               className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-arcane text-sm px-1 transition-all shrink-0"
                             >
@@ -940,6 +1045,53 @@ export function SceneEditorPage() {
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewCharacter(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm">Cancel</button>
                 <button type="submit" disabled={creatingChar || !newCharName.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creatingChar ? 'Creating…' : 'Create Character'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+
+      {showNewVariable && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowNewVariable(false)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">New Variable</h3>
+            <p className="text-sm text-ink-dim mb-6">Register a story variable to prevent typos in conditions</p>
+            <form onSubmit={createVariable} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Name (identifier)</label>
+                <input value={newVarName} onChange={(e) => setNewVarName(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))} required placeholder="trust_kael" autoFocus className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink font-mono placeholder:text-ink-faint/60 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Type</label>
+                  <select value={newVarType} onChange={(e) => setNewVarType(e.target.value)} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink focus:border-emerald-500 focus:outline-none">
+                    <option value="number">Number</option>
+                    <option value="boolean">Boolean</option>
+                    <option value="string">String</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Category</label>
+                  <select value={newVarCategory} onChange={(e) => setNewVarCategory(e.target.value)} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink focus:border-emerald-500 focus:outline-none">
+                    <option value="stat">Stat</option>
+                    <option value="inventory">Inventory</option>
+                    <option value="relationship">Relationship</option>
+                    <option value="flag">Flag</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Label (display name)</label>
+                <input value={newVarLabel} onChange={(e) => setNewVarLabel(e.target.value)} required placeholder="Trust with Kael" className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Default value (optional)</label>
+                <input value={newVarDefault} onChange={(e) => setNewVarDefault(e.target.value)} placeholder={newVarType === 'number' ? '0' : newVarType === 'boolean' ? 'false' : 'empty'} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all" />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowNewVariable(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm">Cancel</button>
+                <button type="submit" disabled={creatingVariable || !newVarName.trim() || !newVarLabel.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm">{creatingVariable ? 'Creating…' : 'Create Variable'}</button>
               </div>
             </form>
           </motion.div>

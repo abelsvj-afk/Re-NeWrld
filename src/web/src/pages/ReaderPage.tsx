@@ -40,6 +40,9 @@ export function ReaderPage() {
   const [showInventory, setShowInventory] = useState(false);
   const [inventoryTab, setInventoryTab] = useState<'stats' | 'inventory' | 'relationships'>('stats');
   const [toasts, setToasts] = useState<Array<{ id: string; text: string }>>([]);
+  const [showCheckpoints, setShowCheckpoints] = useState(false);
+  const [checkpoints, setCheckpoints] = useState<Array<{ id: string; chapterTitle: string; createdAt: string }>>([]);
+  const [rewinding, setRewinding] = useState(false);
 
   const handleBecomeCreator = async () => {
     if (upgrading) return;
@@ -156,6 +159,23 @@ export function ReaderPage() {
     }
   };
 
+  const rewindTo = async (checkpointId: string) => {
+    if (!session || rewinding) return;
+    if (!window.confirm('Rewind to this checkpoint? Your current progress will branch — the original path is preserved.')) return;
+    setRewinding(true);
+    setError(null);
+    try {
+      await sessionsApi.rewind(session.id, checkpointId);
+      const fresh = await sessionsApi.get(session.id);
+      setSession(fresh);
+      setShowCheckpoints(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to rewind');
+    } finally {
+      setRewinding(false);
+    }
+  };
+
   // Reading view
   if (sessionId) {
     return (
@@ -169,6 +189,11 @@ export function ReaderPage() {
               {session && (
                 <button onClick={() => setShowInventory(true)} className="text-sm text-ink-dim hover:text-arcane transition flex items-center gap-2" title="Character sheet & inventory" aria-label="Open character sheet">
                   <span>🎒</span>
+                </button>
+              )}
+              {session && (
+                <button onClick={async () => { try { setCheckpoints(await sessionsApi.checkpoints(session.id)); } catch { setCheckpoints([]); } setShowCheckpoints(true); }} className="text-sm text-ink-dim hover:text-arcane transition flex items-center gap-2" title="Chapter checkpoints" aria-label="Open checkpoints">
+                  <span>📍</span>
                 </button>
               )}
               <ViewToggle current="reader" />
@@ -223,6 +248,37 @@ export function ReaderPage() {
           )}
         </main>
         <CreatorWelcomeToast show={showWelcomeToast} />
+
+        {/* Checkpoints Modal */}
+        <AnimatePresence>
+          {showCheckpoints && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowCheckpoints(false)}>
+              <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel" role="dialog" aria-label="Chapter checkpoints">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="font-prose text-2xl">Checkpoints</h3>
+                  <button onClick={() => setShowCheckpoints(false)} className="text-ink-faint hover:text-ink text-xl" aria-label="Close">✕</button>
+                </div>
+                {checkpoints.length === 0 ? (
+                  <p className="text-ink-faint text-sm text-center py-8">No checkpoints yet.<br />Checkpoints are created automatically at chapter boundaries.</p>
+                ) : (
+                  <div className="space-y-3 max-h-96 overflow-y-auto">
+                    {checkpoints.map((cp) => (
+                      <div key={cp.id} className="flex items-center justify-between bg-abyss/40 border border-edge/40 rounded-xl px-4 py-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium truncate">{cp.chapterTitle}</p>
+                          <p className="text-xs text-ink-faint">{new Date(cp.createdAt).toLocaleString()}</p>
+                        </div>
+                        <button onClick={() => rewindTo(cp.id)} disabled={rewinding} className="ml-3 px-4 py-2 rounded-lg bg-arcane/15 border border-arcane/30 text-arcane text-sm font-medium hover:bg-arcane/25 disabled:opacity-50 transition">
+                          {rewinding ? '…' : 'Rewind'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
 
         {/* Inventory / Character Sheet Drawer */}
         <AnimatePresence>
