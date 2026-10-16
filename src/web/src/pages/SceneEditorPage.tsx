@@ -67,6 +67,42 @@ export function SceneEditorPage() {
     finally { setSaving(false); }
   };
 
+  const [deletingSceneId, setDeletingSceneId] = useState<string | null>(null);
+  const [deletingChoiceId, setDeletingChoiceId] = useState<string | null>(null);
+
+  const deleteScene = async (sceneId: string) => {
+    if (!window.confirm('Delete this scene? Its choices will be orphaned. This cannot be undone.')) return;
+    setDeletingSceneId(sceneId);
+    setError(null);
+    try {
+      await worldsApi.deleteScene(worldId, sceneId);
+      setScenes((prev) => prev.filter((s) => s.id !== sceneId));
+      setChoices((prev) => prev.filter((c) => c.sceneId !== sceneId && c.targetSceneId !== sceneId));
+      if (activeSceneId === sceneId) {
+        const remaining = scenes.filter((s) => s.id !== sceneId);
+        setActiveSceneId(remaining.length > 0 ? remaining[0].id : null);
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to delete scene');
+    } finally {
+      setDeletingSceneId(null);
+    }
+  };
+
+  const deleteChoice = async (choiceId: string) => {
+    if (!window.confirm('Delete this choice? This cannot be undone.')) return;
+    setDeletingChoiceId(choiceId);
+    setError(null);
+    try {
+      await worldsApi.deleteChoice(worldId, choiceId);
+      setChoices((prev) => prev.filter((c) => c.id !== choiceId));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to delete choice');
+    } finally {
+      setDeletingChoiceId(null);
+    }
+  };
+
   const toggleEnding = async (scene: SceneSummary) => {
     setError(null);
     const next = !scene.isEnding;
@@ -87,7 +123,6 @@ export function SceneEditorPage() {
     setCreatingScene(true); setError(null);
     try {
       const res = await worldsApi.createScene(worldId, {
-        chapterId: crypto.randomUUID(),
         title: newSceneTitle.trim(),
         prose: '<p>Begin writing…</p>',
         isEnding: newSceneIsEnding,
@@ -165,6 +200,16 @@ export function SceneEditorPage() {
                   <div className="flex items-center gap-3">
                     <span className={`text-[11px] font-mono w-7 ${s.id === activeSceneId ? 'text-arcane' : 'text-ink-faint'}`}>{String(i + 1).padStart(2, '0')}</span>
                     <div className="min-w-0 flex-1"><p className={`text-[13px] truncate ${s.id === activeSceneId ? 'text-ink font-medium' : 'text-ink-dim group-hover:text-ink'}`}>{s.title}</p><div className="flex items-center gap-2">{s.isEnding && <span className="text-[10px] text-ember">◆ Ending</span>}{narrationStatus[s.id] && <span className="text-[10px] text-arcane" title="Narration generated">🎧</span>}</div></div>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Delete scene ${s.title}`}
+                      onClick={(e) => { e.stopPropagation(); deleteScene(s.id); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); deleteScene(s.id); } }}
+                      className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-blood text-sm px-1 transition-all"
+                    >
+                      {deletingSceneId === s.id ? '…' : '🗑'}
+                    </span>
                   </div>
                 </button>
               ))}
@@ -211,6 +256,14 @@ export function SceneEditorPage() {
                           <div className="flex items-start gap-4">
                             <span className="w-8 h-8 rounded-lg bg-ember/10 border border-ember/25 text-ember text-sm font-bold flex items-center justify-center shrink-0">{i + 1}</span>
                             <div className="flex-1 min-w-0"><p className="text-[15px] leading-relaxed mb-1">{c.text}</p><p className="text-xs text-ink-faint">→ {scenes.find((s) => s.id === c.targetSceneId)?.title ?? 'Unlinked'}</p></div>
+                            <button
+                              onClick={() => deleteChoice(c.id)}
+                              aria-label="Delete choice"
+                              disabled={deletingChoiceId === c.id}
+                              className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-blood text-sm px-1 transition-all shrink-0"
+                            >
+                              {deletingChoiceId === c.id ? '…' : '🗑'}
+                            </button>
                           </div>
                         </motion.div>
                       ))}
