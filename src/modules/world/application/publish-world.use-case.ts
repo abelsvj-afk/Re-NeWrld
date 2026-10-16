@@ -71,6 +71,7 @@ export function buildCanonData(world: World, scenes: Scene[], choices: Choice[])
       conditions: choice.getConditions(),
       mutations: choice.getMutations(),
       sort_order: choice.getSortOrder(),
+      visibility: choice.getVisibility(),
     })),
   };
 }
