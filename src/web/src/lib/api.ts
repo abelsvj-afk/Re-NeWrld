@@ -168,9 +168,9 @@ export const worldsApi = {
   updateScene: (worldId: string, sceneId: string, input: { title?: string; prose?: string; isEnding?: boolean; metadata?: Record<string, unknown> }) =>
     api<void>(`/worlds/${worldId}/scenes/${sceneId}`, { method: 'PATCH', body: input }),
   choices: (worldId: string) => api<ChoiceSummary[]>(`/worlds/${worldId}/choices`),
-  createChoice: (worldId: string, input: { sceneId: string; targetSceneId: string; text: string; conditions?: unknown; mutations?: unknown }) =>
+  createChoice: (worldId: string, input: { sceneId: string; targetSceneId: string; text: string; conditions?: unknown; mutations?: unknown; visibility?: 'hide' | 'show_locked' }) =>
     api<{ choiceId: string }>(`/worlds/${worldId}/choices`, { method: 'POST', body: input }),
-  updateChoice: (worldId: string, choiceId: string, input: { text?: string; targetSceneId?: string; conditions?: unknown; mutations?: unknown; sortOrder?: number }) =>
+  updateChoice: (worldId: string, choiceId: string, input: { text?: string; targetSceneId?: string; conditions?: unknown; mutations?: unknown; sortOrder?: number; visibility?: 'hide' | 'show_locked' }) =>
     api<{ choiceId: string }>(`/worlds/${worldId}/choices/${choiceId}`, { method: 'PATCH', body: input }),
   deleteChoice: (worldId: string, choiceId: string) =>
     api<void>(`/worlds/${worldId}/choices/${choiceId}`, { method: 'DELETE' }),
@@ -236,6 +236,8 @@ export interface ChoiceOption {
   text: string;
   available: boolean;
   unavailableReason?: string;
+  locked?: boolean;
+  lockReason?: string;
 }
 
 export interface SessionState {
@@ -249,6 +251,7 @@ export interface SessionState {
   choices: ChoiceOption[];
   variables: Record<string, unknown>;
   version: number;
+  mutationsApplied?: Array<{ variable: string; operation: string; value?: unknown; displayText: string }>;
 }
 
 export const sessionsApi = {
