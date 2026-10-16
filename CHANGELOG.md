@@ -72,6 +72,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Scene editor header shows the actual world title (was 'Project: Untitled'); /signin now redirects to /login; world count shows loading state instead of flashing '0 shown'
 - Password input: removed [-webkit-appearance:none]/[appearance:none] classes that prevented all text entry
 - Scene creation: CreateSceneUseCase now provisions a deterministic default chapter ('Chapter 1') when the world has none — fixes the FK-constraint 500 that made scene creation impossible on every world
+- Creator Studio audit fix batch (H-UX4): narrator voices loading state, publish Back-to-Editor navigation, optional chapterId, password reset UI, scene/choice deletion, dry-run validation endpoint.
 
 ### Security
 - scrypt password hashing (N=16384, r=8, p=1, 64-byte key, per-hash salt, timing-safe verify).
