@@ -22,7 +22,11 @@ import { WorldTaxonomyInputSchema } from '../domain/value-objects/world-schemas.
 import { ListPublishedWorldsUseCase } from '../application/list-published-worlds.use-case.js';
 import { DeleteSceneUseCase } from '../application/delete-scene.use-case.js';
 import { DeleteChoiceUseCase } from '../application/delete-choice.use-case.js';
+import { CharacterRepositoryPort } from '../domain/ports/character.repository.port.js';
+import { CharacterId } from '../domain/value-objects/character-id.value-object.js';
 import { ValidateWorldUseCase } from '../application/validate-world.use-case.js';
+import { CreateCharacterUseCase } from '../application/create-character.use-case.js';
+import { DeleteCharacterUseCase } from '../application/delete-character.use-case.js';
 import { SceneId } from '../domain/value-objects/scene-id.value-object.js';
 import { ChoiceId } from '../domain/value-objects/choice-id.value-object.js';
 import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
@@ -36,6 +40,7 @@ export interface WorldRouteDeps {
   sceneRepository: SceneRepositoryPort;
   chapterRepository: ChapterRepositoryPort;
   choiceRepository: ChoiceRepositoryPort;
+  characterRepository: CharacterRepositoryPort;
   canonRepository: CanonRepositoryPort;
   narrationRepository: NarrationRepositoryPort;
   elevenLabs: ElevenLabsClient | null;
@@ -291,6 +296,50 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     await deleteChoice.execute({
       worldId: parseWorldId(params.id),
       choiceId: new ChoiceId(choiceId),
+      creatorId: request.user!.userId,
+    });
+    return reply.code(204).send();
+  });
+
+  // --- Characters (US-C03) ---
+  const CreateCharacterBody = z.object({
+    name: z.string().min(1).max(255),
+    roleTypes: z.array(z.string().min(1)).min(1),
+    description: z.string().max(5000).optional(),
+    attributes: z.record(z.unknown()).optional(),
+  });
+
+  app.post('/worlds/:id/characters', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const body = CreateCharacterBody.parse(request.body);
+    const createCharacter = new CreateCharacterUseCase(deps.characterRepository, deps.worldRepository);
+    const result = await createCharacter.execute({
+      worldId: params.id,
+      creatorId: request.user!.userId,
+      ...body,
+    });
+    return reply.code(201).send(result);
+  });
+
+  app.get('/worlds/:id/characters', { preHandler: creatorOnly }, async (request) => {
+    const params = WorldParams.parse(request.params);
+    const characters = await deps.characterRepository.findByWorldId(parseWorldId(params.id));
+    return characters.map((c) => ({
+      id: c.getCharacterId().getValue(),
+      name: c.getName(),
+      roleTypes: c.getRoleTypes().map((r) => r.getRoleType()),
+      description: c.getDescription(),
+      attributes: c.getAttributes(),
+    }));
+  });
+
+  app.delete('/worlds/:id/characters/:characterId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { characterId } = z.object({ characterId: z.string().uuid() }).parse(request.params);
+    const deleteCharacter = new DeleteCharacterUseCase(deps.characterRepository, deps.worldRepository);
+    await deleteCharacter.execute({
+      worldId: parseWorldId(params.id),
+      characterId: new CharacterId(characterId),
       creatorId: request.user!.userId,
     });
     return reply.code(204).send();

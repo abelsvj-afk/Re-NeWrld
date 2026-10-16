@@ -7,6 +7,7 @@ import { logger } from './shared/logger/pino.logger.js';
 import { AuthRepositoryPort } from './modules/auth/domain/ports/auth.repository.port.js';
 import { WorldRepositoryPort } from './modules/world/domain/ports/world.repository.port.js';
 import { SceneRepositoryPort } from './modules/world/domain/ports/scene.repository.port.js';
+import { CharacterRepositoryPort } from './modules/world/domain/ports/character.repository.port.js';
 import { ChapterRepositoryPort } from './modules/world/domain/ports/chapter.repository.port.js';
 import { ChoiceRepositoryPort } from './modules/world/domain/ports/choice.repository.port.js';
 import { CanonRepositoryPort } from './modules/world/domain/ports/canon.repository.port.js';
@@ -14,6 +15,7 @@ import { SessionServicePort } from './modules/auth/domain/ports/session.port.js'
 import { PostgresAuthRepository } from './modules/auth/infrastructure/persistence/postgres-auth.repository.js';
 import { PostgresWorldRepository } from './modules/world/infrastructure/persistence/postgres-world.repository.js';
 import { PostgresSceneRepository } from './modules/world/infrastructure/persistence/postgres-scene.repository.js';
+import { PostgresCharacterRepository } from './modules/world/infrastructure/persistence/postgres-character.repository.js';
 import { PostgresChapterRepository } from './modules/world/infrastructure/persistence/postgres-chapter.repository.js';
 import { PostgresNarrationRepository } from './modules/world/infrastructure/persistence/postgres-narration.repository.js';
 import { ElevenLabsClient } from './modules/world/infrastructure/elevenlabs.client.js';
@@ -44,6 +46,7 @@ export interface AppDeps {
   authRepository?: AuthRepositoryPort;
   worldRepository?: WorldRepositoryPort;
   sceneRepository?: SceneRepositoryPort;
+  characterRepository?: CharacterRepositoryPort;
   chapterRepository?: ChapterRepositoryPort;
   narrationRepository?: NarrationRepositoryPort;
   choiceRepository?: ChoiceRepositoryPort;
@@ -139,6 +142,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const authRepository = deps?.authRepository ?? new PostgresAuthRepository();
   const worldRepository = deps?.worldRepository ?? new PostgresWorldRepository();
   const sceneRepository = deps?.sceneRepository ?? new PostgresSceneRepository();
+  const characterRepository = deps?.characterRepository ?? new PostgresCharacterRepository();
   const chapterRepository = deps?.chapterRepository ?? new PostgresChapterRepository();
   const narrationRepository = deps?.narrationRepository ?? new PostgresNarrationRepository();
   const elevenLabs = env.ELEVENLABS_API_KEY
@@ -179,6 +183,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       narrationStoragePath: env.NARRATION_STORAGE_PATH,
       narrationMonthlyCharCap: env.NARRATION_MONTHLY_CHAR_CAP,
       choiceRepository,
+      characterRepository,
       canonRepository,
       sessionVerifier: sessionService.getVerifier(),
     });

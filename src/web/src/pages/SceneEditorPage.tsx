@@ -3,11 +3,51 @@ import { useParams, useNavigate } from '@tanstack/react-router';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
+import type { Editor } from '@tiptap/react';
 import { worldsApi, ApiError, type SceneSummary, type ChoiceSummary } from '../lib/api';
 import { useAuth } from '../stores/auth';
 import { NarrationPanel } from '../components/NarrationPanel';
 
 const TABS = ['Scene', 'Script', 'Flow', 'Assets'] as const;
+
+function EditorToolbar({ editor }: { editor: Editor | null }) {
+  if (!editor) return null;
+  const btn = (active: boolean) =>
+    `px-2.5 py-1.5 rounded-lg text-[13px] font-medium transition-all ${
+      active ? 'bg-arcane/20 text-arcane' : 'text-ink-dim hover:text-ink hover:bg-panel'
+    }`;
+  const action = (fn: () => void, label: string, active = false, title?: string) => (
+    <button
+      type="button"
+      onClick={fn}
+      className={btn(active)}
+      title={title ?? label}
+      aria-label={title ?? label}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="flex items-center gap-1 flex-wrap px-4 py-2 border-b border-edge/60 bg-abyss/40 rounded-t-2xl">
+      {action(() => editor.chain().focus().toggleBold().run(), 'B', editor.isActive('bold'), 'Bold')}
+      {action(() => editor.chain().focus().toggleItalic().run(), 'I', editor.isActive('italic'), 'Italic')}
+      {action(() => editor.chain().focus().toggleStrike().run(), 'S', editor.isActive('strike'), 'Strikethrough')}
+      <span className="w-px h-5 bg-edge/60 mx-1" />
+      {action(() => editor.chain().focus().toggleHeading({ level: 2 }).run(), 'H2', editor.isActive('heading', { level: 2 }), 'Heading')}
+      {action(() => editor.chain().focus().toggleBulletList().run(), '• List', editor.isActive('bulletList'), 'Bullet list')}
+      {action(() => editor.chain().focus().toggleOrderedList().run(), '1. List', editor.isActive('orderedList'), 'Numbered list')}
+      {action(() => editor.chain().focus().toggleBlockquote().run(), '❝', editor.isActive('blockquote'), 'Quote')}
+      <span className="w-px h-5 bg-edge/60 mx-1" />
+      {action(() => editor.chain().focus().undo().run(), '↩', false, 'Undo')}
+      {action(() => editor.chain().focus().redo().run(), '↪', false, 'Redo')}
+    </div>
+  );
+}
+
+function wordCount(html: string): number {
+  const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return text ? text.split(' ').length : 0;
+}
 
 export function SceneEditorPage() {
   const { worldId } = useParams({ strict: false }) as { worldId: string };
@@ -44,8 +84,14 @@ export function SceneEditorPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, c, w] = await Promise.all([worldsApi.scenes(worldId), worldsApi.choices(worldId), worldsApi.get(worldId)]);
+      const [s, c, w, chars] = await Promise.all([
+        worldsApi.scenes(worldId),
+        worldsApi.choices(worldId),
+        worldsApi.get(worldId),
+        worldsApi.characters(worldId).catch(() => []),
+      ]);
       setScenes(s); setChoices(c); setWorldTitle(w.title ?? ''); setStartSceneId(w.startSceneId ?? null);
+      setCharacters(chars);
       worldsApi.narrationStatus(worldId).then(setNarrationStatus).catch(() => {});
       if (s.length > 0 && !activeSceneId) setActiveSceneId(s[0].id);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to load'); }
@@ -67,10 +113,52 @@ export function SceneEditorPage() {
     finally { setSaving(false); }
   };
 
+  const [characters, setCharacters] = useState<Array<{ id: string; name: string; roleTypes: string[]; description: string | null }>>([]);
+  const [showNewCharacter, setShowNewCharacter] = useState(false);
+  const [newCharName, setNewCharName] = useState('');
+  const [newCharRole, setNewCharRole] = useState('protagonist');
+  const [newCharDesc, setNewCharDesc] = useState('');
+  const [creatingChar, setCreatingChar] = useState(false);
   const [deletingSceneId, setDeletingSceneId] = useState<string | null>(null);
   const [deletingChoiceId, setDeletingChoiceId] = useState<string | null>(null);
   const [startSceneId, setStartSceneId] = useState<string | null>(null);
   const [settingStart, setSettingStart] = useState(false);
+
+  const createCharacter = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCharName.trim() || creatingChar) return;
+    setCreatingChar(true);
+    setError(null);
+    try {
+      const res = await worldsApi.createCharacter(worldId, {
+        name: newCharName.trim(),
+        roleTypes: [newCharRole],
+        description: newCharDesc.trim() || undefined,
+      });
+      setCharacters((prev) => [...prev, {
+        id: res.characterId,
+        name: newCharName.trim(),
+        roleTypes: [newCharRole],
+        description: newCharDesc.trim() || null,
+      }]);
+      setShowNewCharacter(false);
+      setNewCharName(''); setNewCharDesc(''); setNewCharRole('protagonist');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to create character');
+    } finally {
+      setCreatingChar(false);
+    }
+  };
+
+  const deleteCharacter = async (characterId: string) => {
+    if (!window.confirm('Delete this character? This cannot be undone.')) return;
+    try {
+      await worldsApi.deleteCharacter(worldId, characterId);
+      setCharacters((prev) => prev.filter((c) => c.id !== characterId));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to delete character');
+    }
+  };
 
   const setAsStartScene = async (sceneId: string) => {
     setSettingStart(true);
@@ -230,6 +318,37 @@ export function SceneEditorPage() {
               ))}
               {scenes.length === 0 && <div className="text-ink-faint text-[13px] px-3 py-8 text-center"><p className="mb-3">No scenes yet.<br/>Create your first scene to begin.</p><button onClick={() => setShowNewScene(true)} className="text-arcane text-[13px] font-medium hover:underline">+ Add scene</button></div>}
             </div>
+
+            {/* Characters */}
+            <div className="border-t border-edge/60 mt-2 pt-3">
+              <div className="px-3 py-2 flex items-center justify-between">
+                <p className="text-[11px] font-semibold text-ink-faint uppercase tracking-widest">Characters ({characters.length})</p>
+                <button onClick={() => setShowNewCharacter(true)} className="text-arcane hover:text-arcane/80 text-lg leading-none font-bold" title="Add character">+</button>
+              </div>
+              <div className="space-y-0.5 px-3 pb-2">
+                {characters.map((ch) => (
+                  <div key={ch.id} className="group flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-panel">
+                    <div className="w-7 h-7 rounded-full bg-arcane/15 border border-arcane/30 flex items-center justify-center text-[11px] font-bold text-arcane shrink-0">
+                      {ch.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] truncate text-ink-dim group-hover:text-ink">{ch.name}</p>
+                      <p className="text-[10px] text-ink-faint capitalize">{ch.roleTypes.join(', ')}</p>
+                    </div>
+                    <button
+                      onClick={() => deleteCharacter(ch.id)}
+                      className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-blood text-xs px-1 transition-all"
+                      title="Delete character"
+                    >
+                      🗑
+                    </button>
+                  </div>
+                ))}
+                {characters.length === 0 && (
+                  <p className="text-[12px] text-ink-faint px-2 py-2">No characters yet.</p>
+                )}
+              </div>
+            </div>
           </div>
         </aside>
 
@@ -264,7 +383,15 @@ export function SceneEditorPage() {
                     </div>
                     <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Scene title" className="bg-transparent font-prose text-3xl md:text-4xl tracking-tight focus:outline-none w-full placeholder:text-ink-faint/50 border-b border-transparent focus:border-arcane/30 pb-2 transition-colors" />
                   </div>
-                  <div className="bg-panel/40 border border-edge/60 rounded-2xl p-8 mb-8"><EditorContent editor={editor} /></div>
+                  <div className="bg-panel/40 border border-edge/60 rounded-2xl mb-8 overflow-hidden">
+                    <EditorToolbar editor={editor} />
+                    <div className="p-8"><EditorContent editor={editor} /></div>
+                    <div className="px-8 pb-4 flex justify-end">
+                      <span className="text-[11px] text-ink-faint">
+                        {editor ? `${wordCount(editor.getHTML())} words` : ''}
+                      </span>
+                    </div>
+                  </div>
 
                   <NarrationPanel worldId={worldId} sceneId={activeScene.id} onGenerated={() => setNarrationStatus((prev) => ({ ...prev, [activeScene.id]: true }))} />
 
@@ -371,6 +498,40 @@ export function SceneEditorPage() {
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewChoice(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={creatingChoice || !newChoiceText.trim() || !newChoiceTarget} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-ember to-[#d97706] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-amber">{creatingChoice ? 'Creating…' : 'Create Choice'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+
+      {showNewCharacter && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowNewCharacter(false)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">New Character</h3>
+            <p className="text-sm text-ink-dim mb-6">Add a character to <span className="text-ink font-medium">{worldTitle}</span></p>
+            <form onSubmit={createCharacter} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Name</label>
+                <input value={newCharName} onChange={(e) => setNewCharName(e.target.value)} required placeholder="Kael Shadowborn…" autoFocus className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Role</label>
+                <select value={newCharRole} onChange={(e) => setNewCharRole(e.target.value)} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all">
+                  <option value="protagonist">Protagonist</option>
+                  <option value="antagonist">Antagonist</option>
+                  <option value="supporting">Supporting</option>
+                  <option value="mentor">Mentor</option>
+                  <option value="love_interest">Love Interest</option>
+                  <option value="comic_relief">Comic Relief</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Description</label>
+                <textarea value={newCharDesc} onChange={(e) => setNewCharDesc(e.target.value)} placeholder="Who are they? What drives them?…" rows={3} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all resize-none" />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowNewCharacter(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm">Cancel</button>
+                <button type="submit" disabled={creatingChar || !newCharName.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creatingChar ? 'Creating…' : 'Create Character'}</button>
               </div>
             </form>
           </motion.div>

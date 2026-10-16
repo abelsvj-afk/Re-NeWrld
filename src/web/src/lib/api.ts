@@ -157,6 +157,12 @@ export const worldsApi = {
     api<{ choiceId: string }>(`/worlds/${worldId}/choices`, { method: 'POST', body: input }),
   deleteChoice: (worldId: string, choiceId: string) =>
     api<void>(`/worlds/${worldId}/choices/${choiceId}`, { method: 'DELETE' }),
+  characters: (worldId: string) =>
+    api<Array<{ id: string; name: string; roleTypes: string[]; description: string | null; attributes: Record<string, unknown> }>>(`/worlds/${worldId}/characters`),
+  createCharacter: (worldId: string, input: { name: string; roleTypes: string[]; description?: string }) =>
+    api<{ characterId: string }>(`/worlds/${worldId}/characters`, { method: 'POST', body: input }),
+  deleteCharacter: (worldId: string, characterId: string) =>
+    api<void>(`/worlds/${worldId}/characters/${characterId}`, { method: 'DELETE' }),
   publish: (worldId: string) =>
     api<{ snapshotId: string; versionNumber: number; warnings: string[] }>(`/worlds/${worldId}/publish`, { method: 'POST' }),
   validate: (worldId: string) =>
