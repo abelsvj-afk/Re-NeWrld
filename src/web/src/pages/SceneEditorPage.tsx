@@ -70,6 +70,12 @@ export function SceneEditorPage() {
   const [newChoiceText, setNewChoiceText] = useState('');
   const [newChoiceTarget, setNewChoiceTarget] = useState('');
   const [creatingChoice, setCreatingChoice] = useState(false);
+  const [newCondVar, setNewCondVar] = useState('');
+  const [newCondOp, setNewCondOp] = useState('==');
+  const [newCondVal, setNewCondVal] = useState('');
+  const [newMutVar, setNewMutVar] = useState('');
+  const [newMutOp, setNewMutOp] = useState('set');
+  const [newMutVal, setNewMutVal] = useState('');
   const [worldTitle, setWorldTitle] = useState('');
 
   const activeScene = scenes.find((s) => s.id === activeSceneId) ?? null;
@@ -267,14 +273,28 @@ export function SceneEditorPage() {
     if (!newChoiceText.trim() || !newChoiceTarget || !activeSceneId || creatingChoice) return;
     setCreatingChoice(true); setError(null);
     try {
+      // Build G1 condition/mutation objects from the simple builder fields
+      let conditions: unknown = undefined;
+      if (newCondVar.trim()) {
+        const val = isNaN(Number(newCondVal)) ? newCondVal : Number(newCondVal);
+        conditions = { op: newCondOp, var: newCondVar.trim(), value: val };
+      }
+      let mutations: unknown = undefined;
+      if (newMutVar.trim()) {
+        const val = isNaN(Number(newMutVal)) ? newMutVal : Number(newMutVal);
+        mutations = [{ op: newMutOp, var: newMutVar.trim(), value: val }];
+      }
       const res = await worldsApi.createChoice(worldId, {
         sceneId: activeSceneId,
         targetSceneId: newChoiceTarget,
         text: newChoiceText.trim(),
+        conditions,
+        mutations,
       });
       setChoices((prev) => [...prev, { id: res.choiceId, sceneId: activeSceneId, targetSceneId: newChoiceTarget, text: newChoiceText.trim() } as ChoiceSummary]);
       setShowNewChoice(false);
       setNewChoiceText(''); setNewChoiceTarget('');
+      setNewCondVar(''); setNewCondVal(''); setNewMutVar(''); setNewMutVal('');
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to create choice'); }
     finally { setCreatingChoice(false); }
   };
@@ -518,6 +538,57 @@ export function SceneEditorPage() {
                   ))}
                 </select>
               </div>
+
+              <details className="border border-edge/60 rounded-xl overflow-hidden">
+                <summary className="px-4 py-3 text-[13px] text-ink-dim hover:text-ink cursor-pointer select-none bg-abyss/40">
+                  Conditions & Effects <span className="text-ink-faint text-[11px]">(optional)</span>
+                </summary>
+                <div className="p-4 space-y-4 bg-abyss/20">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Show only if</p>
+                    <div className="flex gap-2">
+                      <input
+                        value={newCondVar} onChange={(e) => setNewCondVar(e.target.value)}
+                        placeholder="variable"
+                        className="flex-1 min-w-0 bg-abyss border border-edge rounded-lg px-3 py-2 text-sm text-ink placeholder:text-ink-faint/60 focus:border-ember focus:outline-none"
+                      />
+                      <select value={newCondOp} onChange={(e) => setNewCondOp(e.target.value)} className="bg-abyss border border-edge rounded-lg px-2 py-2 text-sm text-ink focus:border-ember focus:outline-none">
+                        <option value="==">==</option>
+                        <option value="!=">!=</option>
+                        <option value=">">&gt;</option>
+                        <option value="<">&lt;</option>
+                        <option value=">=">&gt;=</option>
+                        <option value="<=">&lt;=</option>
+                      </select>
+                      <input
+                        value={newCondVal} onChange={(e) => setNewCondVal(e.target.value)}
+                        placeholder="value"
+                        className="flex-1 min-w-0 bg-abyss border border-edge rounded-lg px-3 py-2 text-sm text-ink placeholder:text-ink-faint/60 focus:border-ember focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">When chosen, set</p>
+                    <div className="flex gap-2">
+                      <input
+                        value={newMutVar} onChange={(e) => setNewMutVar(e.target.value)}
+                        placeholder="variable"
+                        className="flex-1 min-w-0 bg-abyss border border-edge rounded-lg px-3 py-2 text-sm text-ink placeholder:text-ink-faint/60 focus:border-ember focus:outline-none"
+                      />
+                      <select value={newMutOp} onChange={(e) => setNewMutOp(e.target.value)} className="bg-abyss border border-edge rounded-lg px-2 py-2 text-sm text-ink focus:border-ember focus:outline-none">
+                        <option value="set">set to</option>
+                        <option value="increment">+ by</option>
+                        <option value="decrement">− by</option>
+                      </select>
+                      <input
+                        value={newMutVal} onChange={(e) => setNewMutVal(e.target.value)}
+                        placeholder="value"
+                        className="flex-1 min-w-0 bg-abyss border border-edge rounded-lg px-3 py-2 text-sm text-ink placeholder:text-ink-faint/60 focus:border-ember focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </details>
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewChoice(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={creatingChoice || !newChoiceText.trim() || !newChoiceTarget} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-ember to-[#d97706] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-amber">{creatingChoice ? 'Creating…' : 'Create Choice'}</button>
