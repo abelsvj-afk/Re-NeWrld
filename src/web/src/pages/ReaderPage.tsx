@@ -67,31 +67,25 @@ export function ReaderPage() {
     </button>
   ) : null;
 
+  // Single catalog effect: initial load + filter/search changes.
+  // Search is debounced (400ms); genre changes fetch immediately.
   useEffect(() => {
-    (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        if (sessionId) {
+    if (sessionId) {
+      (async () => {
+        setLoading(true);
+        setError(null);
+        try {
           setSession(await sessionsApi.get(sessionId));
-        } else {
-          // Public catalog: published worlds across all creators (H-UX2).
-          const w = await worldsApi.listPublished();
-          setCatalog(w);
+        } catch (err) {
+          setError(err instanceof ApiError ? err.message : 'Failed to load');
+        } finally {
+          setLoading(false);
         }
-      } catch (err) {
-        setError(err instanceof ApiError ? err.message : 'Failed to load');
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [sessionId]);
-
-  // Filtered catalog: genre chips + debounced search hit the API.
-  useEffect(() => {
-    if (sessionId) return;
+      })();
+      return;
+    }
+    setLoading(true);
     const t = setTimeout(async () => {
-      setLoading(true);
       try {
         const w = await worldsApi.listPublished({
           genre: genreFilter ?? undefined,
@@ -106,7 +100,7 @@ export function ReaderPage() {
       }
     }, searchQuery ? 400 : 0);
     return () => clearTimeout(t);
-  }, [genreFilter, searchQuery, sessionId]);
+  }, [sessionId, genreFilter, searchQuery]);
 
   const startWorld = async (worldId: string) => {
     setError(null);
