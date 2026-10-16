@@ -82,6 +82,8 @@ describe('Error Handler & Logging Unit Tests', () => {
     };
 
     const app4xx = await buildApp(mockLogger4xx as any);
+    mockLogger4xx.warn.mockClear();
+    mockLogger4xx.error.mockClear();
     app4xx.get('/test-warn', async () => {
       throw new WorldNotFoundError();
     });
@@ -101,6 +103,8 @@ describe('Error Handler & Logging Unit Tests', () => {
     };
 
     const app5xx = await buildApp(mockLogger5xx as any);
+    mockLogger5xx.warn.mockClear();
+    mockLogger5xx.error.mockClear();
     app5xx.get('/test-err', async () => {
       throw new Error('boom');
     });
