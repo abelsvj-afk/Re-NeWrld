@@ -17,6 +17,8 @@ import { PostgresAuthRepository } from './modules/auth/infrastructure/persistenc
 import { PostgresWorldRepository } from './modules/world/infrastructure/persistence/postgres-world.repository.js';
 import { PostgresSceneRepository } from './modules/world/infrastructure/persistence/postgres-scene.repository.js';
 import { PostgresCharacterRepository } from './modules/world/infrastructure/persistence/postgres-character.repository.js';
+import { PostgresWorldVariableRepository } from './modules/world/infrastructure/persistence/postgres-world-variable.repository.js';
+import { WorldVariableRepositoryPort } from './modules/world/domain/ports/world-variable.repository.port.js';
 import { PostgresChapterRepository } from './modules/world/infrastructure/persistence/postgres-chapter.repository.js';
 import { PostgresNarrationRepository } from './modules/world/infrastructure/persistence/postgres-narration.repository.js';
 import { ElevenLabsClient } from './modules/world/infrastructure/elevenlabs.client.js';
@@ -26,6 +28,8 @@ import { PostgresCanonRepository } from './modules/world/infrastructure/persiste
 import { SessionRepositoryPort } from './modules/session/domain/ports/session.repository.port.js';
 import { IdempotencyRepositoryPort } from './modules/session/domain/ports/idempotency.repository.port.js';
 import { PostgresSessionRepository } from './modules/session/infrastructure/persistence/postgres-session.repository.js';
+import { PostgresCheckpointRepository } from './modules/session/infrastructure/persistence/postgres-checkpoint.repository.js';
+import { CheckpointRepositoryPort } from './modules/session/domain/ports/checkpoint.repository.port.js';
 import { PostgresIdempotencyRepository } from './modules/session/infrastructure/persistence/postgres-idempotency.repository.js';
 import { PostgresPasswordResetRepository } from './modules/auth/infrastructure/persistence/postgres-password-reset.repository.js';
 import { ResendEmailAdapter } from './modules/auth/infrastructure/email/resend-email.adapter.js';
@@ -48,11 +52,13 @@ export interface AppDeps {
   worldRepository?: WorldRepositoryPort;
   sceneRepository?: SceneRepositoryPort;
   characterRepository?: CharacterRepositoryPort;
+  variableRepository?: WorldVariableRepositoryPort;
   chapterRepository?: ChapterRepositoryPort;
   narrationRepository?: NarrationRepositoryPort;
   choiceRepository?: ChoiceRepositoryPort;
   canonRepository?: CanonRepositoryPort;
   sessionRepository?: SessionRepositoryPort;
+  checkpointRepository?: CheckpointRepositoryPort;
   idempotencyRepository?: IdempotencyRepositoryPort;
   sessionService?: SessionServicePort;
   passwordService?: PasswordService;
@@ -64,6 +70,8 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const activeLogger = customLogger || logger;
   const app = Fastify({
     logger: activeLogger,
+    // Trust Fly.io proxy headers for correct client IP (rate limiting, logging)
+    trustProxy: true,
     genReqId: (req) => {
       const incomingId = req.headers['x-request-id'];
       if (typeof incomingId === 'string' && REQUEST_ID_REGEX.test(incomingId)) {
@@ -149,6 +157,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const worldRepository = deps?.worldRepository ?? new PostgresWorldRepository();
   const sceneRepository = deps?.sceneRepository ?? new PostgresSceneRepository();
   const characterRepository = deps?.characterRepository ?? new PostgresCharacterRepository();
+  const variableRepository = deps?.variableRepository ?? new PostgresWorldVariableRepository();
   const chapterRepository = deps?.chapterRepository ?? new PostgresChapterRepository();
   const narrationRepository = deps?.narrationRepository ?? new PostgresNarrationRepository();
   const elevenLabs = env.ELEVENLABS_API_KEY
@@ -157,6 +166,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const choiceRepository = deps?.choiceRepository ?? new PostgresChoiceRepository();
   const canonRepository = deps?.canonRepository ?? new PostgresCanonRepository();
   const sessionRepository = deps?.sessionRepository ?? new PostgresSessionRepository();
+  const checkpointRepository = deps?.checkpointRepository ?? new PostgresCheckpointRepository();
   const idempotencyRepository = deps?.idempotencyRepository ?? new PostgresIdempotencyRepository();
   const sessionService = deps?.sessionService ?? new SessionService();
   const passwordService = deps?.passwordService ?? new PasswordService();
@@ -191,6 +201,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       narrationMonthlyCharCap: env.NARRATION_MONTHLY_CHAR_CAP,
       choiceRepository,
       characterRepository,
+      variableRepository,
       canonRepository,
       sessionVerifier: sessionService.getVerifier(),
     });
@@ -199,6 +210,8 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       worldRepository,
       canonRepository,
       idempotencyRepository,
+      checkpointRepository,
+      variableRepository,
       sessionVerifier: sessionService.getVerifier(),
     });
   });

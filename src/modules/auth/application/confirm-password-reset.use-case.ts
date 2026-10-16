@@ -51,7 +51,12 @@ export class ConfirmPasswordResetUseCase {
     await this.authRepository.save(user);
 
     token.markUsed();
-    await this.resetRepository.markUsed(tokenHash);
+    // Check row count to detect concurrent confirm race — if another request
+    // already consumed the token, fail instead of allowing reuse.
+    const marked = await this.resetRepository.markUsed(tokenHash);
+    if (!marked) {
+      throw new BadRequestError(GENERIC_FAILURE);
+    }
 
     await this.sessionService.revokeAllUserSessions(user.getUserId());
   }

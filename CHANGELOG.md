@@ -52,6 +52,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Become-a-Creator self-service upgrade (Slice 1, H-UX1): reader accounts get an upgrade button in the library header calling POST /auth/become-creator; auth store updates without re-login.
 - Published-world catalog with genre/tag taxonomy (Slice 2, H-UX2): GET /worlds/published returns published worlds across creators with genre/tag/search filters; genre picker + tag input on world create/edit; 13 new unit tests (330/330 passing).
 - Creator/Reader view switching (Slice 3, H-UX3): creator-only toggle in both headers, localStorage preference, one-way redirect for stale preferences, no role changes.
+- Interactive Narrative Engine: locked choice display, inventory drawer, consequence cues, variable registry, state-reactive prose, chapter checkpoints
 
 ### Fixed
 - Centralized error handling: Zod errors → 400, typed domain errors → mapped status codes; fixed production startup script for missing `.env`.
@@ -74,8 +75,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Scene creation: CreateSceneUseCase now provisions a deterministic default chapter ('Chapter 1') when the world has none — fixes the FK-constraint 500 that made scene creation impossible on every world
 - Creator Studio audit fix batch (H-UX4): narrator voices loading state, publish Back-to-Editor navigation, optional chapterId, password reset UI, scene/choice deletion, dry-run validation endpoint.
 - Choice editing backend: PATCH /worlds/:id/choices/:choiceId with UpdateChoiceUseCase
+- Fix template parser infinite loop on incomplete tags; add prose length and nesting caps
+- Auto-create checkpoints at chapter boundaries; allow rewind from completed sessions
+- Move draft-revert after validation; add ownership to GET routes; trustProxy; password-reset race fix
+- Frontend: visibility round-trip, startSceneId DTO, save prose sync, new-scene stub
 
 ### Security
 - scrypt password hashing (N=16384, r=8, p=1, 64-byte key, per-hash salt, timing-safe verify).
 - Session tokens stored as SHA-256 hashes; login returns generic 401 with dummy scrypt verify to prevent user enumeration and timing side-channels.
 - Rate limiting: 100 req/min global, 10 req/min on login/register; CORS off by default with env-driven origin.
+- Fix critical authorization bypass: scene/choice create/update now verify world ownership
+- Remove hardcoded credential from author-shadowborn.py; use SHADOWBORN_PASSWORD env var

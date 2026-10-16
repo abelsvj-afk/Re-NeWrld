@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Author the Shadowborn interactive world into Re:NeWrld via the live API."""
-import re, json, sys
+import re, json, sys, os
 import urllib.request, urllib.error, http.cookiejar
 
 BASE = 'https://re-newrld.fly.dev'
@@ -90,8 +90,12 @@ SCENES = [
 print(f"Loaded {len(SCENES)} scenes")
 
 # ---- Auth ----
+# SECURITY (2026-10-16 audit): credentials come from environment, never hardcoded.
+# Set SHADOWBORN_PASSWORD before running. Rotate the account password if exposed.
 email = 'shadowborn-author@example.com'
-password = 'Shadowborn2026!'
+password = os.environ.get('SHADOWBORN_PASSWORD')
+if not password:
+    sys.exit('SHADOWBORN_PASSWORD environment variable is required')
 status, out = req('POST', '/auth/register', {
     'email': email, 'password': password, 'role': 'creator'
 })

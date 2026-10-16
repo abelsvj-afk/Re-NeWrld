@@ -6,6 +6,11 @@
 app = 're-newrld'
 primary_region = 'ams'
 
+[deploy]
+  # Run migrations before the new version starts serving traffic.
+  # Prevents boot-against-stale-schema 500s (audit finding 2026-10-16).
+  release_command = 'npm run migrate'
+
 [build]
 
 [http_service]
