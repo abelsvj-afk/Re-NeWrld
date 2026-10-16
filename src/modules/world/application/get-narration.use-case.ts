@@ -9,6 +9,7 @@ import { sha256Hex, proseToPlainText } from '../infrastructure/elevenlabs.client
 export interface GetNarrationOutput {
   found: boolean;
   audio?: Buffer;
+  audioPath?: string;
   voiceId?: string;
 }
 
@@ -43,7 +44,7 @@ export class GetNarrationUseCase {
     try {
       await stat(cached.getAudioPath());
       const audio = await readFile(cached.getAudioPath());
-      return { found: true, audio, voiceId: cached.getVoiceId() };
+      return { found: true, audio, audioPath: cached.getAudioPath(), voiceId: cached.getVoiceId() };
     } catch {
       return { found: false };
     }

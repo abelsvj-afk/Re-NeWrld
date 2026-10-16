@@ -195,6 +195,8 @@ export const worldsApi = {
     api<{ status: 'cached' | 'generated'; audioPath: string; characterCount: number }>(`/worlds/${worldId}/scenes/${sceneId}/narration`, { method: 'POST', body: input }),
   narrationAudioUrl: (worldId: string, sceneId: string) =>
     `${API_BASE}/worlds/${worldId}/scenes/${sceneId}/narration`,
+  narrationWordsUrl: (worldId: string, sceneId: string) =>
+    `${API_BASE}/worlds/${worldId}/scenes/${sceneId}/narration/words`,
   narrationStatus: (worldId: string) =>
     api<Record<string, boolean>>(`/worlds/${worldId}/narration/status`),
   // --- Published catalog (H-UX2) ---

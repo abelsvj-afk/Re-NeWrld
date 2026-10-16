@@ -469,6 +469,30 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       .send(result.audio);
   });
 
+  app.get('/worlds/:id/scenes/:sceneId/narration/words', async (request, reply) => {
+    const params = NarrationParams.parse({ ...request.params as object });
+    const getNarration = new GetNarrationUseCase(
+      deps.narrationRepository,
+      deps.sceneRepository,
+      deps.worldRepository,
+    );
+    const result = await getNarration.execute(params.id, params.sceneId);
+    if (!result.found || !result.audioPath) {
+      return reply.code(404).send({ error: 'Narration not found' });
+    }
+    const fs = await import('fs/promises');
+    const wordsPath = result.audioPath.replace(/\.mp3$/, '.words.json');
+    try {
+      const wordsJson = await fs.readFile(wordsPath, 'utf-8');
+      return reply
+        .header('Content-Type', 'application/json')
+        .header('Cache-Control', 'public, max-age=31536000, immutable')
+        .send(wordsJson);
+    } catch {
+      return reply.code(404).send({ error: 'Word timings not available' });
+    }
+  });
+
   app.get('/worlds/:id/narration/quota', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
     const used = await deps.narrationRepository.sumCharactersThisMonth();

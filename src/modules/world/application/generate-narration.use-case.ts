@@ -90,11 +90,13 @@ export class GenerateNarrationUseCase {
       throw new WorldValidationError('ElevenLabs quota insufficient for this scene');
     }
 
-    const audio = await this.deps.elevenLabs.synthesize(input.voiceId, plainText);
+    const { audio, words } = await this.deps.elevenLabs.synthesizeWithTimestamps(input.voiceId, plainText);
 
     const audioPath = join(this.deps.storagePath, `${worldId.getValue()}_${sceneId.getValue()}_${proseHash.slice(0, 16)}.mp3`);
+    const wordsPath = audioPath.replace(/\.mp3$/, '.words.json');
     await mkdir(this.deps.storagePath, { recursive: true });
     await writeFile(audioPath, audio);
+    await writeFile(wordsPath, JSON.stringify(words));
 
     const props: NarrationProps = {
       worldId, canonVersion, sceneId, proseHash,

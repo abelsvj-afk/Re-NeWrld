@@ -82,6 +82,68 @@ export class ElevenLabsClient {
     }
   }
 
+  public async synthesizeWithTimestamps(voiceId: string, text: string): Promise<{ audio: Buffer; words: Array<{ word: string; start: number; end: number }> }> {
+    if (this.isCircuitOpen()) {
+      throw new Error('ElevenLabs circuit breaker open: synthesis temporarily unavailable');
+    }
+    if (!text || text.trim().length === 0) {
+      throw new Error('Cannot synthesize empty text');
+    }
+    try {
+      const res = await this.requestJson(
+        'POST',
+        `/v1/text-to-speech/${encodeURIComponent(voiceId)}/with-timestamps`,
+        { text: text.trim(), model_id: this.modelId },
+      ) as { audio_base64: string; alignment: { characters: string[]; character_start_times_seconds: number[]; character_end_times_seconds: number[] } };
+
+      const audio = Buffer.from(res.audio_base64, 'base64');
+      const words = this.alignmentToWords(res.alignment);
+      this.consecutiveFailures = 0;
+      return { audio, words };
+    } catch (err) {
+      this.consecutiveFailures += 1;
+      throw err;
+    }
+  }
+
+  /**
+   * Convert character-level alignment to word-level timestamps.
+   * Groups characters into words (split on whitespace).
+   */
+  private alignmentToWords(alignment: { characters: string[]; character_start_times_seconds: number[]; character_end_times_seconds: number[] }): Array<{ word: string; start: number; end: number }> {
+    const words: Array<{ word: string; start: number; end: number }> = [];
+    let currentWord = '';
+    let wordStart = 0;
+
+    for (let i = 0; i < alignment.characters.length; i++) {
+      const char = alignment.characters[i];
+      if (char.trim() === '' || char === ' ') {
+        if (currentWord) {
+          words.push({
+            word: currentWord,
+            start: wordStart,
+            end: alignment.character_end_times_seconds[i - 1] ?? wordStart,
+          });
+          currentWord = '';
+        }
+      } else {
+        if (!currentWord) {
+          wordStart = alignment.character_start_times_seconds[i] ?? 0;
+        }
+        currentWord += char;
+      }
+    }
+    if (currentWord) {
+      const lastIdx = alignment.characters.length - 1;
+      words.push({
+        word: currentWord,
+        start: wordStart,
+        end: alignment.character_end_times_seconds[lastIdx] ?? wordStart,
+      });
+    }
+    return words;
+  }
+
   private async request(method: string, path: string): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -122,6 +184,29 @@ export class ElevenLabsClient {
         throw new Error(`ElevenLabs ${method} ${path}: ${res.status} ${detail.slice(0, 200)}`);
       }
       return Buffer.from(await res.arrayBuffer());
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async requestJson(method: string, path: string, body: unknown): Promise<unknown> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(`https://api.elevenlabs.io${path}`, {
+        method,
+        headers: {
+          'xi-api-key': this.config.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`ElevenLabs ${method} ${path}: ${res.status} ${detail.slice(0, 200)}`);
+      }
+      return await res.json();
     } finally {
       clearTimeout(timer);
     }
