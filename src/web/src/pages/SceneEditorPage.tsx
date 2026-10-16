@@ -90,14 +90,15 @@ export function SceneEditorPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [s, c, w, chars] = await Promise.all([
+      const [s, c, w, chars, chaps] = await Promise.all([
         worldsApi.scenes(worldId),
         worldsApi.choices(worldId),
         worldsApi.get(worldId),
         worldsApi.characters(worldId).catch(() => []),
+        worldsApi.chapters(worldId).catch(() => []),
       ]);
       setScenes(s); setChoices(c); setWorldTitle(w.title ?? ''); setStartSceneId(w.startSceneId ?? null);
-      setCharacters(chars);
+      setCharacters(chars); setChapters(chaps);
       worldsApi.narrationStatus(worldId).then(setNarrationStatus).catch(() => {});
       if (s.length > 0 && !activeSceneId) setActiveSceneId(s[0].id);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to load'); }
@@ -128,10 +129,31 @@ export function SceneEditorPage() {
   const [newCharRole, setNewCharRole] = useState('protagonist');
   const [newCharDesc, setNewCharDesc] = useState('');
   const [creatingChar, setCreatingChar] = useState(false);
+  const [chapters, setChapters] = useState<Array<{ id: string; title: string; sortOrder: number }>>([]);
+  const [showNewChapter, setShowNewChapter] = useState(false);
+  const [newChapterTitle, setNewChapterTitle] = useState('');
+  const [creatingChapter, setCreatingChapter] = useState(false);
   const [deletingSceneId, setDeletingSceneId] = useState<string | null>(null);
   const [deletingChoiceId, setDeletingChoiceId] = useState<string | null>(null);
   const [startSceneId, setStartSceneId] = useState<string | null>(null);
   const [settingStart, setSettingStart] = useState(false);
+
+  const createChapter = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newChapterTitle.trim() || creatingChapter) return;
+    setCreatingChapter(true);
+    setError(null);
+    try {
+      const res = await worldsApi.createChapter(worldId, newChapterTitle.trim());
+      setChapters((prev) => [...prev, { id: res.chapterId, title: newChapterTitle.trim(), sortOrder: prev.length }]);
+      setShowNewChapter(false);
+      setNewChapterTitle('');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to create chapter');
+    } finally {
+      setCreatingChapter(false);
+    }
+  };
 
   const startPreview = () => {
     const startId = startSceneId ?? scenes[0]?.id ?? null;
@@ -339,7 +361,24 @@ export function SceneEditorPage() {
             <button onClick={() => setShowNewScene(true)} className="text-arcane hover:text-arcane/80 text-lg leading-none font-bold" title="Add scene">+</button>
           </div>
           <div className="flex-1 overflow-auto p-3">
-            <p className="px-3 py-2 text-[11px] font-semibold text-ember/90 uppercase tracking-widest">Act 1: The Beginning</p>
+            {chapters.length > 0 ? (
+              chapters.map((ch, ci) => (
+                <div key={ch.id} className="mb-2">
+                  <p className="px-3 py-2 text-[11px] font-semibold text-ember/90 uppercase tracking-widest">
+                    {chapters.length > 1 ? `Chapter ${ci + 1}: ` : ''}{ch.title}
+                  </p>
+                  <div className="space-y-0.5">
+                    {/* Scenes are shown flat for now; chapter assignment comes with scene-chapter linking */}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="px-3 py-2 text-[11px] font-semibold text-ember/90 uppercase tracking-widest">Act 1: The Beginning</p>
+            )}
+            <div className="flex items-center justify-between px-3 py-1">
+              <span className="text-[10px] text-ink-faint">Chapters</span>
+              <button onClick={() => setShowNewChapter(true)} className="text-arcane hover:text-arcane/80 text-sm leading-none" title="Add chapter">+ New</button>
+            </div>
             <div className="space-y-0.5">
               {scenes.map((s, i) => (
                 <button key={s.id} onClick={() => setActiveSceneId(s.id)} className={`w-full text-left px-3 py-2.5 rounded-lg transition-all group ${s.id === activeSceneId ? 'bg-arcane/[0.08] border border-arcane/25' : 'border border-transparent hover:bg-panel'}`}>
@@ -680,6 +719,25 @@ export function SceneEditorPage() {
           </div>
         );
       })()}
+
+      {showNewChapter && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowNewChapter(false)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">New Chapter</h3>
+            <p className="text-sm text-ink-dim mb-6">Organize your scenes into chapters.</p>
+            <form onSubmit={createChapter} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Title</label>
+                <input value={newChapterTitle} onChange={(e) => setNewChapterTitle(e.target.value)} required placeholder="The Beginning…" autoFocus className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 transition-all" />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowNewChapter(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
+                <button type="submit" disabled={creatingChapter || !newChapterTitle.trim()} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-cyan">{creatingChapter ? 'Creating…' : 'Create Chapter'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
 
       {showNewCharacter && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowNewCharacter(false)}>

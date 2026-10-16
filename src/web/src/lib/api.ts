@@ -163,6 +163,10 @@ export const worldsApi = {
     api<{ characterId: string }>(`/worlds/${worldId}/characters`, { method: 'POST', body: input }),
   deleteCharacter: (worldId: string, characterId: string) =>
     api<void>(`/worlds/${worldId}/characters/${characterId}`, { method: 'DELETE' }),
+  chapters: (worldId: string) =>
+    api<Array<{ id: string; title: string; sortOrder: number }>>(`/worlds/${worldId}/chapters`),
+  createChapter: (worldId: string, title: string) =>
+    api<{ chapterId: string }>(`/worlds/${worldId}/chapters`, { method: 'POST', body: { title } }),
   publish: (worldId: string) =>
     api<{ snapshotId: string; versionNumber: number; warnings: string[] }>(`/worlds/${worldId}/publish`, { method: 'POST' }),
   validate: (worldId: string) =>

@@ -23,6 +23,7 @@ import { ListPublishedWorldsUseCase } from '../application/list-published-worlds
 import { DeleteSceneUseCase } from '../application/delete-scene.use-case.js';
 import { DeleteChoiceUseCase } from '../application/delete-choice.use-case.js';
 import { CharacterRepositoryPort } from '../domain/ports/character.repository.port.js';
+import { CreateChapterUseCase } from '../application/create-chapter.use-case.js';
 import { CharacterId } from '../domain/value-objects/character-id.value-object.js';
 import { ValidateWorldUseCase } from '../application/validate-world.use-case.js';
 import { CreateCharacterUseCase } from '../application/create-character.use-case.js';
@@ -343,6 +344,29 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       creatorId: request.user!.userId,
     });
     return reply.code(204).send();
+  });
+
+  // --- Chapters ---
+  app.post('/worlds/:id/chapters', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const body = z.object({ title: z.string().min(1).max(255) }).parse(request.body);
+    const createChapter = new CreateChapterUseCase(deps.chapterRepository, deps.worldRepository);
+    const result = await createChapter.execute({
+      worldId: params.id,
+      title: body.title,
+      creatorId: request.user!.userId,
+    });
+    return reply.code(201).send(result);
+  });
+
+  app.get('/worlds/:id/chapters', { preHandler: creatorOnly }, async (request) => {
+    const params = WorldParams.parse(request.params);
+    const chapters = await deps.chapterRepository.findByWorldId(parseWorldId(params.id));
+    return chapters.map((c) => ({
+      id: c.getChapterId().getValue(),
+      title: c.getTitle(),
+      sortOrder: c.getSortOrder(),
+    }));
   });
 
   app.get('/worlds/:id/choices', { preHandler: creatorOnly }, async (request) => {
