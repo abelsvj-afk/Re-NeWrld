@@ -10,11 +10,14 @@ const API_BASE = import.meta.env.VITE_API_URL ?? '';
 export class ApiError extends Error {
   status: number;
   code: string;
-  constructor(status: number, code: string, message: string) {
+  /** Full error response body (e.g. validation report with blockers). */
+  detail: unknown;
+  constructor(status: number, code: string, message: string, detail?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -45,7 +48,8 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
     throw new ApiError(
       res.status,
       data.code ?? 'UNKNOWN',
-      data.message ?? friendlyErrorMessage(res.status),
+      data.error ?? data.message ?? friendlyErrorMessage(res.status),
+      data,
     );
   }
   return data as T;
