@@ -446,6 +446,15 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Required Tests**: Unit (filter logic, schema validation, pagination); integration (multi-creator draft/published matrix) — CI only.
   - **Definition of Done**: Reader library shows published worlds from all creators with working genre/tag/search filters. Live UX Gate on deployed URL.
   - **System Completeness Gate (2026-10-15)**: Security — new endpoint authenticated (any role), no RBAC change; search uses parameterized queries; genre validated against closed enum; global rate limits apply; Abuse — pagination bounded 1–100, deterministic ordering; Reliability — no migration, no schema change; Data Governance — no creator PII exposed (UUID not shown, display name omitted per decision); drafts excluded at query layer; AI Safety — N/A (deterministic catalog, no model involvement).
+
+- **Task H-UX3: Creator/Reader view switching (Slice 3)** [APPROVED 2026-10-15]
+  - **Phase**: Phase H (API/Frontend) — Level 2 (frontend-only; no backend changes; no auth-boundary change; role and permissions untouched)
+  - **Prerequisites**: Task H-UX1
+  - **File Scope**: `src/web/src/lib/view-mode.ts` (new), `src/web/src/components/ViewToggle.tsx` (new), `src/web/src/router.tsx`, `src/web/src/pages/CreatorDashboard.tsx`, `src/web/src/pages/ReaderPage.tsx`
+  - **Objective**: Creator accounts can switch between Creator Studio and Reader View without changing their account role. Preference persists in localStorage. Reader-only accounts never see the toggle.
+  - **Acceptance Criteria**: Toggle visible only for `role === 'creator'`; switching updates preference + navigates; `/` redirects creators with reader-preference to `/read` (one-way, no loops); explicit `/creator` navigation always shows studio; corrupted localStorage values fall back to role default; refresh preserves view.
+  - **Required Tests**: Unit tests for view-mode helpers (get/set/validation/clear).
+  - **Definition of Done**: Creator can toggle views, refresh safely, no redirect loops. Live UX Gate on deployed URL.
 - **Task H1a: Implement Auth & Session REST API Controllers and Zod Validation**
   - **Phase**: Phase H (API/Frontend)
   - **Prerequisites**: Task C3, Task F1
