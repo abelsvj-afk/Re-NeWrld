@@ -74,8 +74,9 @@ export function requireCreator() {
 }
 
 /**
- * Fastify preHandler guard ensuring the authenticated user has the Reader role.
- * Returns 401 if unauthenticated, or 403 Forbidden if user is not a reader.
+ * Fastify preHandler guard ensuring the authenticated user has Reader permissions.
+ * Creators also have reader permissions (they need to test-read books).
+ * Returns 401 if unauthenticated, or 403 Forbidden if user is neither reader nor creator.
  */
 export function requireReader() {
   return async function (request: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -84,7 +85,7 @@ export function requireReader() {
       return;
     }
 
-    if (!request.user.role.isReader()) {
+    if (!request.user.role.isReader() && !request.user.role.isCreator()) {
       reply.code(403).send({ error: 'Forbidden: Reader permissions required' });
       return;
     }
