@@ -170,6 +170,8 @@ export const worldsApi = {
   choices: (worldId: string) => api<ChoiceSummary[]>(`/worlds/${worldId}/choices`),
   createChoice: (worldId: string, input: { sceneId: string; targetSceneId: string; text: string; conditions?: unknown; mutations?: unknown }) =>
     api<{ choiceId: string }>(`/worlds/${worldId}/choices`, { method: 'POST', body: input }),
+  updateChoice: (worldId: string, choiceId: string, input: { text?: string; targetSceneId?: string; conditions?: unknown; mutations?: unknown; sortOrder?: number }) =>
+    api<{ choiceId: string }>(`/worlds/${worldId}/choices/${choiceId}`, { method: 'PATCH', body: input }),
   deleteChoice: (worldId: string, choiceId: string) =>
     api<void>(`/worlds/${worldId}/choices/${choiceId}`, { method: 'DELETE' }),
   characters: (worldId: string) =>
