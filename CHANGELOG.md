@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Narration integration tests (T3, ADR-016): cache hit/miss, concurrent generation idempotency, quota exhaustion, draft-world reader blocking. ElevenLabs mocked.
 - Become-a-Creator self-service upgrade (Slice 1, H-UX1): reader accounts get an upgrade button in the library header calling POST /auth/become-creator; auth store updates without re-login.
 - Published-world catalog with genre/tag taxonomy (Slice 2, H-UX2): GET /worlds/published returns published worlds across creators with genre/tag/search filters; genre picker + tag input on world create/edit; 13 new unit tests (330/330 passing).
+- Creator/Reader view switching (Slice 3, H-UX3): creator-only toggle in both headers, localStorage preference, one-way redirect for stale preferences, no role changes.
 
 ### Fixed
 - Centralized error handling: Zod errors → 400, typed domain errors → mapped status codes; fixed production startup script for missing `.env`.
