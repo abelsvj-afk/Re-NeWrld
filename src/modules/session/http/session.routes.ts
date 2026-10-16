@@ -128,19 +128,65 @@ function isListable(raw: unknown, marker: GrammarMarkerInfo, state: EvalState): 
   return evaluateCondition(parsed.data, state);
 }
 
-function toSessionJson(session: ReaderSession, canonData?: { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> }): Record<string, unknown> {
+/**
+ * Format a human-readable lock reason from choice conditions.
+ * Simple formatter for common patterns; falls back to generic message.
+ */
+function formatLockReason(conditions: unknown): string {
+  if (!conditions || typeof conditions !== 'object') {
+    return 'Requires special conditions';
+  }
+  // Try to extract meaningful info from condition structure
+  // For now, generic message — enhanced when Variable Registry (B) provides labels
+  return 'Requires unmet conditions';
+}
+
+/**
+ * Format human-readable display text for an applied mutation (Item F).
+ * Examples: "+10 Honor", "Acquired: Iron Key", "Kael will remember that"
+ */
+function formatMutationDisplay(m: { op: string; var: string; value?: unknown }): string {
+  const label = m.var.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  switch (m.op) {
+    case 'inc':
+      return `+${m.value} ${label}`;
+    case 'dec':
+      return `-${m.value} ${label}`;
+    case 'set':
+      if (typeof m.value === 'boolean') {
+        return m.value ? `Acquired: ${label}` : `Lost: ${label}`;
+      }
+      return `${label}: ${m.value}`;
+    case 'toggle':
+      return `${label} toggled`;
+    case 'unset':
+      return `Removed: ${label}`;
+    default:
+      return `${label} updated`;
+  }
+}
+
+function toSessionJson(session: ReaderSession, canonData?: { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown; visibility?: string }> }): Record<string, unknown> {
   const currentSceneId = session.getCurrentSceneId().getValue();
   const scene = canonData?.scenes.find((s) => s.scene_id === currentSceneId);
   const state = session.getStateVariables() as EvalState;
   const marker = getGrammarMarker(canonData);
   const sceneChoices = (canonData?.choices ?? [])
     .filter((c) => c.scene_id === currentSceneId)
-    .filter((c) => isListable(c.conditions, marker, state))
-    .map((c) => ({
-      id: c.choice_id,
-      text: c.text,
-      targetSceneId: c.target_scene_id,
-    }));
+    .map((c) => {
+      const listable = isListable(c.conditions, marker, state);
+      const showLocked = c.visibility === 'show_locked' && !listable;
+      // Include if listable, or if show_locked policy and not listable
+      if (!listable && !showLocked) return null;
+      return {
+        id: c.choice_id,
+        text: c.text,
+        targetSceneId: c.target_scene_id,
+        locked: showLocked,
+        lockReason: showLocked ? formatLockReason(c.conditions) : undefined,
+      };
+    })
+    .filter((c) => c !== null);
 
   return {
     id: session.getSessionId().getValue(),
@@ -190,7 +236,7 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
         worldId: parseWorldId(params.id),
         readerId: request.user!.userId,
       });
-      const canonData = snapshot.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> };
+      const canonData = snapshot.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown; visibility?: string }> };
       return reply.code(201).send(toSessionJson(session, canonData));
     }
   );
@@ -202,7 +248,7 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
       readerId: request.user!.userId,
     });
     const snapshot = await deps.canonRepository.findById(session.getSnapshotId());
-    const canonData = snapshot?.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> } | undefined;
+    const canonData = snapshot?.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown; visibility?: string }> } | undefined;
     return toSessionJson(session, canonData);
   });
 
@@ -213,7 +259,7 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
       const params = SessionParams.parse(request.params);
       const body = SubmitChoiceBody.parse(request.body);
       const idempotencyKey = parseIdempotencyKey(request);
-      await submitChoice.execute({
+      const result = await submitChoice.execute({
         sessionId: parseSessionId(params.id),
         readerId: request.user!.userId,
         choiceId: parseChoiceId(body.choiceId),
@@ -226,8 +272,16 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
         readerId: request.user!.userId,
       });
       const snapshot = await deps.canonRepository.findById(session.getSnapshotId());
-      const canonData = snapshot?.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> } | undefined;
-      return reply.code(200).send(toSessionJson(session, canonData));
+      const canonData = snapshot?.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown; visibility?: string }> } | undefined;
+      const sessionJson = toSessionJson(session, canonData);
+      // Include applied mutations for consequence cue toasts (Item F)
+      (sessionJson as Record<string, unknown>).mutationsApplied = result.appliedMutations.map((m) => {
+        if ('removed' in m) {
+          return { variable: m.var, operation: m.op, displayText: formatMutationDisplay({ op: m.op, var: m.var }) };
+        }
+        return { variable: m.var, operation: m.op, value: m.value, displayText: formatMutationDisplay({ op: m.op, var: m.var, value: m.value }) };
+      });
+      return reply.code(200).send(sessionJson);
     }
   );
 }
