@@ -7,7 +7,11 @@ import {
   ChoiceId,
   CanonRepositoryPort,
   WorldRepositoryPort,
+  ConditionSchema,
+  getGrammarMarker,
+  type GrammarMarkerInfo,
 } from '../../world/application/index.js';
+import { evaluateCondition, type SessionState as EvalState } from '../domain/services/condition-evaluator.js';
 import { StartReaderSessionUseCase } from '../application/start-reader-session.use-case.js';
 import { GetReaderSessionUseCase } from '../application/get-reader-session.use-case.js';
 import { SubmitChoiceUseCase } from '../application/submit-choice.use-case.js';
@@ -115,11 +119,23 @@ function parseIdempotencyKey(request: { headers: Record<string, unknown> }): str
 }
 
 /** Public session shape — exactly the response fields, never the canon data. */
+function isListable(raw: unknown, marker: GrammarMarkerInfo, state: EvalState): boolean {
+  if (raw === undefined) return true;
+  const parsed = ConditionSchema.safeParse(raw);
+  if (!parsed.success) {
+    return false;
+  }
+  return evaluateCondition(parsed.data, state);
+}
+
 function toSessionJson(session: ReaderSession, canonData?: { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> }): Record<string, unknown> {
   const currentSceneId = session.getCurrentSceneId().getValue();
   const scene = canonData?.scenes.find((s) => s.scene_id === currentSceneId);
+  const state = session.getStateVariables() as EvalState;
+  const marker = getGrammarMarker(canonData);
   const sceneChoices = (canonData?.choices ?? [])
     .filter((c) => c.scene_id === currentSceneId)
+    .filter((c) => isListable(c.conditions, marker, state))
     .map((c) => ({
       id: c.choice_id,
       text: c.text,
