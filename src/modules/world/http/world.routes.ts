@@ -29,6 +29,7 @@ import { CharacterId } from '../domain/value-objects/character-id.value-object.j
 import { ValidateWorldUseCase } from '../application/validate-world.use-case.js';
 import { CreateCharacterUseCase } from '../application/create-character.use-case.js';
 import { DeleteCharacterUseCase } from '../application/delete-character.use-case.js';
+import { UpdateCharacterUseCase } from '../application/update-character.use-case.js';
 import { SceneId } from '../domain/value-objects/scene-id.value-object.js';
 import { ChoiceId } from '../domain/value-objects/choice-id.value-object.js';
 import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
@@ -367,6 +368,25 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       creatorId: request.user!.userId,
     });
     return reply.code(204).send();
+  });
+
+  app.patch('/worlds/:id/characters/:characterId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { characterId } = z.object({ characterId: z.string().uuid() }).parse(request.params);
+    const body = z.object({
+      name: z.string().min(1).max(255).optional(),
+      roleTypes: z.array(z.string().min(1)).min(1).optional(),
+      description: z.string().max(5000).nullable().optional(),
+      attributes: z.record(z.unknown()).optional(),
+    }).parse(request.body);
+    const updateCharacter = new UpdateCharacterUseCase(deps.characterRepository, deps.worldRepository);
+    const result = await updateCharacter.execute({
+      worldId: params.id,
+      characterId,
+      creatorId: request.user!.userId,
+      ...body,
+    });
+    return reply.code(200).send(result);
   });
 
   // --- Chapters ---
