@@ -12,7 +12,7 @@ import { WorldNotFoundError } from '../domain/errors/world.errors.js';
 
 export interface CreateSceneInput {
   worldId: string;
-  chapterId: string;
+  chapterId?: string;
   title: string;
   prose: string;
   isEnding?: boolean;
@@ -90,15 +90,17 @@ export class CreateSceneUseCase {
    * - If the client-supplied chapterId names a chapter of this world, use it.
    * - Otherwise provision (or reuse) the world's deterministic default chapter.
    */
-  private async resolveChapterId(worldId: WorldId, requestedChapterId: string): Promise<ChapterId> {
-    try {
-      const requested = new ChapterId(requestedChapterId);
-      const existing = await this.chapterRepository.findById(requested);
-      if (existing && existing.getWorldId().equals(worldId)) {
-        return requested;
+  private async resolveChapterId(worldId: WorldId, requestedChapterId?: string): Promise<ChapterId> {
+    if (requestedChapterId) {
+      try {
+        const requested = new ChapterId(requestedChapterId);
+        const existing = await this.chapterRepository.findById(requested);
+        if (existing && existing.getWorldId().equals(worldId)) {
+          return requested;
+        }
+      } catch {
+        // Malformed UUID falls through to default provisioning.
       }
-    } catch {
-      // Malformed UUID falls through to default provisioning.
     }
 
     const chapters = await this.chapterRepository.findByWorldId(worldId);
