@@ -70,10 +70,12 @@ export function SceneEditorPage() {
   const [showNewChoice, setShowNewChoice] = useState(false);
   const [newChoiceText, setNewChoiceText] = useState('');
   const [newChoiceTarget, setNewChoiceTarget] = useState('');
+  const [newChoiceVisibility, setNewChoiceVisibility] = useState<'hide' | 'show_locked'>('hide');
   const [creatingChoice, setCreatingChoice] = useState(false);
-  const [editingChoice, setEditingChoice] = useState<{ id: string; text: string; targetSceneId: string } | null>(null);
+  const [editingChoice, setEditingChoice] = useState<{ id: string; text: string; targetSceneId: string; visibility?: string } | null>(null);
   const [editChoiceText, setEditChoiceText] = useState('');
   const [editChoiceTarget, setEditChoiceTarget] = useState('');
+  const [editChoiceVisibility, setEditChoiceVisibility] = useState<'hide' | 'show_locked'>('hide');
   const [savingChoiceEdit, setSavingChoiceEdit] = useState(false);
   const [newCondVar, setNewCondVar] = useState('');
   const [newCondOp, setNewCondOp] = useState('eq');
@@ -325,8 +327,9 @@ export function SceneEditorPage() {
       await worldsApi.updateChoice(worldId, editingChoice.id, {
         text: editChoiceText.trim(),
         targetSceneId: editChoiceTarget,
+        visibility: editChoiceVisibility,
       });
-      setChoices((prev) => prev.map((c) => c.id === editingChoice.id ? { ...c, text: editChoiceText.trim(), targetSceneId: editChoiceTarget } : c));
+      setChoices((prev) => prev.map((c) => c.id === editingChoice.id ? { ...c, text: editChoiceText.trim(), targetSceneId: editChoiceTarget, visibility: editChoiceVisibility } : c));
       setEditingChoice(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to update choice');
@@ -397,10 +400,11 @@ export function SceneEditorPage() {
         text: newChoiceText.trim(),
         conditions,
         mutations,
+        visibility: newChoiceVisibility,
       });
-      setChoices((prev) => [...prev, { id: res.choiceId, sceneId: activeSceneId, targetSceneId: newChoiceTarget, text: newChoiceText.trim() } as ChoiceSummary]);
+      setChoices((prev) => [...prev, { id: res.choiceId, sceneId: activeSceneId, targetSceneId: newChoiceTarget, text: newChoiceText.trim(), visibility: newChoiceVisibility } as ChoiceSummary]);
       setShowNewChoice(false);
-      setNewChoiceText(''); setNewChoiceTarget('');
+      setNewChoiceText(''); setNewChoiceTarget(''); setNewChoiceVisibility('hide');
       setNewCondVar(''); setNewCondVal(''); setNewMutVar(''); setNewMutVal('');
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to create choice'); }
     finally { setCreatingChoice(false); }
@@ -613,7 +617,7 @@ export function SceneEditorPage() {
                             <span className="w-8 h-8 rounded-lg bg-ember/10 border border-ember/25 text-ember text-sm font-bold flex items-center justify-center shrink-0">{i + 1}</span>
                             <div className="flex-1 min-w-0"><p className="text-[15px] leading-relaxed mb-1">{c.text}</p><p className="text-xs text-ink-faint">→ {scenes.find((s) => s.id === c.targetSceneId)?.title ?? 'Unlinked'}</p></div>
                             <button
-                              onClick={() => { setEditingChoice({ id: c.id, text: c.text, targetSceneId: c.targetSceneId }); setEditChoiceText(c.text); setEditChoiceTarget(c.targetSceneId); }}
+                              onClick={() => { setEditingChoice({ id: c.id, text: c.text, targetSceneId: c.targetSceneId, visibility: (c as any).visibility }); setEditChoiceText(c.text); setEditChoiceTarget(c.targetSceneId); setEditChoiceVisibility(((c as any).visibility as 'hide' | 'show_locked') || 'hide'); }}
                               aria-label="Edit choice"
                               className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-arcane text-sm px-1 transition-all shrink-0"
                             >
@@ -703,6 +707,14 @@ export function SceneEditorPage() {
                   ))}
                 </select>
               </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">If locked</label>
+                <select value={newChoiceVisibility} onChange={(e) => setNewChoiceVisibility(e.target.value as 'hide' | 'show_locked')} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink focus:border-ember focus:outline-none focus:ring-2 focus:ring-ember/20 transition-all">
+                  <option value="hide">Hide completely</option>
+                  <option value="show_locked">Show as locked (🔒)</option>
+                </select>
+                <p className="text-[11px] text-ink-faint mt-1">Show locked displays the choice disabled with its requirement when conditions aren't met.</p>
+              </div>
 
               <details className="border border-edge/60 rounded-xl overflow-hidden">
                 <summary className="px-4 py-3 text-[13px] text-ink-dim hover:text-ink cursor-pointer select-none bg-abyss/40">
@@ -780,6 +792,13 @@ export function SceneEditorPage() {
                   {scenes.filter((s) => s.id !== activeSceneId).map((s) => (
                     <option key={s.id} value={s.id}>{s.title}</option>
                   ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">If locked</label>
+                <select value={editChoiceVisibility} onChange={(e) => setEditChoiceVisibility(e.target.value as 'hide' | 'show_locked')} className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink focus:border-ember focus:outline-none focus:ring-2 focus:ring-ember/20 transition-all">
+                  <option value="hide">Hide completely</option>
+                  <option value="show_locked">Show as locked (🔒)</option>
                 </select>
               </div>
               <div className="flex gap-3 pt-2">
