@@ -128,6 +128,32 @@ export class ReaderSession {
     this.updatedAt = new Date();
   }
 
+  /**
+   * Rewinds the session to a checkpoint (Item D).
+   * Restores scene and state variables; bumps version for optimistic locking.
+   * The original path is preserved in the timeline (append-only).
+   */
+  public rewindToCheckpoint(sceneId: SceneId, stateVariables: SessionState): void {
+    // Allow rewind from active or completed (bad ending → try different path).
+    // Abandoned sessions stay abandoned — rewind is for story exploration, not resurrection.
+    const status = this.status.getValue();
+    if (status !== 'active' && status !== 'completed') {
+      throw new SessionValidationError(`Cannot rewind from ${status} session`);
+    }
+    const validated = SessionStateSchema.safeParse(stateVariables);
+    if (!validated.success) {
+      throw new SessionValidationError('Checkpoint state must be a JSON-serializable object');
+    }
+    this.currentSceneId = sceneId;
+    this.stateVariables = structuredClone(validated.data) as SessionState;
+    // Rewinding from a completed session reactivates it
+    if (status === 'completed') {
+      this.status = new SessionStatus('active');
+    }
+    this.version += 1;
+    this.updatedAt = new Date();
+  }
+
   /** Marks the session abandoned. Only legal from active (explicit reader close). */
   public abandon(): void {
     this.requireActive('abandon');

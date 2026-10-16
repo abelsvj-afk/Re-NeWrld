@@ -40,12 +40,13 @@ export class PostgresPasswordResetRepository implements PasswordResetRepositoryP
     return this.mapRowToToken(result.rows[0]);
   }
 
-  public async markUsed(tokenHash: string): Promise<void> {
-    await query(
+  public async markUsed(tokenHash: string): Promise<boolean> {
+    const result = await query(
       `UPDATE password_reset_tokens SET used_at = NOW()
        WHERE token_hash = $1 AND used_at IS NULL`,
       [tokenHash]
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   public async deleteExpired(now: Date = new Date()): Promise<number> {

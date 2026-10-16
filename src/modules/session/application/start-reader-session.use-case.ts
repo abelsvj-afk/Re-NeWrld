@@ -11,6 +11,7 @@ import { ReaderSession } from '../domain/entities/reader-session.entity.js';
 import { SessionId } from '../domain/value-objects/session-id.value-object.js';
 import { SessionRepositoryPort } from '../domain/ports/session.repository.port.js';
 import { NoPublishedSnapshotError } from '../domain/errors/session.errors.js';
+import { WorldVariableRepositoryPort } from '../../world/domain/ports/world-variable.repository.port.js';
 
 export interface StartReaderSessionCommand {
   worldId: WorldId;
@@ -50,7 +51,8 @@ export class StartReaderSessionUseCase {
   constructor(
     private readonly worlds: WorldRepositoryPort,
     private readonly canon: CanonRepositoryPort,
-    private readonly sessions: SessionRepositoryPort
+    private readonly sessions: SessionRepositoryPort,
+    private readonly variables?: WorldVariableRepositoryPort
   ) {}
 
   public async execute(command: StartReaderSessionCommand): Promise<StartReaderSessionResult> {
@@ -64,13 +66,29 @@ export class StartReaderSessionUseCase {
       throw new NoPublishedSnapshotError();
     }
 
+    // Item B: initialize session state with registered variable defaults
+    let initialState: Record<string, unknown> = {};
+    if (this.variables) {
+      try {
+        const registered = await this.variables.findByWorldId(command.worldId);
+        for (const v of registered) {
+          const defaultValue = v.getDefaultValue();
+          if (defaultValue !== undefined && defaultValue !== null) {
+            initialState[v.getName()] = defaultValue;
+          }
+        }
+      } catch {
+        // Registry unavailable — start with empty state rather than failing
+      }
+    }
+
     const session = ReaderSession.create({
       sessionId: SessionId.generate(),
       readerId: command.readerId,
       worldId: command.worldId,
       snapshotId: snapshot.getSnapshotId(),
       currentSceneId: new SceneId(snapshot.getCanonData().world.start_scene_id),
-      stateVariables: {},
+      stateVariables: initialState,
     });
     await this.sessions.save(session);
     return { session, snapshot };

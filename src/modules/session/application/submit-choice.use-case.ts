@@ -11,6 +11,7 @@ import {
   IdempotencyRepositoryPort,
   IdempotencyRecord,
 } from '../domain/ports/idempotency.repository.port.js';
+import { CheckpointRepositoryPort } from '../domain/ports/checkpoint.repository.port.js';
 import { ReaderSession, SessionState } from '../domain/entities/reader-session.entity.js';
 import { SessionStateSchema } from '../domain/entities/reader-session.entity.js';
 import { SessionId } from '../domain/value-objects/session-id.value-object.js';
@@ -214,7 +215,8 @@ export class SubmitChoiceUseCase {
   constructor(
     private readonly sessions: SessionRepositoryPort,
     private readonly canon: CanonRepositoryPort,
-    private readonly idempotency: IdempotencyRepositoryPort
+    private readonly idempotency: IdempotencyRepositoryPort,
+    private readonly checkpoints?: CheckpointRepositoryPort
   ) {}
 
   public async execute(command: SubmitChoiceCommand): Promise<SubmitChoiceResult> {
@@ -272,7 +274,7 @@ export class SubmitChoiceUseCase {
 
     // --- Transaction (single; F2a mechanism extended) ---
     try {
-      return await withTransaction(async (tx: pkg.PoolClient) => {
+      const result = await withTransaction(async (tx: pkg.PoolClient) => {
         // Step 7: lock the session row (vanished concurrently → 404).
         const locked = await this.sessions.findByIdForUpdate(command.sessionId, tx);
         if (locked === null) {
@@ -385,6 +387,33 @@ export class SubmitChoiceUseCase {
 
         return validatedResponse.data;
       });
+
+      // Item D: auto-create checkpoint on chapter boundary crossing.
+      // Done after commit — checkpoints are append-only history, not critical path.
+      if (this.checkpoints) {
+        const fromScene = canonData.scenes.find((s) => s.scene_id === session.getCurrentSceneId().getValue());
+        const toScene = canonData.scenes.find((s) => s.scene_id === result.currentSceneId);
+        if (fromScene && toScene && fromScene.chapter_id !== toScene.chapter_id) {
+          // Re-fetch to get post-choice state
+          const updatedSession = await this.sessions.findById(command.sessionId);
+          if (updatedSession) {
+            const { v4: uuidv4 } = await import('uuid');
+            await this.checkpoints.save({
+              checkpointId: uuidv4(),
+              sessionId: sessionIdStr,
+              chapterId: toScene.chapter_id,
+              chapterTitle: toScene.title,
+              sceneId: toScene.scene_id,
+              stateVariables: updatedSession.getStateVariables() as Record<string, unknown>,
+              version: result.version,
+            }).catch(() => {
+              // Checkpoint creation is best-effort; never fail the choice submission.
+            });
+          }
+        }
+      }
+
+      return result;
     } catch (err) {
       // Step 8 replay: the transaction rolled back; return the stored response.
       if (err instanceof ReplaySignal) {
