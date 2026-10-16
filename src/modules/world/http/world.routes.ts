@@ -7,6 +7,8 @@ import { CanonRepositoryPort } from '../domain/ports/canon.repository.port.js';
 import { World } from '../domain/entities/world.entity.js';
 import { WorldId } from '../domain/value-objects/world-id.value-object.js';
 import { WorldMetadataSchema } from '../domain/value-objects/world-schemas.js';
+import { WorldNotFoundError } from '../domain/errors/world.errors.js';
+import { UserId } from '../../auth/domain/value-objects/user-id.value-object.js';
 import { CreateWorldUseCase } from '../application/create-world.use-case.js';
 import { GetWorldUseCase } from '../application/get-world.use-case.js';
 import { UpdateWorldUseCase } from '../application/update-world.use-case.js';
@@ -30,6 +32,10 @@ import { ValidateWorldUseCase } from '../application/validate-world.use-case.js'
 import { CreateCharacterUseCase } from '../application/create-character.use-case.js';
 import { DeleteCharacterUseCase } from '../application/delete-character.use-case.js';
 import { UpdateCharacterUseCase } from '../application/update-character.use-case.js';
+import { CreateWorldVariableUseCase } from '../application/create-world-variable.use-case.js';
+import { UpdateWorldVariableUseCase } from '../application/update-world-variable.use-case.js';
+import { DeleteWorldVariableUseCase } from '../application/delete-world-variable.use-case.js';
+import { WorldVariableRepositoryPort } from '../domain/ports/world-variable.repository.port.js';
 import { SceneId } from '../domain/value-objects/scene-id.value-object.js';
 import { ChoiceId } from '../domain/value-objects/choice-id.value-object.js';
 import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
@@ -44,6 +50,7 @@ export interface WorldRouteDeps {
   chapterRepository: ChapterRepositoryPort;
   choiceRepository: ChoiceRepositoryPort;
   characterRepository: CharacterRepositoryPort;
+  variableRepository: WorldVariableRepositoryPort;
   canonRepository: CanonRepositoryPort;
   narrationRepository: NarrationRepositoryPort;
   elevenLabs: ElevenLabsClient | null;
@@ -103,6 +110,46 @@ function parseWorldId(raw: string): WorldId {
   }
 }
 
+function parseSceneId(raw: string): SceneId {
+  try {
+    return new SceneId(raw);
+  } catch {
+    throw new BadRequestError('Invalid scene id');
+  }
+}
+
+function parseChoiceId(raw: string): ChoiceId {
+  try {
+    return new ChoiceId(raw);
+  } catch {
+    throw new BadRequestError('Invalid choice id');
+  }
+}
+
+function parseCharacterId(raw: string): CharacterId {
+  try {
+    return new CharacterId(raw);
+  } catch {
+    throw new BadRequestError('Invalid character id');
+  }
+}
+
+/**
+ * Verify the requester owns the world. Throws WorldNotFoundError (404-not-403)
+ * if the world doesn't exist or belongs to another creator.
+ */
+async function requireWorldOwnership(
+  worldRepository: WorldRepositoryPort,
+  worldId: WorldId,
+  creatorId: UserId
+): Promise<void> {
+  const world = await worldRepository.findById(worldId);
+  if (!world || !world.getCreatorId().equals(creatorId)) {
+    throw new WorldNotFoundError(worldId.getValue());
+  }
+}
+
+
 function toWorldJson(world: World) {
   return {
     id: world.getWorldId().getValue(),
@@ -111,6 +158,7 @@ function toWorldJson(world: World) {
     description: world.getDescription(),
     metadata: world.getMetadata(),
     status: world.getStatus().getValue(),
+    startSceneId: world.getStartSceneId()?.getValue() ?? null,
     createdAt: world.getCreatedAt().toISOString(),
     updatedAt: world.getUpdatedAt().toISOString(),
   };
@@ -125,7 +173,8 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     deps.worldRepository,
     deps.sceneRepository,
     deps.choiceRepository,
-    deps.canonRepository
+    deps.canonRepository,
+    deps.variableRepository
   );
   const creatorOnly = [authenticate(deps.sessionVerifier), requireCreator()];
 
@@ -194,7 +243,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
   app.post('/worlds/:id/validate', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
-    const validateWorld = new ValidateWorldUseCase(deps.worldRepository, deps.sceneRepository, deps.choiceRepository);
+    const validateWorld = new ValidateWorldUseCase(deps.worldRepository, deps.sceneRepository, deps.choiceRepository, deps.variableRepository);
     return validateWorld.execute({
       worldId: parseWorldId(params.id),
       creatorId: request.user!.userId,
@@ -217,7 +266,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
   const CreateSceneBody = z.object({
     chapterId: z.string().uuid().optional(),
     title: z.string().min(1).max(255),
-    prose: z.string().min(1),
+    prose: z.string().min(1).max(100000),
     isEnding: z.boolean().optional(),
   });
 
@@ -225,12 +274,13 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     const params = WorldParams.parse(request.params);
     const body = CreateSceneBody.parse(request.body);
     const createScene = new CreateSceneUseCase(deps.sceneRepository, deps.worldRepository, deps.chapterRepository);
-    const result = await createScene.execute({ worldId: params.id, ...body });
+    const result = await createScene.execute({ worldId: params.id, creatorId: request.user!.userId, ...body });
     return reply.code(201).send(result);
   });
 
   app.get('/worlds/:id/scenes', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(params.id), request.user!.userId);
     const scenes = await deps.sceneRepository.findByWorldId(parseWorldId(params.id));
     return scenes.map((s) => ({
       id: s.getSceneId().getValue(),
@@ -247,7 +297,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
   const UpdateSceneBody = z.object({
     title: z.string().min(1).max(255).optional(),
-    prose: z.string().min(1).optional(),
+    prose: z.string().min(1).max(100000).optional(),
     chapterId: z.string().uuid().optional(),
     isEnding: z.boolean().optional(),
     metadata: z.record(z.unknown()).optional(),
@@ -255,9 +305,9 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
   app.patch('/worlds/:id/scenes/:sceneId', { preHandler: creatorOnly }, async (request, reply) => {
     const body = UpdateSceneBody.parse(request.body);
-    const { sceneId } = request.params as { sceneId: string };
+    const { sceneId } = z.object({ sceneId: z.string().uuid() }).parse(request.params);
     const updateScene = new UpdateSceneUseCase(deps.sceneRepository, deps.worldRepository);
-    await updateScene.execute({ sceneId, ...body });
+    await updateScene.execute({ sceneId, creatorId: request.user!.userId, ...body });
     return reply.code(204).send();
   });
 
@@ -267,7 +317,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     const deleteScene = new DeleteSceneUseCase(deps.sceneRepository, deps.worldRepository);
     await deleteScene.execute({
       worldId: parseWorldId(params.id),
-      sceneId: new SceneId(sceneId),
+      sceneId: parseSceneId(sceneId),
       creatorId: request.user!.userId,
     });
     return reply.code(204).send();
@@ -292,7 +342,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       deps.sceneRepository,
       deps.worldRepository,
     );
-    const result = await createChoice.execute({ worldId: params.id, ...body });
+    const result = await createChoice.execute({ worldId: params.id, creatorId: request.user!.userId, ...body });
     return reply.code(201).send(result);
   });
 
@@ -302,7 +352,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     const deleteChoice = new DeleteChoiceUseCase(deps.choiceRepository, deps.worldRepository);
     await deleteChoice.execute({
       worldId: parseWorldId(params.id),
-      choiceId: new ChoiceId(choiceId),
+      choiceId: parseChoiceId(choiceId),
       creatorId: request.user!.userId,
     });
     return reply.code(204).send();
@@ -323,6 +373,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     const result = await updateChoice.execute({
       worldId: params.id,
       choiceId,
+      creatorId: request.user!.userId,
       ...body,
     });
     return reply.code(200).send(result);
@@ -350,6 +401,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
   app.get('/worlds/:id/characters', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(params.id), request.user!.userId);
     const characters = await deps.characterRepository.findByWorldId(parseWorldId(params.id));
     return characters.map((c) => ({
       id: c.getCharacterId().getValue(),
@@ -366,7 +418,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     const deleteCharacter = new DeleteCharacterUseCase(deps.characterRepository, deps.worldRepository);
     await deleteCharacter.execute({
       worldId: parseWorldId(params.id),
-      characterId: new CharacterId(characterId),
+      characterId: parseCharacterId(characterId),
       creatorId: request.user!.userId,
     });
     return reply.code(204).send();
@@ -391,6 +443,81 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     return reply.code(200).send(result);
   });
 
+  // --- World Variable Registry (Item B) ---
+  const CreateVariableBody = z.object({
+    name: z.string().min(1).max(64).regex(/^[a-z][a-z0-9_]*$/, { message: 'Name must start with a lowercase letter and contain only lowercase letters, digits, and underscores' }),
+    type: z.enum(['boolean', 'number', 'string']),
+    defaultValue: z.unknown().optional(),
+    label: z.string().min(1).max(128),
+    description: z.string().max(2000).nullable().optional(),
+    category: z.enum(['stat', 'inventory', 'relationship', 'flag', 'other']).optional(),
+  });
+
+  const UpdateVariableBody = z.object({
+    name: z.string().min(1).max(64).regex(/^[a-z][a-z0-9_]*$/).optional(),
+    label: z.string().min(1).max(128).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    defaultValue: z.unknown().optional(),
+    category: z.enum(['stat', 'inventory', 'relationship', 'flag', 'other']).optional(),
+  });
+
+  function toVariableJson(v: { getVariableId(): string; getName(): string; getType(): string; getDefaultValue(): unknown; getLabel(): string; getDescription(): string | null; getCategory(): string }) {
+    return {
+      id: v.getVariableId(),
+      name: v.getName(),
+      type: v.getType(),
+      defaultValue: v.getDefaultValue() ?? null,
+      label: v.getLabel(),
+      description: v.getDescription(),
+      category: v.getCategory(),
+    };
+  }
+
+  app.post('/worlds/:id/variables', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const body = CreateVariableBody.parse(request.body);
+    const createVariable = new CreateWorldVariableUseCase(deps.variableRepository, deps.worldRepository);
+    const result = await createVariable.execute({
+      worldId: params.id,
+      creatorId: request.user!.userId,
+      ...body,
+    });
+    return reply.code(201).send(result);
+  });
+
+  app.get('/worlds/:id/variables', { preHandler: creatorOnly }, async (request) => {
+    const params = WorldParams.parse(request.params);
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(params.id), request.user!.userId);
+    const variables = await deps.variableRepository.findByWorldId(parseWorldId(params.id));
+    return variables.map(toVariableJson);
+  });
+
+  app.patch('/worlds/:id/variables/:variableId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { variableId } = z.object({ variableId: z.string().uuid() }).parse(request.params);
+    const body = UpdateVariableBody.parse(request.body);
+    const updateVariable = new UpdateWorldVariableUseCase(deps.variableRepository, deps.worldRepository);
+    const result = await updateVariable.execute({
+      worldId: params.id,
+      variableId,
+      creatorId: request.user!.userId,
+      ...body,
+    });
+    return reply.code(200).send(result);
+  });
+
+  app.delete('/worlds/:id/variables/:variableId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { variableId } = z.object({ variableId: z.string().uuid() }).parse(request.params);
+    const deleteVariable = new DeleteWorldVariableUseCase(deps.variableRepository, deps.worldRepository);
+    await deleteVariable.execute({
+      worldId: params.id,
+      variableId,
+      creatorId: request.user!.userId,
+    });
+    return reply.code(204).send();
+  });
+
   // --- Chapters ---
   app.post('/worlds/:id/chapters', { preHandler: creatorOnly }, async (request, reply) => {
     const params = WorldParams.parse(request.params);
@@ -406,6 +533,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
   app.get('/worlds/:id/chapters', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(params.id), request.user!.userId);
     const chapters = await deps.chapterRepository.findByWorldId(parseWorldId(params.id));
     return chapters.map((c) => ({
       id: c.getChapterId().getValue(),
@@ -437,7 +565,14 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     const { v4: uuidv4 } = await import('uuid');
 
     await fs.mkdir(deps.mediaStoragePath, { recursive: true });
-    const ext = path.extname(file.filename || '.jpg');
+    // Derive extension from validated mimetype, not client filename (audit finding)
+    const extByMime: Record<string, string> = {
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/webp': '.webp',
+      'image/gif': '.gif',
+    };
+    const ext = extByMime[file.mimetype] ?? '.jpg';
     const filename = `${uuidv4()}${ext}`;
     const filepath = path.join(deps.mediaStoragePath, filename);
 
@@ -449,6 +584,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
   app.get('/worlds/:id/choices', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(params.id), request.user!.userId);
     const choices = await deps.choiceRepository.findByWorldId(parseWorldId(params.id));
     return choices.map((c) => ({
       id: c.getChoiceId().getValue(),
@@ -459,6 +595,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       conditions: c.getConditions() ?? null,
       mutations: c.getMutations() ?? null,
       sortOrder: c.getSortOrder(),
+      visibility: c.getVisibility(),
     }));
   });
 
@@ -559,6 +696,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
   app.get('/worlds/:id/narration/status', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
     const worldId = new WorldId(params.id);
+    await requireWorldOwnership(deps.worldRepository, worldId, request.user!.userId);
     const scenes = await deps.sceneRepository.findByWorldId(worldId);
     const status: Record<string, boolean> = {};
     for (const scene of scenes) {

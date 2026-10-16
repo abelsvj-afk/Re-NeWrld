@@ -72,6 +72,7 @@ export type Condition =
   | { op: 'lt'; var: string; value: number }
   | { op: 'lte'; var: string; value: number }
   | { op: 'has'; var: string }
+  | { op: 'truthy'; var: string }
   | { op: 'in'; var: string; values: JsonValue[] };
 
 const finiteNumber = z.number().finite();
@@ -92,6 +93,7 @@ export const ConditionSchema: z.ZodType<Condition> = z.lazy(() =>
     z.object({ op: z.literal('lt'), var: VarNameSchema, value: finiteNumber }).strict(),
     z.object({ op: z.literal('lte'), var: VarNameSchema, value: finiteNumber }).strict(),
     z.object({ op: z.literal('has'), var: VarNameSchema }).strict(),
+    z.object({ op: z.literal('truthy'), var: VarNameSchema }).strict(),
     z
       .object({
         op: z.literal('in'),
