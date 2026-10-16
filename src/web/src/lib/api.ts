@@ -178,6 +178,8 @@ export const worldsApi = {
     api<Array<{ id: string; name: string; roleTypes: string[]; description: string | null; attributes: Record<string, unknown> }>>(`/worlds/${worldId}/characters`),
   createCharacter: (worldId: string, input: { name: string; roleTypes: string[]; description?: string }) =>
     api<{ characterId: string }>(`/worlds/${worldId}/characters`, { method: 'POST', body: input }),
+  updateCharacter: (worldId: string, characterId: string, input: { name?: string; roleTypes?: string[]; description?: string | null; attributes?: Record<string, unknown> }) =>
+    api<{ characterId: string }>(`/worlds/${worldId}/characters/${characterId}`, { method: 'PATCH', body: input }),
   deleteCharacter: (worldId: string, characterId: string) =>
     api<void>(`/worlds/${worldId}/characters/${characterId}`, { method: 'DELETE' }),
   chapters: (worldId: string) =>
