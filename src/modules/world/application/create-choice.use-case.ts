@@ -16,6 +16,7 @@ export interface CreateChoiceInput {
   conditions?: unknown;
   mutations?: unknown;
   sortOrder?: number;
+  visibility?: 'hide' | 'show_locked';
 }
 
 export interface CreateChoiceOutput {
@@ -55,6 +56,7 @@ export class CreateChoiceUseCase {
       conditions: input.conditions as any,
       mutations: input.mutations as any,
       sortOrder: input.sortOrder ?? 0,
+      visibility: input.visibility ?? 'hide',
       createdAt: now,
       updatedAt: now,
     };

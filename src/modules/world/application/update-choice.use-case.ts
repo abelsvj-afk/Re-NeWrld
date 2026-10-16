@@ -14,6 +14,7 @@ export interface UpdateChoiceInput {
   conditions?: unknown;
   mutations?: unknown;
   sortOrder?: number;
+  visibility?: 'hide' | 'show_locked';
 }
 
 export interface UpdateChoiceOutput {
@@ -59,6 +60,9 @@ export class UpdateChoiceUseCase {
     }
     if (input.sortOrder !== undefined) {
       choice.updateSortOrder(input.sortOrder);
+    }
+    if (input.visibility !== undefined) {
+      choice.updateVisibility(input.visibility);
     }
 
     await this.choiceRepository.save(choice);

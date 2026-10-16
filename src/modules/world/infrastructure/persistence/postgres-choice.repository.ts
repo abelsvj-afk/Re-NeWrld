@@ -14,6 +14,7 @@ interface ChoiceRow {
   conditions: any;
   mutations: any;
   sort_order: number;
+  visibility: string;
   created_at: string | Date;
   updated_at: string | Date;
 }
@@ -28,7 +29,7 @@ interface ChoiceRow {
 export class PostgresChoiceRepository implements ChoiceRepositoryPort {
   public async findByWorldId(worldId: WorldId): Promise<Choice[]> {
     const result = await query<ChoiceRow>(
-      `SELECT choice_id, world_id, scene_id, target_scene_id, text, conditions, mutations, sort_order, created_at, updated_at
+      `SELECT choice_id, world_id, scene_id, target_scene_id, text, conditions, mutations, sort_order, visibility, created_at, updated_at
        FROM choices WHERE world_id = $1 ORDER BY sort_order ASC, created_at ASC`,
       [worldId.getValue()]
     );
@@ -38,7 +39,7 @@ export class PostgresChoiceRepository implements ChoiceRepositoryPort {
 
   public async findById(choiceId: ChoiceId): Promise<Choice | null> {
     const result = await query<ChoiceRow>(
-      `SELECT choice_id, world_id, scene_id, target_scene_id, text, conditions, mutations, sort_order, created_at, updated_at
+      `SELECT choice_id, world_id, scene_id, target_scene_id, text, conditions, mutations, sort_order, visibility, created_at, updated_at
        FROM choices WHERE choice_id = $1`,
       [choiceId.getValue()]
     );
@@ -48,14 +49,15 @@ export class PostgresChoiceRepository implements ChoiceRepositoryPort {
 
   public async save(choice: Choice): Promise<void> {
     await query(
-      `INSERT INTO choices (choice_id, world_id, scene_id, target_scene_id, text, conditions, mutations, sort_order, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO choices (choice_id, world_id, scene_id, target_scene_id, text, conditions, mutations, sort_order, visibility, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (choice_id) DO UPDATE SET
          text = EXCLUDED.text,
          target_scene_id = EXCLUDED.target_scene_id,
          conditions = EXCLUDED.conditions,
          mutations = EXCLUDED.mutations,
          sort_order = EXCLUDED.sort_order,
+         visibility = EXCLUDED.visibility,
          updated_at = EXCLUDED.updated_at`,
       [
         choice.getChoiceId().getValue(),
@@ -66,6 +68,7 @@ export class PostgresChoiceRepository implements ChoiceRepositoryPort {
         choice.getConditions() ? JSON.stringify(choice.getConditions()) : null,
         choice.getMutations() ? JSON.stringify(choice.getMutations()) : null,
         choice.getSortOrder(),
+        choice.getVisibility(),
         choice.getCreatedAt().toISOString(),
         choice.getUpdatedAt().toISOString(),
       ]
@@ -86,6 +89,7 @@ export class PostgresChoiceRepository implements ChoiceRepositoryPort {
       conditions: row.conditions,
       mutations: row.mutations,
       sortOrder: row.sort_order,
+      visibility: row.visibility as 'hide' | 'show_locked',
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
     };

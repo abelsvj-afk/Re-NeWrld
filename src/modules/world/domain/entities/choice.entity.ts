@@ -13,9 +13,12 @@ export interface ChoiceProps {
   conditions?: ConditionPayload;
   mutations?: MutationPayload;
   sortOrder?: number;
+  visibility?: ChoiceVisibility;
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+export type ChoiceVisibility = 'hide' | 'show_locked';
 
 export class Choice {
   private readonly choiceId: ChoiceId;
@@ -26,6 +29,7 @@ export class Choice {
   private conditions: ConditionPayload | undefined;
   private mutations: MutationPayload | undefined;
   private sortOrder: number;
+  private visibility: ChoiceVisibility;
   private readonly createdAt: Date;
   private updatedAt: Date;
 
@@ -54,6 +58,7 @@ export class Choice {
     this.conditions = structuredClone(validatedConditions);
     this.mutations = structuredClone(validatedMutations);
     this.sortOrder = order;
+    this.visibility = props.visibility ?? 'hide';
     this.createdAt = props.createdAt ? new Date(props.createdAt.getTime()) : new Date();
     this.updatedAt = props.updatedAt ? new Date(props.updatedAt.getTime()) : new Date();
   }
@@ -94,6 +99,10 @@ export class Choice {
     return this.sortOrder;
   }
 
+  public getVisibility(): ChoiceVisibility {
+    return this.visibility;
+  }
+
   public getCreatedAt(): Date {
     return new Date(this.createdAt.getTime());
   }
@@ -124,6 +133,14 @@ export class Choice {
   public updateMutations(mutations: MutationPayload): void {
     const validated = MutationSchema.parse(mutations);
     this.mutations = structuredClone(validated);
+    this.updatedAt = new Date();
+  }
+
+  public updateVisibility(visibility: ChoiceVisibility): void {
+    if (visibility !== 'hide' && visibility !== 'show_locked') {
+      throw new WorldValidationError('Choice visibility must be hide or show_locked');
+    }
+    this.visibility = visibility;
     this.updatedAt = new Date();
   }
 
