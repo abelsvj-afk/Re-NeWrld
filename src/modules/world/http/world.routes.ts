@@ -16,6 +16,7 @@ import { CreateSceneUseCase } from '../application/create-scene.use-case.js';
 import { ChapterRepositoryPort } from '../domain/ports/chapter.repository.port.js';
 import { UpdateSceneUseCase } from '../application/update-scene.use-case.js';
 import { CreateChoiceUseCase } from '../application/create-choice.use-case.js';
+import { UpdateChoiceUseCase } from '../application/update-choice.use-case.js';
 import { GenerateNarrationUseCase } from '../application/generate-narration.use-case.js';
 import { GetNarrationUseCase } from '../application/get-narration.use-case.js';
 import { WorldTaxonomyInputSchema } from '../domain/value-objects/world-schemas.js';
@@ -303,6 +304,25 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       creatorId: request.user!.userId,
     });
     return reply.code(204).send();
+  });
+
+  app.patch('/worlds/:id/choices/:choiceId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { choiceId } = z.object({ choiceId: z.string().uuid() }).parse(request.params);
+    const body = z.object({
+      text: z.string().min(1).max(500).optional(),
+      targetSceneId: z.string().uuid().optional(),
+      conditions: z.unknown().optional(),
+      mutations: z.unknown().optional(),
+      sortOrder: z.number().int().optional(),
+    }).parse(request.body);
+    const updateChoice = new UpdateChoiceUseCase(deps.choiceRepository, deps.sceneRepository, deps.worldRepository);
+    const result = await updateChoice.execute({
+      worldId: params.id,
+      choiceId,
+      ...body,
+    });
+    return reply.code(200).send(result);
   });
 
   // --- Characters (US-C03) ---
