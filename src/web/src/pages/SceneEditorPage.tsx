@@ -7,6 +7,7 @@ import type { Editor } from '@tiptap/react';
 import { worldsApi, ApiError, type SceneSummary, type ChoiceSummary } from '../lib/api';
 import { useAuth } from '../stores/auth';
 import { NarrationPanel } from '../components/NarrationPanel';
+import { FlowGraph } from '../components/FlowGraph';
 
 const TABS = ['Scene', 'Script', 'Flow', 'Assets'] as const;
 
@@ -436,6 +437,17 @@ export function SceneEditorPage() {
 
         {/* Main scene content */}
         <main className="flex-1 overflow-auto min-w-0 bg-[radial-gradient(ellipse_60%_40%_at_50%_0%,rgba(34,211,238,0.04),transparent)]">
+          {activeTab === 'Flow' ? (
+            <div className="h-full relative">
+              <FlowGraph
+                scenes={scenes}
+                choices={choices}
+                activeSceneId={activeSceneId}
+                startSceneId={startSceneId}
+                onSelectScene={(id) => { setActiveSceneId(id); setActiveTab('Scene'); }}
+              />
+            </div>
+          ) : (
           <div className="max-w-3xl mx-auto px-8 py-10">
             {error && <div className="bg-blood/10 border border-blood/25 rounded-xl p-4 text-blood text-sm mb-6">{error}</div>}
             {activeScene ? (
@@ -514,6 +526,7 @@ export function SceneEditorPage() {
               <div className="text-center py-24"><p className="font-prose text-2xl mb-3 text-ink-dim">Select a scene</p><p className="text-sm text-ink-faint">Choose from the project panel to begin editing.</p></div>
             )}
           </div>
+          )}
         </main>
 
         {/* Scene conditions */}
