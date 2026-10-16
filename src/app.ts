@@ -224,20 +224,54 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
 
   // Serve the React SPA (Phase H). API routes take precedence; unmatched
   // GETs fall through to index.html for client-side routing.
+  //
+  // Path resolution: derive from __dirname (CommonJS), not process.cwd(),
+  // so the fallback works regardless of where the process is started from.
+  // In production: dist/app.js -> ../src/web/dist. In dev: src/app.ts -> ./web/dist.
   const path = await import('node:path');
   const fs = await import('node:fs');
-  const webDist = path.join(process.cwd(), 'src/web/dist');
+  // __dirname is available in CommonJS output; fall back to cwd if undefined (ESM dev)
+  const baseDir = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
+  const candidates = [
+    path.join(baseDir, '..', 'src', 'web', 'dist'), // prod: dist/ -> src/web/dist
+    path.join(baseDir, 'web', 'dist'),              // dev: src/ -> src/web/dist
+    path.join(process.cwd(), 'src', 'web', 'dist'),   // fallback: cwd
+  ];
+  const webDist = candidates.find((c) => fs.existsSync(path.join(c, 'index.html')));
   // Serve uploaded media (cover art, scene illustrations)
   const fastifyStatic = (await import('@fastify/static')).default;
   await fs.promises.mkdir(env.MEDIA_STORAGE_PATH, { recursive: true }).catch(() => {});
   await app.register(fastifyStatic, { root: env.MEDIA_STORAGE_PATH, prefix: '/media/' });
-  if (fs.existsSync(path.join(webDist, 'index.html'))) {
+  if (webDist) {
     await app.register(fastifyStatic, { root: webDist, prefix: '/', decorateReply: false });
+    const indexPath = path.join(webDist, 'index.html');
+    // Pre-read index.html to avoid sendFile root conflicts
+    let indexHtml: string | null = null;
+    try {
+      indexHtml = await fs.promises.readFile(indexPath, 'utf-8');
+    } catch {
+      // If unreadable, fall through to 404s
+    }
     app.setNotFoundHandler((req, reply) => {
-      if (req.raw.method === 'GET' && !req.raw.url?.startsWith('/api')) {
-        return reply.sendFile('index.html');
+      const url = req.raw.url ?? '';
+      // API routes: JSON 404
+      if (url.startsWith('/api')) {
+        return reply.code(404).send({ error: 'Not found' });
       }
-      reply.code(404).send({ error: 'Not found' });
+      // Only GETs fall through to the SPA
+      if (req.raw.method !== 'GET') {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+      // Asset-like paths (with file extension) are missing files, not routes
+      const pathname = url.split('?')[0];
+      if (path.extname(pathname) !== '') {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+      // Client-side route: serve the SPA
+      if (indexHtml !== null) {
+        return reply.type('text/html').send(indexHtml);
+      }
+      return reply.code(404).send({ error: 'Not found' });
     });
   }
 

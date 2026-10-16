@@ -79,6 +79,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Auto-create checkpoints at chapter boundaries; allow rewind from completed sessions
 - Move draft-revert after validation; add ownership to GET routes; trustProxy; password-reset race fix
 - Frontend: visibility round-trip, startSceneId DTO, save prose sync, new-scene stub
+- Fix SPA deep-link 404: robust dist path resolution via __dirname, pre-read index.html, 5 regression tests
 
 ### Security
 - scrypt password hashing (N=16384, r=8, p=1, 64-byte key, per-hash salt, timing-safe verify).
