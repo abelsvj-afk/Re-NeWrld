@@ -18,6 +18,7 @@ import { UpdateSceneUseCase } from '../application/update-scene.use-case.js';
 import { CreateChoiceUseCase } from '../application/create-choice.use-case.js';
 import { GenerateNarrationUseCase } from '../application/generate-narration.use-case.js';
 import { GetNarrationUseCase } from '../application/get-narration.use-case.js';
+import { WorldTaxonomyInputSchema } from '../domain/value-objects/world-schemas.js';
 import { ListPublishedWorldsUseCase } from '../application/list-published-worlds.use-case.js';
 import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
 import { ElevenLabsClient, proseToPlainText, sha256Hex } from '../infrastructure/elevenlabs.client.js';
@@ -46,6 +47,19 @@ const CreateWorldBody = z.object({
   title: z.string().min(1, { message: 'Title is required' }).max(255),
   description: z.string().max(10000).nullable().optional(),
   metadata: WorldMetadataSchema.optional(),
+}).superRefine((body, ctx) => {
+  // Strict taxonomy validation on write (unknown genre → 400).
+  if (body.metadata !== undefined) {
+    const result = WorldTaxonomyInputSchema.safeParse({
+      genre: (body.metadata as Record<string, unknown>).genre,
+      tags: (body.metadata as Record<string, unknown>).tags,
+    });
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        ctx.addIssue({ ...issue, path: ['metadata', ...(issue.path as (string | number)[])] });
+      }
+    }
+  }
 });
 
 const UpdateWorldBody = z.object({
@@ -53,6 +67,18 @@ const UpdateWorldBody = z.object({
   description: z.string().max(10000).nullable().optional(),
   metadata: WorldMetadataSchema.optional(),
   startSceneId: z.string().uuid({ message: 'Invalid start scene id' }).nullable().optional(),
+}).superRefine((body, ctx) => {
+  if (body.metadata !== undefined) {
+    const result = WorldTaxonomyInputSchema.safeParse({
+      genre: (body.metadata as Record<string, unknown>).genre,
+      tags: (body.metadata as Record<string, unknown>).tags,
+    });
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        ctx.addIssue({ ...issue, path: ['metadata', ...(issue.path as (string | number)[])] });
+      }
+    }
+  }
 });
 
 function parseWorldId(raw: string): WorldId {
