@@ -114,16 +114,35 @@ const worldTaxonomySchema = z.object({
 // applies transforms (trim/lowercase) that the base record side does not —
 // Zod intersections cannot merge differing outputs. Instead, validate and
 // normalize taxonomy keys in a transform after base validation.
+//
+// Backward compatibility: genre values predating the closed enum are
+// tolerated on READ (coerced to uncategorized) so existing worlds never
+// become unloadable. Strict enum validation applies on WRITE paths
+// (create/update request bodies parsed separately).
 export const WorldMetadataSchema = worldMetadataBaseSchema.transform((obj) => {
   const result: Record<string, unknown> = { ...obj };
   if (result.genre !== undefined) {
-    result.genre = WorldGenreSchema.parse(result.genre);
+    const parsed = WorldGenreSchema.safeParse(result.genre);
+    if (parsed.success) {
+      result.genre = parsed.data;
+    } else {
+      // Unknown legacy genre: drop the key rather than fail the read.
+      delete result.genre;
+    }
   }
   if (result.tags !== undefined) {
-    result.tags = z.array(WorldTagSchema).max(10, { message: 'Cannot exceed 10 tags' }).parse(result.tags);
+    const parsed = z.array(WorldTagSchema).max(10, { message: 'Cannot exceed 10 tags' }).safeParse(result.tags);
+    if (parsed.success) {
+      result.tags = parsed.data;
+    } else {
+      delete result.tags;
+    }
   }
   return result as z.infer<typeof worldTaxonomySchema> & Record<string, unknown>;
 });
+
+/** Strict write-path validation for taxonomy input (create/update). */
+export const WorldTaxonomyInputSchema = worldTaxonomySchema;
 
 export type ConditionPayload = z.infer<typeof ConditionSchema>;
 export type MutationPayload = z.infer<typeof MutationSchema>;
