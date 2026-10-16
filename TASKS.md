@@ -455,6 +455,21 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
   - **Acceptance Criteria**: Toggle visible only for `role === 'creator'`; switching updates preference + navigates; `/` redirects creators with reader-preference to `/read` (one-way, no loops); explicit `/creator` navigation always shows studio; corrupted localStorage values fall back to role default; refresh preserves view.
   - **Required Tests**: Unit tests for view-mode helpers (get/set/validation/clear).
   - **Definition of Done**: Creator can toggle views, refresh safely, no redirect loops. Live UX Gate on deployed URL.
+
+- **Task H-UX4: Creator Studio audit fix batch** [APPROVED 2026-10-15]
+  - **Phase**: Phase H (API/Frontend) — Level 2
+  - **Scope**: Fix concrete issues from 2026-10-15 Creator Studio gap audit:
+    1. Narrator voices dropdown stuck on "Loading voices…" (no loading/error distinction)
+    2. PublishPage "Back to Editor" doesn't navigate
+    3. Chapter orphaning (random UUID sent; made chapterId optional)
+    4. Password reset UI (backend exists; add LoginPage link + request/confirm forms)
+    5. Scene deletion (backend endpoint + UI)
+    6. Choice deletion + editing (backend endpoints + UI)
+    7. Dry-run validation (separate Validate from Publish)
+  - **Out of scope**: Character management (US-C03), preview mode (US-C06), condition editor — need design first.
+  - **File Scope**: `src/web/src/components/NarrationPanel.tsx`, `src/web/src/pages/PublishPage.tsx`, `src/web/src/pages/SceneEditorPage.tsx`, `src/web/src/pages/LoginPage.tsx`, `src/web/src/lib/api.ts`, `src/modules/world/http/world.routes.ts`, `src/modules/world/application/` (new use cases)
+  - **Acceptance Criteria**: Each fix verified individually; no regressions (337+ unit tests passing).
+  - **Definition of Done**: All 7 items complete. Live UX Gate on deployed URL.
 - **Task H1a: Implement Auth & Session REST API Controllers and Zod Validation**
   - **Phase**: Phase H (API/Frontend)
   - **Prerequisites**: Task C3, Task F1
