@@ -237,6 +237,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       title: s.getTitle(),
       prose: s.getProse(),
       isEnding: s.getIsEnding(),
+      metadata: s.getMetadata(),
       createdAt: s.getCreatedAt().toISOString(),
       updatedAt: s.getUpdatedAt().toISOString(),
     }));
@@ -247,6 +248,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     prose: z.string().min(1).optional(),
     chapterId: z.string().uuid().optional(),
     isEnding: z.boolean().optional(),
+    metadata: z.record(z.unknown()).optional(),
   });
 
   app.patch('/worlds/:id/scenes/:sceneId', { preHandler: creatorOnly }, async (request, reply) => {

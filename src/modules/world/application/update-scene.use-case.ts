@@ -12,6 +12,7 @@ export interface UpdateSceneInput {
   prose?: string;
   chapterId?: string;
   isEnding?: boolean;
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -39,6 +40,7 @@ export class UpdateSceneUseCase {
     if (input.prose !== undefined) scene.updateProse(input.prose);
     if (input.chapterId !== undefined) scene.updateChapterId(new ChapterId(input.chapterId));
     if (input.isEnding !== undefined) scene.setIsEnding(input.isEnding);
+    if (input.metadata !== undefined) scene.updateMetadata(input.metadata as Record<string, any>);
 
     await this.sceneRepository.save(scene);
   }

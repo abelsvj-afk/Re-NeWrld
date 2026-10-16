@@ -121,6 +121,7 @@ export interface SceneSummary {
   title: string;
   prose: string;
   isEnding: boolean;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ChoiceSummary {
