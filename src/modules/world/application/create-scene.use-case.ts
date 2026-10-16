@@ -9,6 +9,7 @@ import { SceneRepositoryPort } from '../domain/ports/scene.repository.port.js';
 import { WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
 import { ChapterRepositoryPort } from '../domain/ports/chapter.repository.port.js';
 import { WorldNotFoundError } from '../domain/errors/world.errors.js';
+import { UserId } from '../../auth/domain/value-objects/user-id.value-object.js';
 
 export interface CreateSceneInput {
   worldId: string;
@@ -16,6 +17,7 @@ export interface CreateSceneInput {
   title: string;
   prose: string;
   isEnding?: boolean;
+  creatorId: UserId;
 }
 
 export interface CreateSceneOutput {
@@ -61,12 +63,8 @@ export class CreateSceneUseCase {
   public async execute(input: CreateSceneInput): Promise<CreateSceneOutput> {
     const worldId = new WorldId(input.worldId);
     const world = await this.worldRepository.findById(worldId);
-    if (!world) throw new WorldNotFoundError(input.worldId);
-    // Allow adding scenes to published worlds — this reverts to draft
-    // so the creator can republish as a new version.
-    if (world.getStatus().getValue() === 'published') {
-      world.revertToDraft();
-      await this.worldRepository.save(world);
+    if (!world || !world.getCreatorId().equals(input.creatorId)) {
+      throw new WorldNotFoundError(input.worldId);
     }
 
     const chapterId = await this.resolveChapterId(worldId, input.chapterId);
@@ -83,7 +81,16 @@ export class CreateSceneUseCase {
       createdAt: now,
       updatedAt: now,
     };
+    // Validate entity BEFORE reverting world — failed validation must not mutate world status
     const scene = Scene.create(props);
+
+    // Allow adding scenes to published worlds — this reverts to draft
+    // so the creator can republish as a new version.
+    if (world.getStatus().getValue() === 'published') {
+      world.revertToDraft();
+      await this.worldRepository.save(world);
+    }
+
     await this.sceneRepository.save(scene);
     return { sceneId: scene.getSceneId().getValue() };
   }

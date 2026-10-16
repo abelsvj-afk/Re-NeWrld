@@ -47,6 +47,9 @@ function isFiniteNumber(v: unknown): v is number {
 
 export function evaluateCondition(condition: Condition, state: SessionState): boolean {
   switch (condition.op) {
+    case 'truthy':
+      // Item A: bare {{#if variable}} — JavaScript truthiness semantics
+      return hasKey(state, condition.var) && !!state[condition.var];
     case 'and':
       // Non-empty guaranteed by the grammar.
       return condition.conditions.every((c) => evaluateCondition(c, state));

@@ -12,9 +12,13 @@ import {
   type GrammarMarkerInfo,
 } from '../../world/application/index.js';
 import { evaluateCondition, type SessionState as EvalState } from '../domain/services/condition-evaluator.js';
+import { parseProseTemplate, renderProseTemplate, hasTemplateSyntax } from '../../world/domain/services/prose-template.js';
 import { StartReaderSessionUseCase } from '../application/start-reader-session.use-case.js';
 import { GetReaderSessionUseCase } from '../application/get-reader-session.use-case.js';
 import { SubmitChoiceUseCase } from '../application/submit-choice.use-case.js';
+import { RewindToCheckpointUseCase } from '../application/rewind-to-checkpoint.use-case.js';
+import { CheckpointRepositoryPort } from '../domain/ports/checkpoint.repository.port.js';
+import { WorldVariableRepositoryPort } from '../../world/domain/ports/world-variable.repository.port.js';
 import { SessionRepositoryPort } from '../domain/ports/session.repository.port.js';
 import { IdempotencyRepositoryPort } from '../domain/ports/idempotency.repository.port.js';
 import { ReaderSession } from '../domain/entities/reader-session.entity.js';
@@ -25,6 +29,8 @@ export interface SessionRouteDeps {
   worldRepository: WorldRepositoryPort;
   canonRepository: CanonRepositoryPort;
   idempotencyRepository: IdempotencyRepositoryPort;
+  checkpointRepository: CheckpointRepositoryPort;
+  variableRepository?: WorldVariableRepositoryPort;
   sessionVerifier: SessionVerifier;
 }
 
@@ -188,11 +194,25 @@ function toSessionJson(session: ReaderSession, canonData?: { scenes: Array<{ sce
     })
     .filter((c) => c !== null);
 
+  // Item A: render state-reactive prose templates
+  let sceneText = scene?.prose ?? '';
+  if (sceneText && hasTemplateSyntax(sceneText)) {
+    try {
+      const parsed = parseProseTemplate(sceneText);
+      sceneText = renderProseTemplate(parsed, {
+        variables: session.getStateVariables() as Record<string, unknown>,
+        evaluateCondition: (condition, state) => evaluateCondition(condition as any, state as EvalState),
+      });
+    } catch {
+      // On render error, fall back to raw prose (parse errors caught at save/publish time)
+    }
+  }
+
   return {
     id: session.getSessionId().getValue(),
     worldId: session.getWorldId().getValue(),
     currentSceneId,
-    sceneText: scene?.prose ?? '',
+    sceneText,
     sceneTitle: scene?.title ?? '',
     sceneMetadata: scene?.metadata ?? {},
     isEnding: scene?.is_ending ?? false,
@@ -218,13 +238,15 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
   const startSession = new StartReaderSessionUseCase(
     deps.worldRepository,
     deps.canonRepository,
-    deps.sessionRepository
+    deps.sessionRepository,
+    deps.variableRepository
   );
   const getSession = new GetReaderSessionUseCase(deps.sessionRepository);
   const submitChoice = new SubmitChoiceUseCase(
     deps.sessionRepository,
     deps.canonRepository,
-    deps.idempotencyRepository
+    deps.idempotencyRepository,
+    deps.checkpointRepository
   );
 
   app.post(
@@ -282,6 +304,41 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
         return { variable: m.var, operation: m.op, value: m.value, displayText: formatMutationDisplay({ op: m.op, var: m.var, value: m.value }) };
       });
       return reply.code(200).send(sessionJson);
+    }
+  );
+
+  // --- Checkpoints (Item D) ---
+  app.get(
+    '/sessions/:id/checkpoints',
+    { preHandler: [authenticate(deps.sessionVerifier), requireReader()] },
+    async (request) => {
+      const params = SessionParams.parse(request.params);
+      const session = await deps.sessionRepository.findById(parseSessionId(params.id));
+      if (!session || !session.getReaderId().equals(request.user!.userId)) {
+        return [];
+      }
+      const checkpoints = await deps.checkpointRepository.findBySessionId(params.id);
+      return checkpoints.map((c) => ({
+        id: c.checkpointId,
+        chapterTitle: c.chapterTitle,
+        createdAt: c.createdAt.toISOString(),
+      }));
+    }
+  );
+
+  app.post(
+    '/sessions/:id/rewind',
+    { preHandler: [authenticate(deps.sessionVerifier), requireReader()] },
+    async (request, reply) => {
+      const params = SessionParams.parse(request.params);
+      const body = z.object({ checkpointId: z.string().uuid() }).parse(request.body);
+      const rewind = new RewindToCheckpointUseCase(deps.sessionRepository, deps.checkpointRepository);
+      const result = await rewind.execute({
+        sessionId: params.id,
+        checkpointId: body.checkpointId,
+        readerId: request.user!.userId,
+      });
+      return reply.code(200).send(result);
     }
   );
 }

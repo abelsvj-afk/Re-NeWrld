@@ -2,6 +2,7 @@ import { WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
 import { SceneRepositoryPort } from '../domain/ports/scene.repository.port.js';
 import { ChoiceRepositoryPort } from '../domain/ports/choice.repository.port.js';
 import { CanonRepositoryPort } from '../domain/ports/canon.repository.port.js';
+import { WorldVariableRepositoryPort } from '../domain/ports/world-variable.repository.port.js';
 import { World } from '../domain/entities/world.entity.js';
 import { Scene } from '../domain/entities/scene.entity.js';
 import { Choice } from '../domain/entities/choice.entity.js';
@@ -98,7 +99,8 @@ export class PublishWorldUseCase {
     private readonly worlds: WorldRepositoryPort,
     private readonly scenes: SceneRepositoryPort,
     private readonly choices: ChoiceRepositoryPort,
-    private readonly canon: CanonRepositoryPort
+    private readonly canon: CanonRepositoryPort,
+    private readonly variables?: WorldVariableRepositoryPort
   ) {}
 
   public async execute(command: PublishWorldCommand): Promise<PublishWorldResult> {
@@ -125,6 +127,27 @@ export class PublishWorldUseCase {
       });
     }
 
+    // Item B: warn on conditions/mutations referencing unregistered variables
+    const variableWarnings: string[] = [];
+    if (this.variables) {
+      const registered = await this.variables.findByWorldId(world.getWorldId());
+      const registeredNames = new Set(registered.map((v) => v.getName()));
+      const referencedNames = new Set<string>();
+      for (const choice of choices) {
+        for (const name of extractVariableNames(choice.getConditions())) {
+          referencedNames.add(name);
+        }
+        for (const name of extractVariableNames(choice.getMutations())) {
+          referencedNames.add(name);
+        }
+      }
+      for (const name of referencedNames) {
+        if (!registeredNames.has(name)) {
+          variableWarnings.push(`Variable "${name}" is used in conditions/mutations but not registered in the variable registry`);
+        }
+      }
+    }
+
     const parsed = CanonDataSchema.safeParse(buildCanonData(world, scenes, choices));
     if (!parsed.success) {
       // Server-side invariant violation: our own validated entities
@@ -143,7 +166,33 @@ export class PublishWorldUseCase {
       await this.canon.insert(snapshot, tx);
       world.publish();
       await this.worlds.save(world, tx);
-      return { snapshot, warnings: graph.unreachable };
+      return { snapshot, warnings: [...graph.unreachable, ...variableWarnings] };
     });
   }
+}
+
+/**
+ * Recursively extract variable names from condition/mutation payloads.
+ * Looks for "var" keys in the JSON structure.
+ */
+function extractVariableNames(payload: unknown): string[] {
+  const names: string[] = [];
+  function walk(node: unknown): void {
+    if (node === null || node === undefined) return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (typeof node === 'object') {
+      const obj = node as Record<string, unknown>;
+      if (typeof obj.var === 'string') {
+        names.push(obj.var);
+      }
+      for (const value of Object.values(obj)) {
+        walk(value);
+      }
+    }
+  }
+  walk(payload);
+  return names;
 }

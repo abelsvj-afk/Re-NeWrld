@@ -7,6 +7,7 @@ import { ChoiceRepositoryPort } from '../domain/ports/choice.repository.port.js'
 import { SceneRepositoryPort } from '../domain/ports/scene.repository.port.js';
 import { WorldRepositoryPort } from '../domain/ports/world.repository.port.js';
 import { WorldNotFoundError, SceneNotFoundError } from '../domain/errors/world.errors.js';
+import { UserId } from '../../auth/domain/value-objects/user-id.value-object.js';
 
 export interface CreateChoiceInput {
   worldId: string;
@@ -17,6 +18,7 @@ export interface CreateChoiceInput {
   mutations?: unknown;
   sortOrder?: number;
   visibility?: 'hide' | 'show_locked';
+  creatorId: UserId;
 }
 
 export interface CreateChoiceOutput {
@@ -37,14 +39,21 @@ export class CreateChoiceUseCase {
   public async execute(input: CreateChoiceInput): Promise<CreateChoiceOutput> {
     const worldId = new WorldId(input.worldId);
     const world = await this.worldRepository.findById(worldId);
-    if (!world) throw new WorldNotFoundError(input.worldId);
-    if (world.getStatus().getValue() === 'published') {
-      world.revertToDraft();
-      await this.worldRepository.save(world);
+    if (!world || !world.getCreatorId().equals(input.creatorId)) {
+      throw new WorldNotFoundError(input.worldId);
     }
 
     const scene = await this.sceneRepository.findById(new SceneId(input.sceneId));
     if (!scene) throw new SceneNotFoundError(input.sceneId);
+    if (!scene.getWorldId().equals(worldId)) {
+      throw new SceneNotFoundError(input.sceneId);
+    }
+
+    const targetScene = await this.sceneRepository.findById(new SceneId(input.targetSceneId));
+    if (!targetScene) throw new SceneNotFoundError(input.targetSceneId);
+    if (!targetScene.getWorldId().equals(worldId)) {
+      throw new SceneNotFoundError(input.targetSceneId);
+    }
 
     const now = new Date();
     const props: ChoiceProps = {
@@ -60,7 +69,14 @@ export class CreateChoiceUseCase {
       createdAt: now,
       updatedAt: now,
     };
+    // Validate entity BEFORE reverting world
     const choice = Choice.create(props);
+
+    if (world.getStatus().getValue() === 'published') {
+      world.revertToDraft();
+      await this.worldRepository.save(world);
+    }
+
     await this.choiceRepository.save(choice);
     return { choiceId: choice.getChoiceId().getValue() };
   }
