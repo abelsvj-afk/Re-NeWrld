@@ -71,12 +71,46 @@ export function SceneEditorPage() {
   const [newChoiceText, setNewChoiceText] = useState('');
   const [newChoiceTarget, setNewChoiceTarget] = useState('');
   const [creatingChoice, setCreatingChoice] = useState(false);
+  const [editingChoice, setEditingChoice] = useState<{ id: string; text: string; targetSceneId: string } | null>(null);
+  const [editChoiceText, setEditChoiceText] = useState('');
+  const [editChoiceTarget, setEditChoiceTarget] = useState('');
+  const [savingChoiceEdit, setSavingChoiceEdit] = useState(false);
   const [newCondVar, setNewCondVar] = useState('');
   const [newCondOp, setNewCondOp] = useState('eq');
   const [newCondVal, setNewCondVal] = useState('');
   const [newMutVar, setNewMutVar] = useState('');
   const [newMutOp, setNewMutOp] = useState('set');
   const [newMutVal, setNewMutVal] = useState('');
+  const [uploadingIllustration, setUploadingIllustration] = useState(false);
+
+  const handleIllustrationUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeScene) return;
+    setUploadingIllustration(true);
+    setError(null);
+    try {
+      const res = await worldsApi.uploadMedia(worldId, file);
+      const metadata = { ...(activeScene.metadata ?? {}), illustrationUrl: res.url };
+      await worldsApi.updateScene(worldId, activeScene.id, { metadata });
+      setScenes((prev) => prev.map((s) => s.id === activeScene.id ? { ...s, metadata } : s));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Upload failed');
+    } finally {
+      setUploadingIllustration(false);
+    }
+  };
+
+  const removeIllustration = async () => {
+    if (!activeScene) return;
+    const metadata = { ...(activeScene.metadata ?? {}) };
+    delete metadata.illustrationUrl;
+    try {
+      await worldsApi.updateScene(worldId, activeScene.id, { metadata });
+      setScenes((prev) => prev.map((s) => s.id === activeScene.id ? { ...s, metadata } : s));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to remove illustration');
+    }
+  };
   const [worldTitle, setWorldTitle] = useState('');
 
   const activeScene = scenes.find((s) => s.id === activeSceneId) ?? null;
@@ -254,6 +288,25 @@ export function SceneEditorPage() {
       setError(err instanceof ApiError ? err.message : 'Failed to delete choice');
     } finally {
       setDeletingChoiceId(null);
+    }
+  };
+
+  const saveChoiceEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingChoice) return;
+    setSavingChoiceEdit(true);
+    setError(null);
+    try {
+      await worldsApi.updateChoice(worldId, editingChoice.id, {
+        text: editChoiceText.trim(),
+        targetSceneId: editChoiceTarget,
+      });
+      setChoices((prev) => prev.map((c) => c.id === editingChoice.id ? { ...c, text: editChoiceText.trim(), targetSceneId: editChoiceTarget } : c));
+      setEditingChoice(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to update choice');
+    } finally {
+      setSavingChoiceEdit(false);
     }
   };
 
@@ -483,6 +536,21 @@ export function SceneEditorPage() {
                     </div>
                     <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Scene title" className="bg-transparent font-prose text-3xl md:text-4xl tracking-tight focus:outline-none w-full placeholder:text-ink-faint/50 border-b border-transparent focus:border-arcane/30 pb-2 transition-colors" />
                   </div>
+                  {/* Scene illustration */}
+                  <div className="mb-6">
+                    {(activeScene.metadata?.illustrationUrl as string | undefined) ? (
+                      <div className="relative group">
+                        <img src={activeScene.metadata!.illustrationUrl as string} alt="Scene illustration" className="w-full max-h-64 object-cover rounded-xl border border-edge" />
+                        <button onClick={removeIllustration} className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 bg-black/70 text-white text-xs px-3 py-1.5 rounded-lg transition-opacity">Remove</button>
+                      </div>
+                    ) : (
+                      <label className="block border border-dashed border-edge rounded-xl p-6 text-center cursor-pointer hover:border-arcane/50 transition-colors">
+                        <span className="text-sm text-ink-dim">{uploadingIllustration ? 'Uploading…' : '＋ Add scene illustration'}</span>
+                        <span className="block text-[11px] text-ink-faint mt-1">Image shown at the top of this scene for readers</span>
+                        <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={handleIllustrationUpload} disabled={uploadingIllustration} className="hidden" />
+                      </label>
+                    )}
+                  </div>
                   <div className="bg-panel/40 border border-edge/60 rounded-2xl mb-8 overflow-hidden">
                     <EditorToolbar editor={editor} />
                     <div className="p-8"><EditorContent editor={editor} /></div>
@@ -512,6 +580,13 @@ export function SceneEditorPage() {
                           <div className="flex items-start gap-4">
                             <span className="w-8 h-8 rounded-lg bg-ember/10 border border-ember/25 text-ember text-sm font-bold flex items-center justify-center shrink-0">{i + 1}</span>
                             <div className="flex-1 min-w-0"><p className="text-[15px] leading-relaxed mb-1">{c.text}</p><p className="text-xs text-ink-faint">→ {scenes.find((s) => s.id === c.targetSceneId)?.title ?? 'Unlinked'}</p></div>
+                            <button
+                              onClick={() => { setEditingChoice({ id: c.id, text: c.text, targetSceneId: c.targetSceneId }); setEditChoiceText(c.text); setEditChoiceTarget(c.targetSceneId); }}
+                              aria-label="Edit choice"
+                              className="opacity-0 group-hover:opacity-100 text-ink-faint hover:text-arcane text-sm px-1 transition-all shrink-0"
+                            >
+                              ✎
+                            </button>
                             <button
                               onClick={() => deleteChoice(c.id)}
                               aria-label="Delete choice"
@@ -650,6 +725,34 @@ export function SceneEditorPage() {
               <div className="flex gap-3 pt-2">
                 <button type="button" onClick={() => setShowNewChoice(false)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
                 <button type="submit" disabled={creatingChoice || !newChoiceText.trim() || !newChoiceTarget} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-ember to-[#d97706] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-amber">{creatingChoice ? 'Creating…' : 'Create Choice'}</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+
+      {editingChoice && activeScene && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setEditingChoice(null)}>
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} onClick={(e) => e.stopPropagation()} className="w-full max-w-md bg-panel border border-edge rounded-2xl p-8 shadow-panel">
+            <h3 className="font-prose text-2xl mb-1">Edit Choice</h3>
+            <p className="text-sm text-ink-dim mb-6">From <span className="text-ink font-medium">{activeScene.title}</span></p>
+            <form onSubmit={saveChoiceEdit} className="space-y-4">
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Choice text</label>
+                <input value={editChoiceText} onChange={(e) => setEditChoiceText(e.target.value)} required autoFocus className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink placeholder:text-ink-faint/60 focus:border-ember focus:outline-none focus:ring-2 focus:ring-ember/20 transition-all" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-[0.2em] text-ink-faint mb-2 font-medium">Leads to</label>
+                <select value={editChoiceTarget} onChange={(e) => setEditChoiceTarget(e.target.value)} required className="w-full bg-abyss border border-edge rounded-xl px-4 py-3 text-ink focus:border-ember focus:outline-none focus:ring-2 focus:ring-ember/20 transition-all">
+                  <option value="">Select a scene…</option>
+                  {scenes.filter((s) => s.id !== activeSceneId).map((s) => (
+                    <option key={s.id} value={s.id}>{s.title}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setEditingChoice(null)} className="flex-1 px-4 py-3 rounded-xl border border-edge text-ink-dim hover:border-edge-2 hover:text-ink transition-all text-sm font-medium">Cancel</button>
+                <button type="submit" disabled={savingChoiceEdit || !editChoiceText.trim() || !editChoiceTarget} className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-ember to-[#d97706] text-void font-semibold hover:brightness-110 disabled:opacity-50 transition-all text-sm shadow-glow-amber">{savingChoiceEdit ? 'Saving…' : 'Save Changes'}</button>
               </div>
             </form>
           </motion.div>
