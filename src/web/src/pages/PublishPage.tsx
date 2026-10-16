@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams } from '@tanstack/react-router';
+import { useParams, useNavigate } from '@tanstack/react-router';
 import { motion, AnimatePresence } from 'framer-motion';
 import { worldsApi, ApiError } from '../lib/api';
 
@@ -13,6 +13,7 @@ interface ValidationResult {
 
 export function PublishPage() {
   const { worldId } = useParams({ strict: false }) as { worldId: string };
+  const navigate = useNavigate();
   const [step, setStep] = useState<Step>('idle');
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [publishResult, setPublishResult] = useState<{ versionNumber: number } | null>(null);
@@ -38,10 +39,15 @@ export function PublishPage() {
   const runValidation = async () => {
     setStep('validating');
     setError(null);
-    // Validation happens server-side during publish; we do a dry check
-    // by attempting publish and catching validation errors.
-    // For MVP, validation and publish are one step.
-    await publish();
+    setResult(null);
+    try {
+      const res = await worldsApi.validate(worldId);
+      setResult({ passed: res.valid, warnings: res.warnings, blockers: res.blockers });
+      setStep('review');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Validation failed');
+      setStep('idle');
+    }
   };
 
   const publish = async () => {
@@ -54,12 +60,11 @@ export function PublishPage() {
       setStep('done');
     } catch (err) {
       if (err instanceof ApiError && err.status === 422) {
-        // PublishingValidationError — parse blockers from message
         setResult({ passed: false, warnings: [], blockers: [err.message] });
         setStep('failed');
       } else {
         setError(err instanceof ApiError ? err.message : 'Publish failed');
-        setStep('idle');
+        setStep('review');
       }
     }
   };
@@ -102,7 +107,7 @@ export function PublishPage() {
                 onClick={runValidation}
                 className="bg-arcane text-void font-semibold rounded-xl px-8 py-3.5 hover:bg-arcane/90 transition shadow-glow-cyan"
               >
-                Validate & Publish
+                Validate World
               </button>
               {error && <p className="text-blood mt-4">{error}</p>}
             </motion.div>
@@ -120,6 +125,70 @@ export function PublishPage() {
               <p className="text-ink-dim">
                 {step === 'validating' ? 'Validating world graph…' : 'Publishing snapshot…'}
               </p>
+            </motion.div>
+          )}
+
+          {step === 'review' && result && (
+            <motion.div
+              key="review"
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="glass rounded-2xl p-10"
+            >
+              <div className="text-center mb-8">
+                <div className={`w-20 h-20 mx-auto mb-6 rounded-full border-2 flex items-center justify-center ${result.passed ? 'border-emerald-400/50 bg-emerald-400/10' : 'border-blood/40 bg-blood/10'}`}>
+                  <span className={`text-3xl ${result.passed ? 'text-emerald-300' : 'text-blood'}`}>{result.passed ? '✓' : '✕'}</span>
+                </div>
+                <h2 className="text-2xl font-semibold mb-2">{result.passed ? 'Validation Passed' : 'Validation Failed'}</h2>
+                <p className="text-ink-dim">
+                  {result.passed
+                    ? 'Your world is ready. Publishing creates an immutable snapshot.'
+                    : 'Fix the issues below, then re-validate.'}
+                </p>
+              </div>
+
+              {result.blockers.length > 0 && (
+                <div className="bg-blood/10 border border-blood/20 rounded-xl p-5 mb-4">
+                  <h3 className="text-sm font-semibold text-blood mb-2">Blockers ({result.blockers.length})</h3>
+                  <ul className="text-sm text-ink-dim space-y-1">
+                    {result.blockers.map((b, i) => <li key={i}>• {b}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {result.warnings.length > 0 && (
+                <div className="bg-ember/10 border border-ember/20 rounded-xl p-5 mb-4">
+                  <h3 className="text-sm font-semibold text-ember mb-2">Warnings ({result.warnings.length})</h3>
+                  <ul className="text-sm text-ink-dim space-y-1">
+                    {result.warnings.map((w, i) => <li key={i}>• {w}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              <div className="flex gap-3 mt-8">
+                <button
+                  onClick={() => navigate({ to: '/creator/worlds/$worldId/scenes', params: { worldId } })}
+                  className="flex-1 border border-edge rounded-xl px-6 py-3.5 text-sm hover:border-arcane/50 hover:text-arcane transition"
+                >
+                  Back to Editor
+                </button>
+                {result.passed ? (
+                  <button
+                    onClick={publish}
+                    className="flex-1 bg-gradient-to-r from-arcane to-[#0ea5c4] text-void font-semibold rounded-xl px-6 py-3.5 hover:brightness-110 transition shadow-glow-cyan"
+                  >
+                    Publish Now
+                  </button>
+                ) : (
+                  <button
+                    onClick={runValidation}
+                    className="flex-1 border border-arcane/40 text-arcane rounded-xl px-6 py-3.5 text-sm font-medium hover:bg-arcane/10 transition"
+                  >
+                    Re-validate
+                  </button>
+                )}
+              </div>
             </motion.div>
           )}
 
@@ -181,7 +250,7 @@ export function PublishPage() {
                 </ul>
               </div>
               <button
-                onClick={() => setStep('idle')}
+                onClick={() => navigate({ to: '/creator/worlds/$worldId/scenes', params: { worldId } })}
                 className="mt-6 w-full border border-edge rounded-xl px-6 py-3 text-sm hover:border-arcane/50 hover:text-arcane transition"
               >
                 Back to Editor
