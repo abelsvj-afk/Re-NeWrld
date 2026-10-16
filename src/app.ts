@@ -219,7 +219,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   await fs.promises.mkdir(env.MEDIA_STORAGE_PATH, { recursive: true }).catch(() => {});
   await app.register(fastifyStatic, { root: env.MEDIA_STORAGE_PATH, prefix: '/media/' });
   if (fs.existsSync(path.join(webDist, 'index.html'))) {
-    await app.register(fastifyStatic, { root: webDist, prefix: '/' });
+    await app.register(fastifyStatic, { root: webDist, prefix: '/', decorateReply: false });
     app.setNotFoundHandler((req, reply) => {
       if (req.raw.method === 'GET' && !req.raw.url?.startsWith('/api')) {
         return reply.sendFile('index.html');
