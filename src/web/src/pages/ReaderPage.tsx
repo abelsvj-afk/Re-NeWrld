@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { sessionsApi, worldsApi, ApiError, WORLD_GENRES, type SessionState, type PublishedWorld } from '../lib/api';
 import { useAuth } from '../stores/auth';
+import { ViewToggle } from '../components/ViewToggle';
 import { NarrationPlayer } from '../components/NarrationPlayer';
 import { useParams, useNavigate } from '@tanstack/react-router';
 
@@ -142,7 +143,7 @@ export function ReaderPage() {
               <span>←</span> Library
             </button>
             <div className="flex items-center gap-3">
-              {user?.role === 'creator' && <button onClick={() => navigate({ to: '/creator' })} className="text-xs font-medium px-3 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-ink transition">✦ Creator Studio</button>}
+              <ViewToggle current="reader" />
               {becomeCreatorButton}
               <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
             </div>
@@ -193,7 +194,7 @@ export function ReaderPage() {
             <div><h1 className="text-[15px] font-bold tracking-tight leading-none">Re<span className="text-arcane">:</span>NeWrld</h1><p className="text-[11px] text-ink-faint mt-0.5">Reader</p></div>
           </div>
           <div className="flex items-center gap-3">
-            {user?.role === 'creator' && <button onClick={() => navigate({ to: '/creator' })} className="text-xs font-medium px-3 py-2 rounded-lg border border-edge text-ink-dim hover:border-arcane/50 hover:text-ink transition">✦ Creator Studio</button>}
+            <ViewToggle current="reader" />
             {becomeCreatorButton}
             <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
           </div>
