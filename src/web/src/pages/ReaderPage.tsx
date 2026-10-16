@@ -37,6 +37,9 @@ export function ReaderPage() {
   const narrationAudioRef = useRef<HTMLAudioElement | null>(null);
   const [confirmUpgrade, setConfirmUpgrade] = useState(false);
   const [showWelcomeToast, setShowWelcomeToast] = useState(false);
+  const [showInventory, setShowInventory] = useState(false);
+  const [inventoryTab, setInventoryTab] = useState<'stats' | 'inventory' | 'relationships'>('stats');
+  const [toasts, setToasts] = useState<Array<{ id: string; text: string }>>([]);
 
   const handleBecomeCreator = async () => {
     if (upgrading) return;
@@ -128,6 +131,18 @@ export function ReaderPage() {
     try {
       const next = await sessionsApi.choose(session.id, choiceId, session.version, newIdempotencyKey());
       setSession(next);
+      // Show consequence cue toasts for applied mutations (Item F)
+      if (next.mutationsApplied && next.mutationsApplied.length > 0) {
+        const newToasts = next.mutationsApplied.map((m) => ({
+          id: `${Date.now()}-${m.variable}`,
+          text: m.displayText,
+        }));
+        setToasts((prev) => [...prev, ...newToasts]);
+        // Auto-dismiss after 4s
+        setTimeout(() => {
+          setToasts((prev) => prev.filter((t) => !newToasts.some((nt) => nt.id === t.id)));
+        }, 4000);
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         const fresh = await sessionsApi.get(session.id);
@@ -151,6 +166,11 @@ export function ReaderPage() {
               <span>←</span> Library
             </button>
             <div className="flex items-center gap-3">
+              {session && (
+                <button onClick={() => setShowInventory(true)} className="text-sm text-ink-dim hover:text-arcane transition flex items-center gap-2" title="Character sheet & inventory" aria-label="Open character sheet">
+                  <span>🎒</span>
+                </button>
+              )}
               <ViewToggle current="reader" />
               {becomeCreatorButton}
               <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition">Sign out</button>
@@ -183,12 +203,16 @@ export function ReaderPage() {
                 <div className="space-y-3">
                   <p className="text-[11px] uppercase tracking-[0.25em] text-ink-faint font-medium mb-4">Choose your path</p>
                   {session.choices.map((c, i) => (
-                    <motion.button key={c.id} initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.15 + i * 0.08 }} onClick={() => choose(c.id)} disabled={choosing !== null}
-                      className="w-full text-left group relative bg-panel/60 border border-edge/70 rounded-2xl p-5 hover:border-arcane/40 hover:bg-panel transition-all disabled:opacity-50 disabled:cursor-wait overflow-hidden">
-                      <div className="absolute inset-0 bg-gradient-to-r from-arcane/[0.06] to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+                    <motion.button key={c.id} initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.15 + i * 0.08 }} onClick={() => !c.locked && choose(c.id)} disabled={choosing !== null || c.locked}
+                      aria-disabled={c.locked}
+                      className={`w-full text-left group relative rounded-2xl p-5 transition-all overflow-hidden ${c.locked ? 'bg-panel/30 border border-edge/40 cursor-not-allowed opacity-60' : 'bg-panel/60 border border-edge/70 hover:border-arcane/40 hover:bg-panel disabled:opacity-50 disabled:cursor-wait'}`}>
+                      <div className={`absolute inset-0 bg-gradient-to-r from-arcane/[0.06] to-transparent opacity-0 ${!c.locked && 'group-hover:opacity-100'} transition-opacity pointer-events-none`} />
                       <div className="relative flex items-center gap-4">
-                        <span className="w-8 h-8 rounded-lg bg-arcane/10 border border-arcane/20 text-arcane text-sm font-semibold flex items-center justify-center shrink-0">{i + 1}</span>
-                        <span className="flex-1 text-[15px] leading-relaxed">{c.text}</span>
+                        <span className={`w-8 h-8 rounded-lg border text-sm font-semibold flex items-center justify-center shrink-0 ${c.locked ? 'bg-edge/20 border-edge/30 text-ink-faint' : 'bg-arcane/10 border-arcane/20 text-arcane'}`}>{c.locked ? '🔒' : i + 1}</span>
+                        <span className="flex-1">
+                          <span className="block text-[15px] leading-relaxed">{c.text}</span>
+                          {c.locked && c.lockReason && <span className="block text-xs text-ink-faint mt-1">🔒 {c.lockReason}</span>}
+                        </span>
                         {choosing === c.id && <span className="w-4 h-4 border-2 border-arcane/30 border-t-arcane rounded-full animate-spin shrink-0" />}
                       </div>
                     </motion.button>
@@ -199,6 +223,74 @@ export function ReaderPage() {
           )}
         </main>
         <CreatorWelcomeToast show={showWelcomeToast} />
+
+        {/* Inventory / Character Sheet Drawer */}
+        <AnimatePresence>
+          {showInventory && session && (
+            <>
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowInventory(false)} className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm" />
+              <motion.aside initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 30, stiffness: 300 }} className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-md bg-panel border-l border-edge shadow-2xl flex flex-col" role="dialog" aria-label="Character sheet and inventory">
+                <div className="flex items-center justify-between p-6 border-b border-edge/60">
+                  <h2 className="font-prose text-xl">Character Sheet</h2>
+                  <button onClick={() => setShowInventory(false)} className="text-ink-faint hover:text-ink transition text-xl" aria-label="Close">✕</button>
+                </div>
+                <div className="flex gap-2 p-4 border-b border-edge/40">
+                  {(['stats', 'inventory', 'relationships'] as const).map((tab) => (
+                    <button key={tab} onClick={() => setInventoryTab(tab)} className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition ${inventoryTab === tab ? 'bg-arcane/15 text-arcane border border-arcane/30' : 'text-ink-dim hover:text-ink border border-transparent'}`}>
+                      {tab === 'stats' ? '📊 Stats' : tab === 'inventory' ? '🎒 Inventory' : '💭 Relations'}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex-1 overflow-y-auto p-6">
+                  {(() => {
+                    const vars = session.variables || {};
+                    const entries = Object.entries(vars);
+                    if (entries.length === 0) {
+                      return <p className="text-ink-faint text-sm text-center py-8">No variables tracked yet.<br />Your choices will shape your story.</p>;
+                    }
+                    // Categorize: numbers → stats, booleans/strings → inventory, rel_* → relationships
+                    const stats = entries.filter(([k, v]) => typeof v === 'number');
+                    const inventory = entries.filter(([k, v]) => (typeof v === 'boolean' && v === true) || (typeof v === 'string' && !k.startsWith('rel_')));
+                    const relationships = entries.filter(([k]) => k.startsWith('rel_') || k.startsWith('trust_') || k.startsWith('rep_'));
+
+                    const display = inventoryTab === 'stats' ? stats : inventoryTab === 'inventory' ? inventory : relationships;
+
+                    if (display.length === 0) {
+                      const emptyMsg = inventoryTab === 'stats' ? 'No stats tracked yet.' : inventoryTab === 'inventory' ? 'No items acquired yet.' : 'No relationships tracked yet.';
+                      return <p className="text-ink-faint text-sm text-center py-8">{emptyMsg}</p>;
+                    }
+
+                    return (
+                      <div className="space-y-3">
+                        {display.map(([key, value]) => (
+                          <div key={key} className="flex items-center justify-between bg-abyss/40 border border-edge/40 rounded-xl px-4 py-3">
+                            <span className="text-sm text-ink-dim capitalize">{key.replace(/_/g, ' ')}</span>
+                            <span className="text-sm font-semibold text-ink">
+                              {typeof value === 'boolean' ? (value ? '✓' : '—') : String(value)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </motion.aside>
+            </>
+          )}
+        </AnimatePresence>
+
+        {/* Toast notifications for consequence cues (Item F) */}
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center pointer-events-none" aria-live="polite">
+          <AnimatePresence>
+            {toasts.map((toast) => (
+              <motion.div key={toast.id} initial={{ opacity: 0, y: 20, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 10, scale: 0.95 }} className="bg-panel border border-arcane/30 rounded-xl px-5 py-3 shadow-2xl flex items-center gap-3 pointer-events-auto">
+                <span className="text-arcane">✦</span>
+                <span className="text-sm text-ink font-medium">{toast.text}</span>
+                <button onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))} className="text-ink-faint hover:text-ink ml-2" aria-label="Dismiss">✕</button>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
       </div>
     );
   }
