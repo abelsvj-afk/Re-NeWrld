@@ -114,6 +114,9 @@ export function SceneEditorPage() {
   };
 
   const [characters, setCharacters] = useState<Array<{ id: string; name: string; roleTypes: string[]; description: string | null }>>([]);
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewSceneId, setPreviewSceneId] = useState<string | null>(null);
+  const [previewPath, setPreviewPath] = useState<string[]>([]);
   const [showNewCharacter, setShowNewCharacter] = useState(false);
   const [newCharName, setNewCharName] = useState('');
   const [newCharRole, setNewCharRole] = useState('protagonist');
@@ -123,6 +126,25 @@ export function SceneEditorPage() {
   const [deletingChoiceId, setDeletingChoiceId] = useState<string | null>(null);
   const [startSceneId, setStartSceneId] = useState<string | null>(null);
   const [settingStart, setSettingStart] = useState(false);
+
+  const startPreview = () => {
+    const startId = startSceneId ?? scenes[0]?.id ?? null;
+    setPreviewSceneId(startId);
+    setPreviewPath(startId ? [startId] : []);
+    setShowPreview(true);
+  };
+
+  const previewChoose = (targetSceneId: string) => {
+    setPreviewSceneId(targetSceneId);
+    setPreviewPath((prev) => [...prev, targetSceneId]);
+  };
+
+  const previewBack = () => {
+    if (previewPath.length <= 1) return;
+    const newPath = previewPath.slice(0, -1);
+    setPreviewPath(newPath);
+    setPreviewSceneId(newPath[newPath.length - 1]);
+  };
 
   const createCharacter = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -282,6 +304,7 @@ export function SceneEditorPage() {
           <div className="flex items-center gap-2">
             <span className="text-xs text-ink-faint mr-2 hidden sm:block">{saving ? 'Saving…' : 'Saved'}</span>
             <button onClick={save} disabled={saving} className="text-[13px] font-medium px-4 py-2 rounded-xl border border-edge bg-panel text-ink-dim hover:border-arcane/40 hover:text-arcane transition-all disabled:opacity-50">Save</button>
+            <button onClick={startPreview} className="text-[13px] font-medium px-4 py-2 rounded-xl border border-edge bg-panel text-ink-dim hover:border-emerald-400/40 hover:text-emerald-300 transition-all" title="Test your story paths before publishing">▶ Preview</button>
             <button onClick={() => navigate({ to: '/creator/worlds/$worldId/publish', params: { worldId } })} className="text-[13px] font-semibold px-4 py-2 rounded-xl bg-gradient-to-r from-arcane to-[#0ea5c4] text-void hover:brightness-110 transition-all shadow-glow-cyan">Publish</button>
             <button onClick={logout} className="text-xs text-ink-faint hover:text-blood transition ml-2">Sign out</button>
           </div>
@@ -503,6 +526,89 @@ export function SceneEditorPage() {
           </motion.div>
         </div>
       )}
+
+      {showPreview && (() => {
+        const scene = scenes.find((s) => s.id === previewSceneId);
+        const sceneChoices = choices.filter((c) => c.sceneId === previewSceneId);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm" onClick={() => setShowPreview(false)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-2xl max-h-[85vh] overflow-auto bg-abyss border border-edge rounded-2xl shadow-panel"
+            >
+              <div className="sticky top-0 bg-abyss/95 backdrop-blur border-b border-edge/60 px-6 py-4 flex items-center justify-between">
+                <div>
+                  <p className="text-[10px] uppercase tracking-[0.25em] text-emerald-300/80 font-semibold">Preview Mode</p>
+                  <p className="text-xs text-ink-faint mt-0.5">Testing draft — no progress is saved</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={previewBack}
+                    disabled={previewPath.length <= 1}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-edge text-ink-dim hover:text-ink disabled:opacity-40 transition"
+                  >
+                    ← Back
+                  </button>
+                  <button
+                    onClick={startPreview}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-edge text-ink-dim hover:text-ink transition"
+                  >
+                    ↺ Restart
+                  </button>
+                  <button
+                    onClick={() => setShowPreview(false)}
+                    className="text-xs px-3 py-1.5 rounded-lg bg-panel text-ink-dim hover:text-ink transition"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+              <div className="p-8">
+                {!scene ? (
+                  <p className="text-ink-faint text-center py-12">No scenes to preview. Create a scene first.</p>
+                ) : (
+                  <>
+                    <h2 className="font-prose text-3xl mb-6">{scene.title}</h2>
+                    {scene.isEnding && (
+                      <div className="mb-6 px-4 py-3 rounded-xl bg-ember/10 border border-ember/25 text-ember text-sm font-medium">
+                        ◆ Ending reached — path complete ({previewPath.length} scenes)
+                      </div>
+                    )}
+                    <div
+                      className="prose prose-invert max-w-none mb-8 text-[17px] leading-relaxed"
+                      dangerouslySetInnerHTML={{ __html: scene.prose }}
+                    />
+                    {sceneChoices.length > 0 ? (
+                      <div className="space-y-3">
+                        <p className="text-[11px] uppercase tracking-[0.25em] text-ink-faint font-semibold">What do you do?</p>
+                        {sceneChoices.map((c, i) => (
+                          <button
+                            key={c.id}
+                            onClick={() => previewChoose(c.targetSceneId)}
+                            className="w-full text-left px-5 py-4 rounded-xl border border-edge/70 bg-panel/40 hover:border-arcane/40 hover:bg-arcane/[0.06] transition-all group"
+                          >
+                            <span className="text-arcane text-sm font-bold mr-3">{i + 1}</span>
+                            <span className="text-[15px] group-hover:text-ink">{c.text}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : !scene.isEnding ? (
+                      <div className="px-4 py-3 rounded-xl bg-blood/10 border border-blood/25 text-blood text-sm">
+                        ⚠ Dead end — this scene has no choices and isn't marked as an ending.
+                      </div>
+                    ) : null}
+                    <div className="mt-8 pt-4 border-t border-edge/40">
+                      <p className="text-[11px] text-ink-faint">Path: {previewPath.length} scene{previewPath.length !== 1 ? 's' : ''} visited</p>
+                    </div>
+                  </>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        );
+      })()}
 
       {showNewCharacter && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowNewCharacter(false)}>
