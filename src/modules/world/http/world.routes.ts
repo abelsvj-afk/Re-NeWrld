@@ -20,6 +20,11 @@ import { GenerateNarrationUseCase } from '../application/generate-narration.use-
 import { GetNarrationUseCase } from '../application/get-narration.use-case.js';
 import { WorldTaxonomyInputSchema } from '../domain/value-objects/world-schemas.js';
 import { ListPublishedWorldsUseCase } from '../application/list-published-worlds.use-case.js';
+import { DeleteSceneUseCase } from '../application/delete-scene.use-case.js';
+import { DeleteChoiceUseCase } from '../application/delete-choice.use-case.js';
+import { ValidateWorldUseCase } from '../application/validate-world.use-case.js';
+import { SceneId } from '../domain/value-objects/scene-id.value-object.js';
+import { ChoiceId } from '../domain/value-objects/choice-id.value-object.js';
 import { NarrationRepositoryPort } from '../domain/ports/narration.repository.port.js';
 import { ElevenLabsClient, proseToPlainText, sha256Hex } from '../infrastructure/elevenlabs.client.js';
 import { SessionVerifier } from '../../auth/domain/ports/session.port.js';
@@ -178,8 +183,16 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     return reply.code(204).send();
   });
 
-  app.post('/worlds/:id/publish', { preHandler: creatorOnly }, async (request, reply) => {
+  app.post('/worlds/:id/validate', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
+    const validateWorld = new ValidateWorldUseCase(deps.worldRepository, deps.sceneRepository, deps.choiceRepository);
+    return validateWorld.execute({
+      worldId: parseWorldId(params.id),
+      creatorId: request.user!.userId,
+    });
+  });
+
+  app.post('/worlds/:id/publish', { preHandler: creatorOnly }, async (request, reply) => {    const params = WorldParams.parse(request.params);
     const result = await publishWorld.execute({
       worldId: parseWorldId(params.id),
       creatorId: request.user!.userId,
@@ -193,7 +206,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
   // --- Scenes (Phase H, H1b) ---
   const CreateSceneBody = z.object({
-    chapterId: z.string().uuid(),
+    chapterId: z.string().uuid().optional(),
     title: z.string().min(1).max(255),
     prose: z.string().min(1),
     isEnding: z.boolean().optional(),
@@ -237,6 +250,18 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     return reply.code(204).send();
   });
 
+  app.delete('/worlds/:id/scenes/:sceneId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { sceneId } = z.object({ sceneId: z.string().uuid() }).parse(request.params);
+    const deleteScene = new DeleteSceneUseCase(deps.sceneRepository, deps.worldRepository);
+    await deleteScene.execute({
+      worldId: parseWorldId(params.id),
+      sceneId: new SceneId(sceneId),
+      creatorId: request.user!.userId,
+    });
+    return reply.code(204).send();
+  });
+
   // --- Choices (Phase H, H1b) ---
   const CreateChoiceBody = z.object({
     sceneId: z.string().uuid(),
@@ -257,6 +282,18 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     );
     const result = await createChoice.execute({ worldId: params.id, ...body });
     return reply.code(201).send(result);
+  });
+
+  app.delete('/worlds/:id/choices/:choiceId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { choiceId } = z.object({ choiceId: z.string().uuid() }).parse(request.params);
+    const deleteChoice = new DeleteChoiceUseCase(deps.choiceRepository, deps.worldRepository);
+    await deleteChoice.execute({
+      worldId: parseWorldId(params.id),
+      choiceId: new ChoiceId(choiceId),
+      creatorId: request.user!.userId,
+    });
+    return reply.code(204).send();
   });
 
   app.get('/worlds/:id/choices', { preHandler: creatorOnly }, async (request) => {
