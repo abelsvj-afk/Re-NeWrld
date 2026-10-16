@@ -218,7 +218,7 @@ export interface SessionState {
 
 export const sessionsApi = {
   start: (worldId: string) =>
-    api<SessionState>('/sessions', { method: 'POST', body: { worldId } }),
+    api<SessionState>(`/worlds/${worldId}/sessions`, { method: 'POST' }),
   get: (id: string) => api<SessionState>(`/sessions/${id}`),
   choose: (id: string, choiceId: string, version: number, idempotencyKey: string) =>
     api<SessionState>(`/sessions/${id}/choices`, {
