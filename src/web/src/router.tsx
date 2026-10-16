@@ -7,6 +7,7 @@ import {
   redirect,
 } from '@tanstack/react-router';
 import { useAuth } from './stores/auth';
+import { getViewMode } from './lib/view-mode';
 import { LoginPage } from './pages/LoginPage';
 import { ReaderPage } from './pages/ReaderPage';
 import { CreatorDashboard } from './pages/CreatorDashboard';
@@ -52,7 +53,15 @@ const signinRoute = createRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  beforeLoad: requireAuth,
+  beforeLoad: () => {
+    requireAuth();
+    // H-UX3: creators who chose Reader view land on /read (one-way redirect,
+    // no loop — /read never redirects back). Explicit /creator always shows studio.
+    const { user, loading } = useAuth.getState();
+    if (!loading && user?.role === 'creator' && getViewMode() === 'reader') {
+      throw redirect({ to: '/read' });
+    }
+  },
   component: function Index() {
     const { user, loading } = useAuth();
     if (loading) return <div className="min-h-screen bg-void flex items-center justify-center"><div className="text-ink-dim animate-pulse">Loading…</div></div>;
