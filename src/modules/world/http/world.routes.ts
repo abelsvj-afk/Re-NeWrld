@@ -281,6 +281,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     conditions: z.unknown().optional(),
     mutations: z.unknown().optional(),
     sortOrder: z.number().int().optional(),
+    visibility: z.enum(['hide', 'show_locked']).optional(),
   });
 
   app.post('/worlds/:id/choices', { preHandler: creatorOnly }, async (request, reply) => {
@@ -316,6 +317,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       conditions: z.unknown().optional(),
       mutations: z.unknown().optional(),
       sortOrder: z.number().int().optional(),
+      visibility: z.enum(['hide', 'show_locked']).optional(),
     }).parse(request.body);
     const updateChoice = new UpdateChoiceUseCase(deps.choiceRepository, deps.sceneRepository, deps.worldRepository);
     const result = await updateChoice.execute({
