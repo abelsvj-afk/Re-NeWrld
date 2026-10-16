@@ -70,14 +70,28 @@ export function CreatorDashboard() {
     return Object.keys(metadata).length > 0 ? metadata : undefined;
   };
 
+  // Edit variant: merges with the world's existing metadata so other keys
+  // survive, and explicitly deletes genre/tags when the user clears them.
+  const buildEditMetadata = (base: Record<string, unknown> | undefined, genre: string, tagsInput: string) => {
+    const metadata: Record<string, unknown> = { ...(base ?? {}) };
+    if (genre) metadata.genre = genre; else delete metadata.genre;
+    const tags = parseTags(tagsInput);
+    if (tags.length > 0) metadata.tags = tags; else delete metadata.tags;
+    return metadata;
+  };
+
   const saveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingWorld || !editTitle.trim() || savingEdit) return;
     setSavingEdit(true);
     try {
-      const metadata = buildMetadata(editGenre, editTags);
-      await worldsApi.update(editingWorld.id, { title: editTitle.trim(), description: editDesc.trim() || undefined, metadata });
-      setWorlds((prev) => prev.map((w) => w.id === editingWorld.id ? { ...w, title: editTitle.trim(), description: editDesc.trim(), metadata: metadata ?? w.metadata } : w));
+      const metadata = buildEditMetadata(
+        editingWorld.metadata as Record<string, unknown> | undefined,
+        editGenre,
+        editTags
+      );
+      await worldsApi.update(editingWorld.id, { title: editTitle.trim(), description: editDesc.trim() || undefined, metadata: metadata as { genre?: string; tags?: string[] } });
+      setWorlds((prev) => prev.map((w) => w.id === editingWorld.id ? { ...w, title: editTitle.trim(), description: editDesc.trim(), metadata } : w));
       setEditingWorld(null);
     } catch (err) { setError(err instanceof ApiError ? err.message : 'Failed to update world'); }
     finally { setSavingEdit(false); }
