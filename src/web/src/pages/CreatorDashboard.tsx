@@ -232,7 +232,13 @@ export function CreatorDashboard() {
                 <motion.div key={w.id} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(i * 0.06, 0.4), duration: 0.5 }} className="group relative bg-panel/60 border border-edge/70 rounded-2xl overflow-hidden hover:border-edge-2 transition-all hover:shadow-panel">
                   <div className={`absolute inset-0 bg-gradient-to-r ${GRADIENTS[i % GRADIENTS.length]} opacity-60 pointer-events-none`} />
                   <div className="relative p-6 flex items-center gap-6">
-                    <div className="w-16 h-16 rounded-2xl bg-abyss border border-edge flex items-center justify-center text-3xl shrink-0 shadow-panel">📖</div>
+                    <div className="w-16 h-16 rounded-2xl bg-abyss border border-edge flex items-center justify-center text-3xl shrink-0 shadow-panel overflow-hidden">
+                      {(w.metadata as any)?.coverArtUrl ? (
+                        <img src={(w.metadata as any).coverArtUrl} alt={`${w.title} cover`} className="w-full h-full object-cover" />
+                      ) : (
+                        <>📖</>
+                      )}
+                    </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-3 mb-1.5 flex-wrap"><h3 className="text-lg font-semibold tracking-tight truncate">{w.title}</h3><StatusBadge status={w.status} /></div>
                       <p className="text-sm text-ink-dim line-clamp-1 mb-1">{w.description || 'No description yet.'}</p>
