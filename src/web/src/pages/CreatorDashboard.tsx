@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { worldsApi, ApiError, type WorldSummary } from '../lib/api';
 import { useAuth } from '../stores/auth';
 import { TaxonomyInputs, parseTags } from '../components/TaxonomyInputs';
+import { ViewToggle } from '../components/ViewToggle';
 
 const NAV = [
   { label: 'Dashboard', icon: '◈', active: true, action: 'dashboard' as const },
@@ -182,6 +183,7 @@ export function CreatorDashboard() {
               <h2 className="font-prose text-2xl lg:text-3xl tracking-tight">Active Worlds</h2>
             </div>
             <div className="flex items-center gap-3">
+              <ViewToggle current="creator" />
               <div className="relative hidden sm:block">
                 <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search worlds…" className="bg-panel border border-edge rounded-xl pl-10 pr-4 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:border-arcane focus:outline-none focus:ring-2 focus:ring-arcane/20 w-60 transition-all" />
                 <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-faint text-sm">⌕</span>
