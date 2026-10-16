@@ -28,8 +28,9 @@ interface RequestOptions {
 }
 
 export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const hasBody = opts.body !== undefined;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
     ...opts.headers,
   };
 
@@ -37,7 +38,7 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
     method: opts.method ?? 'GET',
     headers,
     credentials: 'include',
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    body: hasBody ? JSON.stringify(opts.body) : undefined,
   });
 
   if (res.status === 204) return undefined as T;
