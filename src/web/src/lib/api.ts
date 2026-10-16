@@ -133,6 +133,7 @@ export interface ChoiceSummary {
   conditions: unknown;
   mutations: unknown;
   sortOrder: number;
+  visibility: 'hide' | 'show_locked';
 }
 
 export const worldsApi = {
@@ -182,6 +183,14 @@ export const worldsApi = {
     api<{ characterId: string }>(`/worlds/${worldId}/characters/${characterId}`, { method: 'PATCH', body: input }),
   deleteCharacter: (worldId: string, characterId: string) =>
     api<void>(`/worlds/${worldId}/characters/${characterId}`, { method: 'DELETE' }),
+  variables: (worldId: string) =>
+    api<Array<{ id: string; name: string; type: string; defaultValue: unknown; label: string; description: string | null; category: string }>>(`/worlds/${worldId}/variables`),
+  createVariable: (worldId: string, input: { name: string; type: string; defaultValue?: unknown; label: string; description?: string | null; category?: string }) =>
+    api<{ variableId: string }>(`/worlds/${worldId}/variables`, { method: 'POST', body: input }),
+  updateVariable: (worldId: string, variableId: string, input: { name?: string; label?: string; description?: string | null; defaultValue?: unknown; category?: string }) =>
+    api<{ variableId: string }>(`/worlds/${worldId}/variables/${variableId}`, { method: 'PATCH', body: input }),
+  deleteVariable: (worldId: string, variableId: string) =>
+    api<void>(`/worlds/${worldId}/variables/${variableId}`, { method: 'DELETE' }),
   chapters: (worldId: string) =>
     api<Array<{ id: string; title: string; sortOrder: number }>>(`/worlds/${worldId}/chapters`),
   createChapter: (worldId: string, title: string) =>
@@ -263,5 +272,12 @@ export const sessionsApi = {
       method: 'POST',
       body: { choiceId, expectedVersion: version },
       headers: { 'X-Idempotency-Key': idempotencyKey },
+    }),
+  checkpoints: (id: string) =>
+    api<Array<{ id: string; chapterTitle: string; createdAt: string }>>(`/sessions/${id}/checkpoints`),
+  rewind: (id: string, checkpointId: string) =>
+    api<{ version: number }>(`/sessions/${id}/rewind`, {
+      method: 'POST',
+      body: { checkpointId },
     }),
 };
