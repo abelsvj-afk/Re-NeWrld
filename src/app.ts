@@ -1,4 +1,5 @@
 import Fastify, { FastifyInstance, RawServerDefault, RawRequestDefaultExpression, RawReplyDefaultExpression } from 'fastify';
+import multipart from '@fastify/multipart';
 import pino from 'pino';
 import crypto from 'crypto';
 import { ZodError } from 'zod';
@@ -129,6 +130,11 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
     });
   }
 
+  // Multipart for media uploads (cover art, scene illustrations)
+  await app.register(multipart, {
+    limits: { fileSize: 10 * 1024 * 1024, files: 1 }, // 10MB max
+  });
+
   // CORS: only when a browser frontend origin is configured (Phase H).
   // Unset CORS_ORIGIN = no CORS headers (API-only mode).
   if (env.CORS_ORIGIN) {
@@ -181,6 +187,7 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       narrationRepository,
       elevenLabs,
       narrationStoragePath: env.NARRATION_STORAGE_PATH,
+      mediaStoragePath: env.MEDIA_STORAGE_PATH,
       narrationMonthlyCharCap: env.NARRATION_MONTHLY_CHAR_CAP,
       choiceRepository,
       characterRepository,
@@ -207,8 +214,11 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   const path = await import('node:path');
   const fs = await import('node:fs');
   const webDist = path.join(process.cwd(), 'src/web/dist');
+  // Serve uploaded media (cover art, scene illustrations)
+  const fastifyStatic = (await import('@fastify/static')).default;
+  await fs.promises.mkdir(env.MEDIA_STORAGE_PATH, { recursive: true }).catch(() => {});
+  await app.register(fastifyStatic, { root: env.MEDIA_STORAGE_PATH, prefix: '/media/' });
   if (fs.existsSync(path.join(webDist, 'index.html'))) {
-    const fastifyStatic = (await import('@fastify/static')).default;
     await app.register(fastifyStatic, { root: webDist, prefix: '/' });
     app.setNotFoundHandler((req, reply) => {
       if (req.raw.method === 'GET' && !req.raw.url?.startsWith('/api')) {

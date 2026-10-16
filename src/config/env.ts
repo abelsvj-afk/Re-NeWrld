@@ -23,6 +23,7 @@ export const envSchema = z.object({
   ELEVENLABS_API_KEY: z.string().min(1).optional(),
   NARRATION_STORAGE_PATH: z.string().default('/data/narrations'),
   NARRATION_MONTHLY_CHAR_CAP: z.coerce.number().int().positive().default(40000),
+  MEDIA_STORAGE_PATH: z.string().default('/data/media'),
   // Public base URL used to build the reset link emailed to users.
   APP_BASE_URL: z.string().url().default('http://localhost:8080'),
   // Browser frontend origin for CORS. Unset = no CORS headers (same-origin/API-only).

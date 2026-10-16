@@ -142,8 +142,21 @@ export const worldsApi = {
   create: (input: { title: string; description?: string; metadata?: { genre?: string; tags?: string[] } }) =>
     api<WorldSummary>('/worlds', { method: 'POST', body: input }),
   get: (id: string) => api<WorldSummary & { scenes: unknown[] }>(`/worlds/${id}`),
-  update: (id: string, input: { title?: string; description?: string; metadata?: { genre?: string; tags?: string[] }; startSceneId?: string | null }) =>
+  update: (id: string, input: { title?: string; description?: string; metadata?: { genre?: string; tags?: string[]; coverArtUrl?: string }; startSceneId?: string | null }) =>
     api<void>(`/worlds/${id}`, { method: 'PATCH', body: input }),
+  uploadMedia: (worldId: string, file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    return fetch(`${API_BASE}/worlds/${worldId}/media`, {
+      method: 'POST',
+      credentials: 'include',
+      body: form,
+    }).then(async (res) => {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new ApiError(res.status, data.code ?? 'UNKNOWN', data.error ?? 'Upload failed', data);
+      return data as { url: string };
+    });
+  },
   remove: (id: string) =>
     api<void>(`/worlds/${id}`, { method: 'DELETE' }),
   scenes: (worldId: string) => api<SceneSummary[]>(`/worlds/${worldId}/scenes`),

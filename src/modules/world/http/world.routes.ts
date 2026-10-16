@@ -47,6 +47,7 @@ export interface WorldRouteDeps {
   elevenLabs: ElevenLabsClient | null;
   narrationStoragePath: string;
   narrationMonthlyCharCap: number;
+  mediaStoragePath: string;
   sessionVerifier: SessionVerifier;
 }
 
@@ -367,6 +368,39 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       title: c.getTitle(),
       sortOrder: c.getSortOrder(),
     }));
+  });
+
+  // --- Media upload (cover art, scene illustrations) ---
+  app.post('/worlds/:id/media', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const world = await deps.worldRepository.findById(parseWorldId(params.id));
+    if (!world || !world.getCreatorId().equals(request.user!.userId)) {
+      return reply.code(404).send({ error: 'World not found' });
+    }
+
+    const file = await request.file();
+    if (!file) {
+      return reply.code(400).send({ error: 'No file uploaded' });
+    }
+
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (!allowed.includes(file.mimetype)) {
+      return reply.code(400).send({ error: 'Only JPEG, PNG, WebP, and GIF images are allowed' });
+    }
+
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    const { v4: uuidv4 } = await import('uuid');
+
+    await fs.mkdir(deps.mediaStoragePath, { recursive: true });
+    const ext = path.extname(file.filename || '.jpg');
+    const filename = `${uuidv4()}${ext}`;
+    const filepath = path.join(deps.mediaStoragePath, filename);
+
+    const buffer = await file.toBuffer();
+    await fs.writeFile(filepath, buffer);
+
+    return reply.code(201).send({ url: `/media/${filename}` });
   });
 
   app.get('/worlds/:id/choices', { preHandler: creatorOnly }, async (request) => {
