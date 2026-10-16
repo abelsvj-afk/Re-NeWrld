@@ -115,18 +115,28 @@ function parseIdempotencyKey(request: { headers: Record<string, unknown> }): str
 }
 
 /** Public session shape — exactly the response fields, never the canon data. */
-function toSessionJson(session: ReaderSession): Record<string, unknown> {
+function toSessionJson(session: ReaderSession, canonData?: { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> }): Record<string, unknown> {
+  const currentSceneId = session.getCurrentSceneId().getValue();
+  const scene = canonData?.scenes.find((s) => s.scene_id === currentSceneId);
+  const sceneChoices = (canonData?.choices ?? [])
+    .filter((c) => c.scene_id === currentSceneId)
+    .map((c) => ({
+      id: c.choice_id,
+      text: c.text,
+      targetSceneId: c.target_scene_id,
+    }));
+
   return {
-    sessionId: session.getSessionId().getValue(),
-    readerId: session.getReaderId().getValue(),
+    id: session.getSessionId().getValue(),
     worldId: session.getWorldId().getValue(),
-    snapshotId: session.getSnapshotId().getValue(),
-    currentSceneId: session.getCurrentSceneId().getValue(),
-    stateVariables: session.getStateVariables(),
+    currentSceneId,
+    sceneText: scene?.prose ?? '',
+    sceneTitle: scene?.title ?? '',
+    sceneMetadata: scene?.metadata ?? {},
+    isEnding: scene?.is_ending ?? false,
+    choices: sceneChoices,
+    variables: session.getStateVariables(),
     version: session.getVersion(),
-    status: session.getStatus().getValue(),
-    createdAt: session.getCreatedAt().toISOString(),
-    updatedAt: session.getUpdatedAt().toISOString(),
   };
 }
 
@@ -164,13 +174,8 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
         worldId: parseWorldId(params.id),
         readerId: request.user!.userId,
       });
-      return reply.code(201).send({
-        sessionId: session.getSessionId().getValue(),
-        snapshotId: session.getSnapshotId().getValue(),
-        versionNumber: snapshot.getVersionNumber(),
-        currentSceneId: session.getCurrentSceneId().getValue(),
-        status: session.getStatus().getValue(),
-      });
+      const canonData = snapshot.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> };
+      return reply.code(201).send(toSessionJson(session, canonData));
     }
   );
 
@@ -180,7 +185,9 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
       sessionId: parseSessionId(params.id),
       readerId: request.user!.userId,
     });
-    return toSessionJson(session);
+    const snapshot = await deps.canonRepository.findById(session.getSnapshotId());
+    const canonData = snapshot?.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> } | undefined;
+    return toSessionJson(session, canonData);
   });
 
   app.post(
@@ -190,14 +197,21 @@ export async function sessionRoutes(app: FastifyInstance, deps: SessionRouteDeps
       const params = SessionParams.parse(request.params);
       const body = SubmitChoiceBody.parse(request.body);
       const idempotencyKey = parseIdempotencyKey(request);
-      const result = await submitChoice.execute({
+      await submitChoice.execute({
         sessionId: parseSessionId(params.id),
         readerId: request.user!.userId,
         choiceId: parseChoiceId(body.choiceId),
         expectedVersion: body.expectedVersion,
         idempotencyKey,
       });
-      return reply.code(200).send(result);
+      // Return the full session state in the frontend-compatible format
+      const { session } = await getSession.execute({
+        sessionId: parseSessionId(params.id),
+        readerId: request.user!.userId,
+      });
+      const snapshot = await deps.canonRepository.findById(session.getSnapshotId());
+      const canonData = snapshot?.getCanonData() as { scenes: Array<{ scene_id: string; title: string; prose: string; metadata: Record<string, unknown>; is_ending: boolean }>; choices: Array<{ choice_id: string; scene_id: string; target_scene_id: string; text: string; conditions?: unknown }> } | undefined;
+      return reply.code(200).send(toSessionJson(session, canonData));
     }
   );
 }

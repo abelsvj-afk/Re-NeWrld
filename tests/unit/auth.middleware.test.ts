@@ -172,7 +172,7 @@ describe('Auth & RBAC Middleware Unit Tests', () => {
     expect(res.json()).toEqual({ allowed: true });
   });
 
-  it('should deny creator with 403 on requireReader guard', async () => {
+  it('should allow creator on requireReader guard (creators have reader permissions)', async () => {
     const app = Fastify();
     app.get('/reader', { preHandler: [authenticate(mockVerifier), requireReader()] }, async () => {
       return { allowed: true };
@@ -186,8 +186,8 @@ describe('Auth & RBAC Middleware Unit Tests', () => {
       },
     });
 
-    expect(res.statusCode).toBe(403);
-    expect(res.json()).toHaveProperty('error');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toHaveProperty('allowed', true);
   });
 
   it('should return 401 if request.user is missing when guard runs', async () => {

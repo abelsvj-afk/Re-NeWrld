@@ -165,7 +165,7 @@ export const worldsApi = {
     api<{ sceneId: string }>(`/worlds/${worldId}/scenes`, { method: 'POST', body: input }),
   deleteScene: (worldId: string, sceneId: string) =>
     api<void>(`/worlds/${worldId}/scenes/${sceneId}`, { method: 'DELETE' }),
-  updateScene: (worldId: string, sceneId: string, input: { title?: string; prose?: string; isEnding?: boolean }) =>
+  updateScene: (worldId: string, sceneId: string, input: { title?: string; prose?: string; isEnding?: boolean; metadata?: Record<string, unknown> }) =>
     api<void>(`/worlds/${worldId}/scenes/${sceneId}`, { method: 'PATCH', body: input }),
   choices: (worldId: string) => api<ChoiceSummary[]>(`/worlds/${worldId}/choices`),
   createChoice: (worldId: string, input: { sceneId: string; targetSceneId: string; text: string; conditions?: unknown; mutations?: unknown }) =>
@@ -237,6 +237,9 @@ export interface SessionState {
   worldId: string;
   currentSceneId: string;
   sceneText: string;
+  sceneTitle: string;
+  sceneMetadata: Record<string, unknown>;
+  isEnding: boolean;
   choices: ChoiceOption[];
   variables: Record<string, unknown>;
   version: number;

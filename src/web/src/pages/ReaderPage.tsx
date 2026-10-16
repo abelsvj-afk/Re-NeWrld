@@ -159,6 +159,13 @@ export function ReaderPage() {
                   audioUrl={worldsApi.narrationAudioUrl(session.worldId, session.currentSceneId)}
                   sceneTitle={session.sceneText.slice(0, 40)}
                 />
+                {(session.sceneMetadata?.illustrationUrl as string | undefined) && (
+                  <img
+                    src={session.sceneMetadata.illustrationUrl as string}
+                    alt="Scene illustration"
+                    className="w-full max-h-80 object-cover rounded-2xl border border-edge/60 mb-8 shadow-panel"
+                  />
+                )}
                 <div className="prose-reading mb-12 whitespace-pre-wrap">{session.sceneText}</div>
                 <div className="space-y-3">
                   <p className="text-[11px] uppercase tracking-[0.25em] text-ink-faint font-medium mb-4">Choose your path</p>
