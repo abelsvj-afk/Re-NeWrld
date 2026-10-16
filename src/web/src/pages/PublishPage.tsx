@@ -60,7 +60,13 @@ export function PublishPage() {
       setStep('done');
     } catch (err) {
       if (err instanceof ApiError && err.status === 422) {
-        setResult({ passed: false, warnings: [], blockers: [err.message] });
+        // Extract detailed blockers from the validation report if present.
+        const detail = err.detail as { report?: { blockers?: Array<{ message?: string } | string>; warnings?: string[] } } | undefined;
+        const blockers = detail?.report?.blockers?.map((b) =>
+          typeof b === 'string' ? b : b.message ?? JSON.stringify(b)
+        ) ?? [err.message];
+        const warnings = detail?.report?.warnings ?? [];
+        setResult({ passed: false, warnings, blockers });
         setStep('failed');
       } else {
         setError(err instanceof ApiError ? err.message : 'Publish failed');
