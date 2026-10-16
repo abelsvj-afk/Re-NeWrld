@@ -62,8 +62,11 @@ export class CreateSceneUseCase {
     const worldId = new WorldId(input.worldId);
     const world = await this.worldRepository.findById(worldId);
     if (!world) throw new WorldNotFoundError(input.worldId);
-    if (world.getStatus().getValue() !== 'draft') {
-      throw new Error('Cannot add scenes to a non-draft world');
+    // Allow adding scenes to published worlds — this reverts to draft
+    // so the creator can republish as a new version.
+    if (world.getStatus().getValue() === 'published') {
+      world.revertToDraft();
+      await this.worldRepository.save(world);
     }
 
     const chapterId = await this.resolveChapterId(worldId, input.chapterId);

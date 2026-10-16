@@ -32,8 +32,9 @@ export class UpdateSceneUseCase {
 
     const world = await this.worldRepository.findById(scene.getWorldId());
     if (!world) throw new WorldNotFoundError(scene.getWorldId().getValue());
-    if (world.getStatus().getValue() !== 'draft') {
-      throw new Error('Cannot modify scenes in a non-draft world');
+    if (world.getStatus().getValue() === 'published') {
+      world.revertToDraft();
+      await this.worldRepository.save(world);
     }
 
     if (input.title !== undefined) scene.updateTitle(input.title);

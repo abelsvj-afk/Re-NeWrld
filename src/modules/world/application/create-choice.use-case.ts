@@ -37,8 +37,9 @@ export class CreateChoiceUseCase {
     const worldId = new WorldId(input.worldId);
     const world = await this.worldRepository.findById(worldId);
     if (!world) throw new WorldNotFoundError(input.worldId);
-    if (world.getStatus().getValue() !== 'draft') {
-      throw new Error('Cannot add choices to a non-draft world');
+    if (world.getStatus().getValue() === 'published') {
+      world.revertToDraft();
+      await this.worldRepository.save(world);
     }
 
     const scene = await this.sceneRepository.findById(new SceneId(input.sceneId));
