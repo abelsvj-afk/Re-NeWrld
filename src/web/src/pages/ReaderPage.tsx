@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { sessionsApi, worldsApi, ApiError, WORLD_GENRES, type SessionState, type PublishedWorld } from '../lib/api';
 import { useAuth } from '../stores/auth';
 import { ViewToggle } from '../components/ViewToggle';
 import { NarrationPlayer } from '../components/NarrationPlayer';
+import { WordHighlight } from '../components/WordHighlight';
 import { useParams, useNavigate } from '@tanstack/react-router';
 
 function newIdempotencyKey(): string {
@@ -27,6 +28,7 @@ export function ReaderPage() {
   const [choosing, setChoosing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [upgrading, setUpgrading] = useState(false);
+  const narrationAudioRef = useRef<HTMLAudioElement | null>(null);
   const [confirmUpgrade, setConfirmUpgrade] = useState(false);
   const [showWelcomeToast, setShowWelcomeToast] = useState(false);
 
@@ -158,6 +160,7 @@ export function ReaderPage() {
                 <NarrationPlayer
                   audioUrl={worldsApi.narrationAudioUrl(session.worldId, session.currentSceneId)}
                   sceneTitle={session.sceneText.slice(0, 40)}
+                  audioRef={narrationAudioRef}
                 />
                 {(session.sceneMetadata?.illustrationUrl as string | undefined) && (
                   <img
@@ -166,7 +169,11 @@ export function ReaderPage() {
                     className="w-full max-h-80 object-cover rounded-2xl border border-edge/60 mb-8 shadow-panel"
                   />
                 )}
-                <div className="prose-reading mb-12 whitespace-pre-wrap">{session.sceneText}</div>
+                <WordHighlight
+                  text={session.sceneText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()}
+                  wordsUrl={worldsApi.narrationWordsUrl(session.worldId, session.currentSceneId)}
+                  audioRef={narrationAudioRef}
+                />
                 <div className="space-y-3">
                   <p className="text-[11px] uppercase tracking-[0.25em] text-ink-faint font-medium mb-4">Choose your path</p>
                   {session.choices.map((c, i) => (

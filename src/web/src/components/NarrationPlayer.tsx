@@ -4,15 +4,18 @@ import { motion } from 'framer-motion';
 interface NarrationPlayerProps {
   audioUrl: string;
   sceneTitle: string;
+  audioRef?: React.RefObject<HTMLAudioElement | null>;
 }
 
 /**
  * Dark-cinematic narration player (ADR-016, T2).
  * Play/pause with progress bar, time display, keyboard accessible.
  * Renders nothing until the audio metadata loads (no broken player state).
+ * Accepts an optional external audioRef for word-highlight sync.
  */
-export function NarrationPlayer({ audioUrl, sceneTitle }: NarrationPlayerProps) {
-  const audioRef = useRef<HTMLAudioElement>(null);
+export function NarrationPlayer({ audioUrl, sceneTitle, audioRef: externalRef }: NarrationPlayerProps) {
+  const internalRef = useRef<HTMLAudioElement>(null);
+  const audioRef = externalRef ?? internalRef;
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
