@@ -18,7 +18,7 @@
 --
 -- Compatibility: up-only, filename-ordered with 001-011.
 
-CREATE TABLE session_checkpoints (
+CREATE TABLE IF NOT EXISTS session_checkpoints (
   checkpoint_id UUID PRIMARY KEY,
   session_id UUID NOT NULL REFERENCES reader_sessions(session_id) ON DELETE CASCADE,
   chapter_id UUID,
@@ -29,4 +29,4 @@ CREATE TABLE session_checkpoints (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_session_checkpoints_session ON session_checkpoints(session_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_session_checkpoints_session ON session_checkpoints(session_id, created_at ASC);

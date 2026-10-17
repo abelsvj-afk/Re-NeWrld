@@ -32,7 +32,7 @@
 -- a fresh database and takes effect immediately on existing databases with
 -- no backfill (the table starts empty).
 
-CREATE TABLE idempotency_keys (
+CREATE TABLE IF NOT EXISTS idempotency_keys (
   idempotency_key UUID PRIMARY KEY,
   session_id UUID NOT NULL REFERENCES reader_sessions(session_id) ON DELETE CASCADE,
   request_hash CHAR(64) NOT NULL,
@@ -41,4 +41,4 @@ CREATE TABLE idempotency_keys (
   expires_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX ON idempotency_keys (expires_at);
+CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at ON idempotency_keys (expires_at);

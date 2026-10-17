@@ -12,11 +12,29 @@
 -- NOTE: scenes.is_ending already exists in migration 001. It is
 -- intentionally NOT re-added here — attempting to do so would fail
 -- the migration with a duplicate-column error.
-ALTER TABLE worlds
-  ADD COLUMN start_scene_id UUID;
+-- Defensive (2026-10-16): guarded for re-runnability against partial prior runs.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'worlds'
+      AND column_name = 'start_scene_id'
+  ) THEN
+    ALTER TABLE worlds ADD COLUMN start_scene_id UUID;
+  END IF;
+END $$;
 
-ALTER TABLE worlds
-  ADD CONSTRAINT fk_world_start_scene
-  FOREIGN KEY (start_scene_id, world_id)
-  REFERENCES scenes(scene_id, world_id)
-  ON DELETE RESTRICT;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE table_schema = 'public' AND table_name = 'worlds'
+      AND constraint_name = 'fk_world_start_scene'
+  ) THEN
+    ALTER TABLE worlds
+      ADD CONSTRAINT fk_world_start_scene
+      FOREIGN KEY (start_scene_id, world_id)
+      REFERENCES scenes(scene_id, world_id)
+      ON DELETE RESTRICT;
+  END IF;
+END $$;

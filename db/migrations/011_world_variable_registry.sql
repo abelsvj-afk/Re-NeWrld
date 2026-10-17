@@ -21,7 +21,7 @@
 -- Compatibility: up-only, filename-ordered with 001-010. Applies cleanly to
 -- a fresh database and takes effect immediately on existing databases.
 
-CREATE TABLE world_variables (
+CREATE TABLE IF NOT EXISTS world_variables (
   variable_id UUID PRIMARY KEY,
   world_id UUID NOT NULL REFERENCES worlds(world_id) ON DELETE CASCADE,
   name TEXT NOT NULL CHECK (name ~ '^[a-z][a-z0-9_]*$'),
@@ -36,4 +36,4 @@ CREATE TABLE world_variables (
   UNIQUE (world_id, name)
 );
 
-CREATE INDEX idx_world_variables_world ON world_variables(world_id);
+CREATE INDEX IF NOT EXISTS idx_world_variables_world ON world_variables(world_id);

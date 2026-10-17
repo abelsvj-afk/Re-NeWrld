@@ -4,7 +4,7 @@
 -- auth_sessions in migration 002). The raw token is delivered to the user by
 -- email and never persisted or logged. Tokens are single-use (used_at) with a
 -- short expiry; expired rows are purged by the janitor in server.ts.
-CREATE TABLE password_reset_tokens (
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
   token_hash VARCHAR(64) PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
   expires_at TIMESTAMPTZ NOT NULL,
@@ -13,5 +13,5 @@ CREATE TABLE password_reset_tokens (
   CONSTRAINT chk_reset_token_hash_sha256 CHECK (token_hash ~ '^[0-9a-f]{64}$')
 );
 
-CREATE INDEX idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
-CREATE INDEX idx_password_reset_tokens_expires_at ON password_reset_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at ON password_reset_tokens(expires_at);
