@@ -4,14 +4,14 @@
   "description": "Re:NeWrld Modular Monolith Backend & Core Engine",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsc -p tsconfig.migrate.json && printf '{\"type\":\"module\"}' > dist-scripts/package.json && mkdir -p dist-scripts/db && cp -r db/migrations dist-scripts/db/",
     "start": "node -e \"const fs = require('fs'); if (fs.existsSync('.env')) process.loadEnvFile('.env'); require('./dist/server.js');\"",
     "dev": "tsx --env-file .env watch src/server.ts",
     "test": "APP_ENV=test vitest run",
     "test:watch": "APP_ENV=test DATABASE_URL=postgresql://postgres:postgres@localhost:5432/renewrld_test vitest",
     "test:unit": "APP_ENV=test DATABASE_URL=postgresql://dummy/dummy vitest run tests/unit",
     "test:integration": "APP_ENV=test vitest run tests/integration",
-    "migrate": "tsx scripts/migrate.ts"
+    "migrate": "node dist-scripts/scripts/migrate.js"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",
