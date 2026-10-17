@@ -1,0 +1,1 @@
+{"compilerOptions":{"composite":false,"declaration":false,"module":"ES2022","moduleResolution":"Bundler","outDir":"./dist-scripts","rootDir":".","sourceMap":false},"extends":"./tsconfig.json","include":["scripts/migrate.ts"]}
