@@ -27,8 +27,7 @@ export interface LockHandle {
   process: ChildProcess;
   /** PID of the holder (for /proc/locks verification). */
   pid: number;
-  /** Inode of the locked file (for /proc/locks verification). */
-  inode: number;
+  /** Path of the locked file (for verification). */
   /** Path being locked. */
   path: string;
   /** Lock mode. */
@@ -42,59 +41,83 @@ export interface LockHandle {
 /**
  * Verifies that a process holds a flock on the target file.
  *
- * Uses /proc/locks, matching by PID and inode. To avoid device-number
- * encoding issues (B5), we verify the inode matches AND the process has
- * the target path open (via /proc/<pid>/fd).
+ * B5 (final): Uses fstat on /proc/<pid>/fd entries to get dev+ino directly.
+ * Compares against Node's stat(dev, ino) — no device-number encoding,
+ * no string path matching. If verification cannot be completed, fails closed.
  *
- * Returns true if the lock is confirmed held.
+ * Steps:
+ * 1. Get target file's (dev, ino) via Node stat.
+ * 2. List /proc/<pid>/fd; for each fd, fstat /proc/<pid>/fd/<n> to get (dev, ino).
+ * 3. If any fd's (dev, ino) matches the target → the process has the file open.
+ * 4. Check /proc/locks for a FLOCK entry with this PID and matching inode.
+ *    (Confirms it's a flock, not just an open fd.)
+ * Both checks must pass. Otherwise, fail closed.
  */
-async function verifyLockHeld(pid: number, targetPath: string, targetInode: number): Promise<boolean> {
+async function verifyLockHeld(pid: number, targetPath: string): Promise<boolean> {
+  const { stat: fstat } = await import('node:fs/promises');
+
+  // Step 1: Get target identity via Node stat (dev and ino as numbers, no encoding).
+  let targetDev: number, targetIno: number;
   try {
-    // Step 1: Check /proc/locks for PID + inode match.
+    const st = await fstat(targetPath);
+    targetDev = st.dev;
+    targetIno = st.ino;
+  } catch (err) {
+    throw new FlockError(`Cannot stat target ${targetPath}: ${(err as Error).message}`);
+  }
+
+  // Step 2: Check the process's open FDs via fstat on /proc/<pid>/fd/<n>.
+  // This gives us (dev, ino) in the same numeric space as Node's stat.
+  let fdMatches = false;
+  try {
+    const { readdir } = await import('node:fs/promises');
+    const fds = await readdir(`/proc/${pid}/fd`);
+    for (const fd of fds) {
+      try {
+        const fdStat = await fstat(`/proc/${pid}/fd/${fd}`);
+        // Compare dev AND ino (not just ino — inodes aren't unique across filesystems).
+        if (fdStat.dev === targetDev && fdStat.ino === targetIno) {
+          fdMatches = true;
+          break;
+        }
+      } catch {
+        continue; // FD may have closed; try next.
+      }
+    }
+  } catch (err) {
+    // Cannot read /proc/<pid>/fd → fail closed. Do NOT fall back to true.
+    throw new FlockError(
+      `Cannot verify open FDs for pid ${pid}: ${(err as Error).message}; failing closed`
+    );
+  }
+
+  if (!fdMatches) {
+    // Process does not have the target file open → lock not held on our file.
+    return false;
+  }
+
+  // Step 3: Confirm a FLOCK entry exists for this PID+inode in /proc/locks.
+  // We match by inode only here (the fd check already verified dev+ino).
+  try {
     const locksContent = await readFile('/proc/locks', 'utf-8');
-    let pidInodeMatch = false;
     for (const line of locksContent.split('\n')) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 6) continue;
+      // Format: "1: FLOCK  ADVISORY  WRITE 1234 00:00:12345 0 EOF"
+      if (parts[1] !== 'FLOCK') continue;
       const lockPid = parseInt(parts[4], 10);
-      const devIno = parts[5];
-      const m = devIno.match(/:(\d+)$/);
+      const m = parts[5].match(/:(\d+)$/);
       if (!m) continue;
       const lockIno = parseInt(m[1], 10);
-      // Match PID and inode. We don't compare device numbers here to avoid
-      // encoding issues; the fd check below confirms it's the right file.
-      if (lockPid === pid && lockIno === targetInode) {
-        pidInodeMatch = true;
-        break;
+      if (lockPid === pid && lockIno === targetIno) {
+        return true; // Confirmed: PID holds a FLOCK on our file.
       }
     }
-    if (!pidInodeMatch) return false;
-
-    // Step 2: Verify the process has the target file open.
-    // Read /proc/<pid>/fd and check if any fd points to our inode.
-    // We compare by readlink resolving to the target path, or by inode.
-    const { readdir } = await import('node:fs/promises');
-    const fdDir = `/proc/${pid}/fd`;
-    const fds = await readdir(fdDir);
-    for (const fd of fds) {
-      try {
-        const link = await readFile(`/proc/${pid}/fd/${fd}`, 'utf-8').catch(() => null);
-        // readFile on a symlink doesn't work; use readlink.
-        const { readlink } = await import('node:fs/promises');
-        const target = await readlink(`/proc/${pid}/fd/${fd}`);
-        // The flock process opens the path directly, so readlink should match.
-        if (target === targetPath) return true;
-      } catch {
-        continue;
-      }
-    }
-    // Fallback: if we found the PID+inode in /proc/locks, that's strong evidence.
-    // The fd check is a bonus; don't fail closed here if fd reading fails.
-    return true;
   } catch (err) {
-    if (err instanceof FlockError) throw err;
-    throw new FlockError(`/proc not available; cannot verify lock: ${(err as Error).message}`);
+    throw new FlockError(`/proc/locks unavailable: ${(err as Error).message}; failing closed`);
   }
+
+  return false;
 }
 
 /**
@@ -105,7 +128,6 @@ async function waitForLock(
   child: ChildProcess,
   pid: number,
   targetPath: string,
-  inode: number,
   timeoutMs: number,
 ): Promise<void> {
   const start = Date.now();
@@ -120,7 +142,7 @@ async function waitForLock(
     }
 
     // Check /proc/locks.
-    const found = await verifyLockHeld(pid, targetPath, inode);
+    const found = await verifyLockHeld(pid, targetPath);
     if (found) return; // Lock confirmed.
 
     await new Promise((r) => setTimeout(r, pollInterval));
@@ -128,7 +150,7 @@ async function waitForLock(
 
   // Timeout: kill the waiter and throw.
   child.kill('SIGKILL');
-  throw new FlockError(`Timeout waiting for lock acquisition on inode ${inode} (${timeoutMs}ms)`);
+  throw new FlockError(`Timeout waiting for lock acquisition on ${targetPath} (${timeoutMs}ms)`);
 }
 
 /**
@@ -144,7 +166,7 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
     await fh.close();
     return stat(path);
   });
-  const { ino: inode } = await stat(path);
+  // Note: we don't need the inode here; verifyLockHeld gets it via stat.
 
   const child = spawn('flock', ['-n', path, 'sleep', 'infinity'], { stdio: 'ignore' });
 
@@ -176,14 +198,14 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
   try {
     // For non-blocking, the process exits immediately if locked.
     // Wait for lock confirmation with a short timeout.
-    await waitForLock(child, pid, path, inode, 2000);
+    await waitForLock(child, pid, path, 2000);
   } catch (err) {
     // Ensure child is dead.
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
     throw err;
   }
 
-  return { process: child, pid, inode, path, mode: 'exclusive' };
+  return { process: child, pid, path, mode: 'exclusive' };
 }
 
 /**
@@ -192,7 +214,7 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
  */
 export async function acquireShared(path: string, timeoutMs: number = 10000): Promise<LockHandle> {
   const fileStat = await stat(path);
-  const { ino: inode } = await stat(path);
+  // Note: we don't need the inode here; verifyLockHeld gets it via stat.
 
   const child = spawn('flock', ['-s', path, 'sleep', 'infinity'], { stdio: 'ignore' });
 
@@ -220,13 +242,13 @@ export async function acquireShared(path: string, timeoutMs: number = 10000): Pr
 
   try {
     // Wait for the lock to actually be acquired (not just process alive).
-    await waitForLock(child, pid, path, inode, timeoutMs);
+    await waitForLock(child, pid, path, timeoutMs);
   } catch (err) {
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
     throw err;
   }
 
-  return { process: child, pid, inode, path, mode: 'shared' };
+  return { process: child, pid, path, mode: 'shared' };
 }
 
 /**

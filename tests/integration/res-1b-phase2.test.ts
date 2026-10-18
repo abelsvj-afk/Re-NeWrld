@@ -416,3 +416,136 @@ describe('RES-1b Stale Temp Cleanup (§6.21-§6.32)', () => {
     expect(e3.rows[0].delivery_event_id).not.toBe(e1.rows[0].delivery_event_id);
   });
 });
+
+describe('RES-1b Delivery Worker (B8)', () => {
+  it('claims, sends, and confirms a pending event', async () => {
+    const { claimDeliveryEvent, confirmDelivery, runDeliveryOnce } = await import(
+      '../../src/modules/world/domain/services/delivery-worker.service.js'
+    );
+
+    const reservationId = await createReservation();
+    const incident = (await pool.query(
+      `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
+       VALUES ($1, 'unlink', 'open', 5) RETURNING incident_id`,
+      [reservationId],
+    )).rows[0];
+    const event = (await pool.query(
+      `INSERT INTO temp_cleanup_delivery_outbox (incident_id, reservation_id, failure_type, fire_count, severity, status)
+       VALUES ($1, $2, 'unlink', 5, 'warning', 'pending') RETURNING delivery_event_id`,
+      [incident.incident_id, reservationId],
+    )).rows[0];
+
+    // Track sends.
+    const sent: string[] = [];
+    const deps = {
+      withTransaction,
+      workerId: 'test-worker-1',
+      log: () => {},
+      send: async (e: { delivery_event_id: string }) => {
+        sent.push(e.delivery_event_id);
+      },
+    };
+
+    // Run one iteration.
+    const didWork = await runDeliveryOnce(deps);
+    expect(didWork).toBe(true);
+    expect(sent).toContain(event.delivery_event_id);
+
+    // Event should be marked sent.
+    const after = await pool.query(
+      `SELECT status FROM temp_cleanup_delivery_outbox WHERE delivery_event_id=$1`,
+      [event.delivery_event_id],
+    );
+    expect(after.rows[0].status).toBe('sent');
+  });
+
+  it('retry backoff: failed send increments attempts and sets next_attempt_at', async () => {
+    const { runDeliveryOnce } = await import(
+      '../../src/modules/world/domain/services/delivery-worker.service.js'
+    );
+
+    const reservationId = await createReservation();
+    const incident = (await pool.query(
+      `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
+       VALUES ($1, 'fsync', 'open', 5) RETURNING incident_id`,
+      [reservationId],
+    )).rows[0];
+    const event = (await pool.query(
+      `INSERT INTO temp_cleanup_delivery_outbox (incident_id, reservation_id, failure_type, fire_count, severity, status)
+       VALUES ($1, $2, 'fsync', 5, 'warning', 'pending') RETURNING delivery_event_id`,
+      [incident.incident_id, reservationId],
+    )).rows[0];
+
+    const deps = {
+      withTransaction,
+      workerId: 'test-worker-2',
+      log: () => {},
+      send: async () => {
+        throw new Error('Simulated webhook failure');
+      },
+    };
+
+    await runDeliveryOnce(deps);
+
+    const after = await pool.query(
+      `SELECT status, attempts, next_attempt_at FROM temp_cleanup_delivery_outbox WHERE delivery_event_id=$1`,
+      [event.delivery_event_id],
+    );
+    expect(after.rows[0].status).toBe('pending'); // Still pending, not failed.
+    expect(after.rows[0].attempts).toBe(1);
+    // next_attempt_at should be ~1 minute in the future.
+    const nextAttempt = new Date(after.rows[0].next_attempt_at).getTime();
+    const now = Date.now();
+    expect(nextAttempt).toBeGreaterThan(now + 50000); // >50s (1min backoff).
+    expect(nextAttempt).toBeLessThan(now + 70000); // <70s.
+  });
+
+  it('stale token rejected: superseded claim cannot update', async () => {
+    const { claimDeliveryEvent, confirmDelivery } = await import(
+      '../../src/modules/world/domain/services/delivery-worker.service.js'
+    );
+
+    const reservationId = await createReservation();
+    const incident = (await pool.query(
+      `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
+       VALUES ($1, 'unlink', 'open', 5) RETURNING incident_id`,
+      [reservationId],
+    )).rows[0];
+    const event = (await pool.query(
+      `INSERT INTO temp_cleanup_delivery_outbox (incident_id, reservation_id, failure_type, fire_count, severity, status)
+       VALUES ($1, $2, 'unlink', 5, 'warning', 'pending') RETURNING delivery_event_id`,
+      [incident.incident_id, reservationId],
+    )).rows[0];
+
+    const deps1 = { withTransaction, workerId: 'worker-A', log: () => {}, send: async () => {} };
+    const deps2 = { withTransaction, workerId: 'worker-B', log: () => {}, send: async () => {} };
+
+    // Worker A claims.
+    const claimA = await withTransaction(async (tx) => claimDeliveryEvent(deps1, tx));
+    expect(claimA).not.toBeNull();
+    const tokenA = claimA!.claimToken;
+
+    // Simulate stale: manually clear the claim (as if timeout expired), worker B claims.
+    await pool.query(
+      `UPDATE temp_cleanup_delivery_outbox SET claimed_at = now() - interval '6 minutes', claimed_by=NULL, claim_token=NULL
+       WHERE delivery_event_id=$1`,
+      [event.delivery_event_id],
+    );
+    const claimB = await withTransaction(async (tx) => claimDeliveryEvent(deps2, tx));
+    expect(claimB).not.toBeNull();
+    const tokenB = claimB!.claimToken;
+    expect(tokenB).not.toBe(tokenA);
+
+    // Worker A tries to confirm with stale token → should fail (0 rows).
+    const confirmedA = await withTransaction(async (tx) =>
+      confirmDelivery(event.delivery_event_id, tokenA, tx),
+    );
+    expect(confirmedA).toBe(false);
+
+    // Worker B confirms with valid token → should succeed.
+    const confirmedB = await withTransaction(async (tx) =>
+      confirmDelivery(event.delivery_event_id, tokenB, tx),
+    );
+    expect(confirmedB).toBe(true);
+  });
+});

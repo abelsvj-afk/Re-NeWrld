@@ -68,9 +68,9 @@ function startDeliveryWorker(app: {
         log: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => {
           app.log[level]({ ...data, workerId }, msg);
         },
-        // B8: Real delivery — not just logging.
-        // If ALERT_WEBHOOK_URL is configured, POST the event and require 2xx.
-        // If not configured, THROW to keep the event pending (do NOT mark sent).
+        // B8: Real delivery with validation and timeout.
+        // If ALERT_WEBHOOK_URL is configured and valid, POST and require 2xx.
+        // If not configured or invalid, THROW to keep the event pending.
         // Marking sent without actual delivery would lose the alert.
         send: async (event: {
           delivery_event_id: string;
@@ -82,27 +82,43 @@ function startDeliveryWorker(app: {
         }) => {
           const webhookUrl = process.env.ALERT_WEBHOOK_URL;
           if (!webhookUrl) {
-            // No webhook configured: fail the send so the event stays pending
-            // and retries with backoff. Logging alone is NOT delivery.
             throw new Error(
               'ALERT_WEBHOOK_URL not configured; event remains pending for retry',
             );
           }
-          const resp = await fetch(webhookUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              delivery_event_id: event.delivery_event_id,
-              incident_id: event.incident_id,
-              reservation_id: event.reservation_id,
-              failure_type: event.failure_type,
-              fire_count: event.fire_count,
-              severity: event.severity,
-              source: 're-newrld-temp-cleanup',
-            }),
-          });
-          if (!resp.ok) {
-            throw new Error(`Webhook returned ${resp.status}: ${await resp.text()}`);
+          // Validate URL.
+          let url: URL;
+          try {
+            url = new URL(webhookUrl);
+          } catch {
+            throw new Error(`ALERT_WEBHOOK_URL is not a valid URL: ${webhookUrl}`);
+          }
+          if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+            throw new Error(`ALERT_WEBHOOK_URL must be http(s): ${webhookUrl}`);
+          }
+          // POST with 10s timeout.
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          try {
+            const resp = await fetch(url.toString(), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                delivery_event_id: event.delivery_event_id,
+                incident_id: event.incident_id,
+                reservation_id: event.reservation_id,
+                failure_type: event.failure_type,
+                fire_count: event.fire_count,
+                severity: event.severity,
+                source: 're-newrld-temp-cleanup',
+              }),
+              signal: controller.signal,
+            });
+            if (!resp.ok) {
+              throw new Error(`Webhook returned ${resp.status}: ${await resp.text()}`);
+            }
+          } finally {
+            clearTimeout(timeout);
           }
           app.log.info(
             { deliveryEventId: event.delivery_event_id },
