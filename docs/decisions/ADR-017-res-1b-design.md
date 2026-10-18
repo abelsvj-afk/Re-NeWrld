@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 22 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 23 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -428,11 +428,13 @@ CREATE TABLE temp_cleanup_incidents (
     last_fired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_fired_count INT NOT NULL,  -- counter value at last fire (5, 10, 15...)
     acknowledged_at TIMESTAMPTZ,    -- operator ack (suppresses notifications, does NOT resolve)
-    UNIQUE (reservation_id, failure_type, status) 
-    -- At most one non-resolved incident per (reservation, type).
-    -- Partial index: WHERE status IN ('open', 'escalated')
+    -- No UNIQUE on (reservation_id, failure_type, status): multiple resolved
+    -- incidents must coexist for audit. Uniqueness enforced below.
 );
-CREATE INDEX ON temp_cleanup_incidents (reservation_id, failure_type) 
+-- Partial unique index: at most one open/escalated incident per (reservation, type).
+-- Resolved incidents are excluded, allowing unlimited audit history.
+CREATE UNIQUE INDEX temp_cleanup_incidents_open_unique 
+    ON temp_cleanup_incidents (reservation_id, failure_type) 
     WHERE status IN ('open', 'escalated');
 ```
 
@@ -444,7 +446,7 @@ CREATE INDEX ON temp_cleanup_incidents (reservation_id, failure_type)
 **Crash recovery:**
 - **Crash after operation succeeds but before incident resolution commits:** The transaction rolls back. Counter remains >= 5, incident remains open/escalated. Next cycle retries the operation (which will succeed again, idempotent) and resolves the incident. No stale resolved state.
 - **Crash after incident opens but before alert delivery:** The incident row is committed (in the same txn as the counter). Alert delivery is a separate, at-least-once notification. On restart, the recovery scans for `status IN ('open','escalated')` incidents and re-emits alerts for any without confirmed delivery (tracked via a `delivery_confirmed_at` column, or the alert system deduplicates by `incident_id`). The incident is not lost.
-- **Recurrence UUID:** When a new incident opens (counter reaches 5 after a prior resolution), `gen_random_uuid()` generates a fresh ID. The old resolved incident remains in the table with `status='resolved'` (for audit). The UNIQUE constraint only applies to non-resolved statuses, so the new incident inserts cleanly without conflicting with the old resolved row.
+- **Recurrence UUID:** When a new incident opens (counter reaches 5 after a prior resolution), `gen_random_uuid()` generates a fresh ID. The old resolved incident remains in the table with `status='resolved'` (for audit). The partial unique index only applies to open/escalated statuses, so the new incident inserts cleanly. The old resolved row remains for audit.
 - **Stale incident reconciliation:** On startup, query for incidents with `status IN ('open','escalated')`. For each, check the current counter value:
   - If counter < 5 → the operation must have succeeded without resolving the incident (crash window). Resolve it: `SET status='resolved', resolved_at=now()`. Log at warning (`STALE_INCIDENT_RESOLVED`).
   - If counter >= 5 → incident is legitimately open. Re-emit alert if delivery unconfirmed.
@@ -771,6 +773,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Test consistency (rev 20) — §6.21 rewritten to match rev 19; no contradictory marker-reset language remains.
 - [x] Complete alert lifecycle (rev 21) — identity per (reservation_id, failure_type); incident model with resolution/recurrence; escalation resets on new incident; manual ack never resolves.
 - [x] Incident persistence contract (rev 22) — DB table with atomic counter+incident updates; crash recovery reconciles stale incidents; recurrence generates fresh UUIDs.
+- [x] Partial unique index (rev 23) — uniqueness on (reservation_id, failure_type) WHERE status IN ('open','escalated'); multiple resolved rows allowed for audit.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -931,3 +934,13 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** New incident U2 inserted with different UUID. Old U1 remains with `status='resolved'`. UNIQUE constraint allows this (only enforces uniqueness for open/escalated). No conflict, no accidental reopen of U1.
 - **Atomic counter+incident:** Simulate DB failure during the transaction that increments counter to 5 and inserts incident.
 - **Assert:** Transaction rolls back. Counter remains at 4, no incident row exists. The two are always consistent — never a counter at 5 without an incident, never an incident without the counter.
+
+### 6.28 Incident recurrence schema regression (new, rev 23)
+- **Setup:** Reservation R1. First unlink incident: 5 failures → incident U1 opens (`status='open'`). Unlink succeeds → U1 resolved (`status='resolved'`).
+- **Assert:** DB contains one row: U1 with `status='resolved'`. No constraint violation.
+- **Action:** Later, unlink fails 5 times again.
+- **Assert:** New incident U2 inserts successfully with different UUID. DB now contains TWO rows with `(R1, 'unlink')`: U1 (resolved) and U2 (open). The partial unique index allows this because U1 is resolved (excluded from the index).
+- **Action:** Attempt to open a third incident while U2 is still open (simulate a bug trying to double-open).
+- **Assert:** INSERT fails with unique violation on `temp_cleanup_incidents_open_unique`. Only one open/escalated incident per (reservation, type) can exist. The constraint is enforced.
+- **Action:** Resolve U2. Open a third incident U3.
+- **Assert:** U3 inserts successfully. DB contains three resolved/open rows for (R1, 'unlink'): U1 (resolved), U2 (resolved), U3 (open). Audit history preserved; active constraint maintained.
