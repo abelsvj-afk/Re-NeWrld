@@ -148,21 +148,30 @@ export async function phaseBPublish(
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'EEXIST') {
       // Destination exists → verify identity.
+      // B7: verifyEexist throws its own typed errors (COLLISION, IDENTITY_UNVERIFIED).
+      // We do NOT catch them here; they propagate to the caller.
       await verifyEexist(input, assetId, deps, tx);
     } else if (code === 'ENOENT') {
       // Temp gone → check if final exists (crash recovery).
+      // B7: Narrow catch — only the stat() call is wrapped. verifyEexist()
+      // errors propagate unwrapped so identity failures are not misclassified.
+      let finalExists = false;
       try {
         await stat(finalPath);
-        // Final exists → treat as EEXIST case.
-        await verifyEexist(input, assetId, deps, tx);
-      } catch {
-        // Neither exists → fail.
+        finalExists = true;
+      } catch (statErr) {
+        if ((statErr as NodeJS.ErrnoException).code !== 'ENOENT') throw statErr;
+        // finalPath does not exist → neither temp nor final → fail.
+      }
+      if (!finalExists) {
         await markPublicationFailed(assetId, tx, deps);
         throw new PublicationError(
           'PUBLICATION_FAILED',
           `Temp gone and final missing for ${input.reservationId}`,
         );
       }
+      // Final exists → treat as EEXIST case (verify identity).
+      await verifyEexist(input, assetId, deps, tx);
     } else {
       throw err;
     }

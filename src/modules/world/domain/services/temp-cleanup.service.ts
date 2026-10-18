@@ -273,8 +273,38 @@ async function cleanupOneLocked(
 
 /**
  * Retries pending fsync (Pass 2: temp file gone, but marker set).
+ *
+ * B6: Acquires the ownership lock before filesystem operations, like the
+ * normal cleanup path. If a writer is active, skips this cycle.
  */
 async function retryPendingFsync(
+  reservationId: string,
+  deps: CleanupDeps,
+  tx: pkg.PoolClient,
+): Promise<void> {
+  const lockPath = lockPathFor(deps.mediaRoot, reservationId);
+  let ownershipLock;
+  try {
+    ownershipLock = await acquireExclusiveNonBlocking(lockPath);
+  } catch (err) {
+    if (err instanceof FlockError) {
+      deps.log('info', 'Pending fsync skipped: writer active', { reservationId });
+      return;
+    }
+    throw err;
+  }
+
+  try {
+    await retryPendingFsyncLocked(reservationId, deps, tx);
+  } finally {
+    await releaseLock(ownershipLock);
+  }
+}
+
+/**
+ * Inner pending-fsync logic, executed while holding the ownership lock.
+ */
+async function retryPendingFsyncLocked(
   reservationId: string,
   deps: CleanupDeps,
   tx: pkg.PoolClient,
