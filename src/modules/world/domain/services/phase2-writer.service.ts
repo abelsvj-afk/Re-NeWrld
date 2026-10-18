@@ -11,6 +11,13 @@ import { open, type FileHandle } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createHash, type Hash } from 'node:crypto';
 import { join } from 'node:path';
+import {
+  acquireExclusiveNonBlocking,
+  acquireShared,
+  releaseLock,
+  FlockError,
+  type LockHandle,
+} from '../../../../shared/fs/flock.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,6 +58,8 @@ export interface WriterSession {
   lockPath: string;
   bytesWritten: number;
   digest: Hash;
+  /** Kernel-held exclusive lock on the lockfile. Released on close. */
+  ownershipLock: LockHandle;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,16 +120,25 @@ export async function openWriterSession(
     );
   }
 
-  // Step 3: Acquire exclusive non-blocking lock.
-  // Node.js FileHandle has no flock; we use a separate mechanism.
-  // For now, we implement ownership via the lockfile existence + advisory protocol.
-  // TODO: Use proper flock via node:fs/promises or a native binding.
-  //
-  // NOTE: This is a simplified implementation. Production requires real flock().
-  // The design mandates flock(LOCK_EX|LOCK_NB). We document this as a known
-  // limitation to be addressed with a native flock binding.
+  // Step 3: Acquire exclusive non-blocking kernel lock via flock(1).
+  // Spawns `flock -n <lockfile> sleep infinity`. If already locked, throws.
+  let ownershipLock: LockHandle;
+  try {
+    ownershipLock = await acquireExclusiveNonBlocking(lockPath);
+  } catch (err) {
+    if (err instanceof FlockError) {
+      await lockFd.close();
+      throw new Phase2WriterError(
+        'WRITER_CONFLICT',
+        `Reservation ${reservationId} already owned by another writer`,
+      );
+    }
+    throw err;
+  }
+  // Close the Node fd; the flock child process holds the lock via its own fd.
+  await lockFd.close();
 
-  deps.log('info', 'Writer session opened', { reservationId, tempPath });
+  deps.log('info', 'Writer session opened (ownership lock held)', { reservationId, tempPath });
 
   // Step 5: Open temp data file.
   const dataFd = await open(tempPath, constants.O_CREAT | constants.O_WRONLY | constants.O_APPEND, 0o644);
@@ -131,9 +149,11 @@ export async function openWriterSession(
     lockPath,
     bytesWritten: 0,
     digest: createHash('sha256'),
+    ownershipLock,
   };
 
-  return { session, dataFd, lockFd };
+  // lockFd is closed; return a dummy for API compat (ownership is via flock child).
+  return { session, dataFd, lockFd: null as unknown as FileHandle };
 }
 
 /**
@@ -155,26 +175,30 @@ export async function writeChunkFenced(
   chunk: Buffer,
   deps: Phase2WriterDeps,
 ): Promise<void> {
-  // TODO: flock(dataFd, LOCK_SH) — requires native binding.
-  // For now, we validate without the file lock (limitation documented).
+  // Step 1: Acquire shared kernel lock on temp file.
+  // Hold during validate+write; release immediately after.
+  const shLock = await acquireShared(session.tempPath);
+  try {
+    // Step 2: Re-validate under lock.
+    const active = await deps.isReservationActive(session.reservationId);
+    if (!active) {
+      // Step 3: Abort. No bytes written.
+      throw new Phase2WriterError(
+        'FENCED_WRITE_REJECTED',
+        `Reservation ${session.reservationId} became inactive during write; chunk rejected`,
+      );
+    }
 
-  // Step 2: Re-validate under (theoretical) lock.
-  const active = await deps.isReservationActive(session.reservationId);
-  if (!active) {
-    // Step 3: Abort. No bytes written.
-    throw new Phase2WriterError(
-      'FENCED_WRITE_REJECTED',
-      `Reservation ${session.reservationId} became inactive during write; chunk rejected`,
-    );
+    // Step 4: Write (single syscall).
+    await dataFd.write(chunk);
+    session.bytesWritten += chunk.length;
+    session.digest.update(chunk);
+  } finally {
+    // Step 5: Release shared lock immediately.
+    await releaseLock(shLock);
   }
 
-  // Step 4: Write.
-  await dataFd.write(chunk);
-  session.bytesWritten += chunk.length;
-  session.digest.update(chunk);
-
-  // Step 5: Unlock (theoretical).
-  deps.log('info', 'Chunk written', {
+  deps.log('info', 'Chunk written (fenced)', {
     reservationId: session.reservationId,
     bytes: chunk.length,
     total: session.bytesWritten,
@@ -210,11 +234,15 @@ export async function sendHeartbeat(
 export async function closeWriterSession(
   session: WriterSession,
   dataFd: FileHandle,
-  lockFd: FileHandle,
+  _lockFd: FileHandle | null,
   deps: Phase2WriterDeps,
 ): Promise<void> {
   await dataFd.close();
-  // Release ownership lock (kernel releases on close).
-  await lockFd.close();
-  deps.log('info', 'Writer session closed', { reservationId: session.reservationId });
+  // Release ownership lock by killing the flock holder.
+  // The kernel releases LOCK_EX when the process dies.
+  // The lockfile itself is NEVER unlinked (permanent, rev 4).
+  await releaseLock(session.ownershipLock);
+  deps.log('info', 'Writer session closed (ownership released)', {
+    reservationId: session.reservationId,
+  });
 }

@@ -31,7 +31,11 @@ import {
   phaseBPublish,
   phaseCMarkActive,
 } from '../../src/modules/world/domain/services/publication.service.js';
-import { runCleanupCycle } from '../../src/modules/world/domain/services/temp-cleanup.service.js';
+import {
+  runCleanupCycle,
+  checkAlertThreshold,
+  resolveIncident,
+} from '../../src/modules/world/domain/services/temp-cleanup.service.js';
 
 const { Pool } = pkg;
 
@@ -289,7 +293,7 @@ describe('RES-1b Stale Temp Cleanup (§6.21-§6.32)', () => {
     expect(after.rows[0].temp_cleanup_fsync_pending).toBe(false);
   });
 
-  it('§6.26: alert lifecycle — open, escalate, resolve, recur', async () => {
+  it('§6.26: alert lifecycle via real service — open, escalate, resolve, recur', async () => {
     const reservationId = await createReservation();
     const assetId = (await pool.query(
       `INSERT INTO world_media_assets (world_id, filename, url, mimetype, size_bytes, publication_status, reservation_id)
@@ -297,49 +301,77 @@ describe('RES-1b Stale Temp Cleanup (§6.21-§6.32)', () => {
       [TEST_WORLD_ID, `${reservationId}.png`, `/media/${reservationId}.png`, reservationId],
     )).rows[0].asset_id;
 
-    // Simulate 5 unlink failures by directly incrementing.
+    const deps = makeDeps();
+
+    // Simulate 5 unlink failures, then call the REAL checkAlertThreshold.
     await pool.query(
       `UPDATE world_media_assets SET temp_cleanup_unlink_attempts=5 WHERE asset_id=$1`,
       [assetId],
     );
+    await withTransaction(async (tx) => {
+      await checkAlertThreshold(reservationId, 'unlink', deps, tx);
+    });
 
-    const deps = makeDeps();
-    // Trigger alert check via a failed cleanup (we'll call the internal logic indirectly).
-    // For now, verify the incident table structure accepts the data.
-    const incident = await pool.query(
-      `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
-       VALUES ($1, 'unlink', 'open', 5) RETURNING incident_id`,
+    // Verify incident was created by the service (not direct insert).
+    const incidents = await pool.query(
+      `SELECT incident_id, status, last_fired_count FROM temp_cleanup_incidents
+       WHERE reservation_id=$1 AND failure_type='unlink' AND status IN ('open','escalated')`,
       [reservationId],
     );
-    expect(incident.rows[0].incident_id).toBeDefined();
+    expect(incidents.rowCount).toBe(1);
+    expect(incidents.rows[0].status).toBe('open');
+    expect(incidents.rows[0].last_fired_count).toBe(5);
+    const incidentId1 = incidents.rows[0].incident_id;
 
-    // Verify partial unique index: second open incident should fail.
-    await expect(
-      pool.query(
-        `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
-         VALUES ($1, 'unlink', 'open', 5)`,
-        [reservationId],
-      ),
-    ).rejects.toThrow();
+    // Verify outbox event was created by the service.
+    const events = await pool.query(
+      `SELECT delivery_event_id, fire_count, severity FROM temp_cleanup_delivery_outbox
+       WHERE incident_id=$1`,
+      [incidentId1],
+    );
+    expect(events.rowCount).toBe(1);
+    expect(events.rows[0].fire_count).toBe(5);
+    expect(events.rows[0].severity).toBe('warning');
 
-    // Resolve and create new incident (recurrence).
+    // Escalate: simulate 15 failures, call service again.
     await pool.query(
-      `UPDATE temp_cleanup_incidents SET status='resolved', resolved_at=now() WHERE incident_id=$1`,
-      [incident.rows[0].incident_id],
+      `UPDATE world_media_assets SET temp_cleanup_unlink_attempts=15 WHERE asset_id=$1`,
+      [assetId],
     );
-    const incident2 = await pool.query(
-      `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
-       VALUES ($1, 'unlink', 'open', 5) RETURNING incident_id`,
-      [reservationId],
+    await withTransaction(async (tx) => {
+      await checkAlertThreshold(reservationId, 'unlink', deps, tx);
+    });
+    const escalated = await pool.query(
+      `SELECT status FROM temp_cleanup_incidents WHERE incident_id=$1`,
+      [incidentId1],
     );
-    expect(incident2.rows[0].incident_id).not.toBe(incident.rows[0].incident_id);
+    expect(escalated.rows[0].status).toBe('escalated');
 
-    // Both resolved/open rows coexist.
-    const count = await pool.query(
-      `SELECT COUNT(*) as c FROM temp_cleanup_incidents WHERE reservation_id=$1 AND failure_type='unlink'`,
+    // Resolve via the REAL service.
+    await withTransaction(async (tx) => {
+      await resolveIncident(reservationId, 'unlink', deps, tx);
+    });
+    const resolved = await pool.query(
+      `SELECT status FROM temp_cleanup_incidents WHERE incident_id=$1`,
+      [incidentId1],
+    );
+    expect(resolved.rows[0].status).toBe('resolved');
+
+    // Recurrence: new failures → new incident with different ID (via service).
+    await pool.query(
+      `UPDATE world_media_assets SET temp_cleanup_unlink_attempts=5 WHERE asset_id=$1`,
+      [assetId],
+    );
+    await withTransaction(async (tx) => {
+      await checkAlertThreshold(reservationId, 'unlink', deps, tx);
+    });
+    const incidents2 = await pool.query(
+      `SELECT incident_id FROM temp_cleanup_incidents
+       WHERE reservation_id=$1 AND failure_type='unlink' AND status='open'`,
       [reservationId],
     );
-    expect(parseInt(count.rows[0].c)).toBe(2);
+    expect(incidents2.rowCount).toBe(1);
+    expect(incidents2.rows[0].incident_id).not.toBe(incidentId1);
   });
 
   it('§6.28: outbox event uniqueness per firing', async () => {

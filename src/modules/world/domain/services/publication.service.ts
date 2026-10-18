@@ -23,6 +23,7 @@ export type PublicationErrorCode =
   | 'PUBLICATION_COLLISION'      // Destination exists, different bytes, ACTIVE asset
   | 'PUBLICATION_IDENTITY_UNVERIFIED' // EEXIST, cannot prove identity
   | 'PUBLICATION_FAILED'         // Link failed, temp gone, no recovery
+  | 'TEMP_FSYNC_RETRY_NEEDED'    // Final durable, temp fsync failed; retry via cleanup
   | 'RESERVATION_NOT_COMMITTABLE'; // Reservation not in committable state
 
 export class PublicationError extends Error {
@@ -186,9 +187,25 @@ export async function phaseBPublish(
   }
 
   // Step 8d: fsync(temp_dir) — always, even if same as final_dir.
+  // Per §1.6d: if final_dir fsync succeeded (8b) but temp_dir fsync fails,
+  // the final asset IS durable. Mark ACTIVE and let the cleanup worker retry.
   const tempDirFd = await open(tempDir, constants.O_RDONLY);
   try {
     await tempDirFd.sync();
+  } catch (err) {
+    // Temp fsync failed, but final is durable (8b succeeded).
+    // Write the retry marker so the cleanup worker revisits this.
+    // The marker write is in the caller's transaction (Phase C).
+    deps.log('warn', 'Temp dir fsync failed; final durable, will retry via cleanup', {
+      reservationId: input.reservationId,
+      error: (err as Error).message,
+    });
+    // Signal to caller that temp cleanup needs retry.
+    // The caller (Phase C) will set temp_cleanup_fsync_pending=TRUE.
+    throw new PublicationError(
+      'TEMP_FSYNC_RETRY_NEEDED',
+      `Temp fsync failed for ${input.reservationId}; final durable, retry via cleanup worker`,
+    );
   } finally {
     await tempDirFd.close();
   }
@@ -307,15 +324,35 @@ async function markIdentityUnverified(
 
 /**
  * Phase C: Mark asset ACTIVE after Phase B completes.
+ *
+ * @param needsTempRetry - If true (Phase B threw TEMP_FSYNC_RETRY_NEEDED),
+ *   sets temp_cleanup_fsync_pending=TRUE so the cleanup worker retries.
+ *   Per §1.6d: final is durable, temp cleanup is retried asynchronously.
  */
 export async function phaseCMarkActive(
   assetId: string,
   tx: pkg.PoolClient,
   deps: PublicationDeps,
+  needsTempRetry: boolean = false,
 ): Promise<void> {
-  await tx.query(
-    `UPDATE world_media_assets SET publication_status='ACTIVE', updated_at=now() WHERE asset_id=$1`,
-    [assetId],
-  );
-  deps.log('info', 'Phase C: marked ACTIVE', { assetId });
+  if (needsTempRetry) {
+    // Final durable, temp fsync failed. Mark ACTIVE with retry marker.
+    // Rev 19: marker write never touches counters (they're 0 here anyway).
+    await tx.query(
+      `UPDATE world_media_assets
+         SET publication_status='ACTIVE',
+             temp_cleanup_fsync_pending=TRUE,
+             temp_cleanup_last_attempt_at=now(),
+             updated_at=now()
+       WHERE asset_id=$1`,
+      [assetId],
+    );
+    deps.log('warn', 'Phase C: marked ACTIVE with temp retry pending', { assetId });
+  } else {
+    await tx.query(
+      `UPDATE world_media_assets SET publication_status='ACTIVE', updated_at=now() WHERE asset_id=$1`,
+      [assetId],
+    );
+    deps.log('info', 'Phase C: marked ACTIVE', { assetId });
+  }
 }

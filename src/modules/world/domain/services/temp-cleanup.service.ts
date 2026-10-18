@@ -16,6 +16,12 @@ import { readdir, stat, unlink, open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import type pkg from 'pg';
+import {
+  acquireExclusiveNonBlocking,
+  releaseLock,
+  FlockError,
+} from '../../../../shared/fs/flock.js';
+import { lockPathFor } from './phase2-writer.service.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -123,6 +129,37 @@ export async function runCleanupCycle(deps: CleanupDeps): Promise<void> {
  * Cleans up one temp file (write-ahead marker protocol).
  */
 async function cleanupOne(
+  cand: { reservationId: string; tempPath: string; assetId: string; finalPath: string },
+  deps: CleanupDeps,
+  tx: pkg.PoolClient,
+): Promise<void> {
+  const { reservationId, tempPath, finalPath } = cand;
+
+  // B2: Acquire ownership lock BEFORE any filesystem observation or mutation.
+  // If EWOULDBLOCK → another writer is active → skip this cycle.
+  const lockPath = lockPathFor(deps.mediaRoot, reservationId);
+  let ownershipLock;
+  try {
+    ownershipLock = await acquireExclusiveNonBlocking(lockPath);
+  } catch (err) {
+    if (err instanceof FlockError) {
+      deps.log('info', 'Cleanup skipped: writer active', { reservationId });
+      return; // Skip this cycle; retry next cycle.
+    }
+    throw err;
+  }
+
+  try {
+    await cleanupOneLocked(cand, deps, tx);
+  } finally {
+    await releaseLock(ownershipLock);
+  }
+}
+
+/**
+ * Inner cleanup logic, executed while holding the ownership lock.
+ */
+async function cleanupOneLocked(
   cand: { reservationId: string; tempPath: string; assetId: string; finalPath: string },
   deps: CleanupDeps,
   tx: pkg.PoolClient,
@@ -294,8 +331,10 @@ async function retryPendingFsync(
 /**
  * Checks if a counter reached a firing threshold (5, 10, 15, ...).
  * Creates/updates incident and outbox event.
+ *
+ * Exported for testing (B4: tests must exercise real service behavior).
  */
-async function checkAlertThreshold(
+export async function checkAlertThreshold(
   reservationId: string,
   failureType: 'unlink' | 'fsync',
   deps: CleanupDeps,
@@ -379,8 +418,10 @@ async function checkAlertThreshold(
 
 /**
  * Resolves an incident when the operation succeeds.
+ *
+ * Exported for testing.
  */
-async function resolveIncident(
+export async function resolveIncident(
   reservationId: string,
   failureType: 'unlink' | 'fsync',
   deps: CleanupDeps,
