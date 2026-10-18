@@ -31,7 +31,10 @@ async function withTransaction<T>(fn: (tx: pkg.PoolClient) => Promise<T>): Promi
   }
 }
 
-function makeDeps() {
+async function makeDeps() {
+  const { noopMetrics } = await import(
+    '../../src/modules/world/domain/services/expiry-claim.service.js'
+  );
   return {
     mediaRoot,
     withTransaction,
@@ -40,6 +43,7 @@ function makeDeps() {
       return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount };
     },
     log: () => {},
+    metrics: noopMetrics(),
   };
 }
 
@@ -97,12 +101,12 @@ describe('RES-1c Expiry Claim (§7)', () => {
     // Simulate crashed writer's temp file.
     await writeFile(tempPathFor(mediaRoot, rid), Buffer.alloc(1024));
 
-    const candidates = await discoverCandidates(makeDeps());
+    const candidates = await discoverCandidates((await makeDeps()));
     expect(candidates.map((c) => c.reservation_id)).toContain(rid);
 
     const result = await claimOne(
       candidates.find((c) => c.reservation_id === rid)!,
-      makeDeps(),
+      (await makeDeps()),
     );
     expect(result).toBe('claimed');
 
@@ -137,9 +141,9 @@ describe('RES-1c Expiry Claim (§7)', () => {
     // Simulate live writer holding the ownership lock.
     const lock = await acquireExclusiveNonBlocking(lockPathFor(mediaRoot, rid));
     try {
-      const candidates = await discoverCandidates(makeDeps());
+      const candidates = await discoverCandidates((await makeDeps()));
       const candidate = candidates.find((c) => c.reservation_id === rid)!;
-      const result = await claimOne(candidate, makeDeps());
+      const result = await claimOne(candidate, (await makeDeps()));
       expect(result).toBe('skipped');
 
       const after = await pool.query(
@@ -167,7 +171,7 @@ describe('RES-1c Expiry Claim (§7)', () => {
     // Claim with stale epoch 0.
     const result = await claimOne(
       { reservation_id: rid, epoch: 0, world_id: 'w', size_bytes: 100 },
-      makeDeps(),
+      (await makeDeps()),
     );
     expect(result).toBe('skipped');
 
@@ -195,8 +199,8 @@ describe('RES-1c Expiry Claim (§7)', () => {
     };
 
     const before = await sumActive();
-    const candidates = await discoverCandidates(makeDeps());
-    await claimOne(candidates.find((c) => c.reservation_id === rid)!, makeDeps());
+    const candidates = await discoverCandidates((await makeDeps()));
+    await claimOne(candidates.find((c) => c.reservation_id === rid)!, (await makeDeps()));
     const after = await sumActive();
 
     // The claimed reservation's bytes are no longer in active accounting.
@@ -211,7 +215,7 @@ describe('RES-1c Expiry Claim (§7)', () => {
     );
 
     const rid = await createReservation(10); // Only 10s expired (< 30s window).
-    const candidates = await discoverCandidates(makeDeps());
+    const candidates = await discoverCandidates((await makeDeps()));
     expect(candidates.map((c) => c.reservation_id)).not.toContain(rid);
   });
 
@@ -225,7 +229,7 @@ describe('RES-1c Expiry Claim (§7)', () => {
       rids.push(await createReservation(120));
     }
 
-    const deps = makeDeps();
+    const deps = (await makeDeps());
     const candidates = await discoverCandidates(deps);
 
     // Simulate two workers claiming concurrently.

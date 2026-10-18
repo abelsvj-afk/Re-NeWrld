@@ -31,10 +31,21 @@ export interface ExpiryClaimDeps {
   withTransaction: <T>(fn: (tx: pkg.PoolClient) => Promise<T>) => Promise<T>;
   query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>;
   log: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => void;
-  metrics?: {
+  // B2: metrics are REQUIRED, not optional. The production worker must
+  // always provide them; tests provide a real or stub implementation.
+  metrics: {
     claimsTotal: { inc: () => void };
     skipsTotal: { inc: (labels: { reason: string }) => void };
     errorsTotal: { inc: () => void };
+  };
+}
+
+/** No-op metrics for tests that don't assert on counts. */
+export function noopMetrics() {
+  return {
+    claimsTotal: { inc: () => {} },
+    skipsTotal: { inc: (_labels: { reason: string }) => {} },
+    errorsTotal: { inc: () => {} },
   };
 }
 
@@ -92,7 +103,7 @@ export async function claimOne(
   } catch (err) {
     if (err instanceof LockContentionError) {
       deps.log('info', 'Expiry claim skipped: writer active', { reservation_id });
-      deps.metrics?.skipsTotal.inc({ reason: 'lock_held' });
+      deps.metrics.skipsTotal.inc({ reason: 'lock_held' });
       return 'skipped';
     }
     // Non-contention lock failure → fail closed.
@@ -101,7 +112,7 @@ export async function claimOne(
       error: (err as Error).message,
       errorName: (err as Error).name,
     });
-    deps.metrics?.errorsTotal.inc();
+    deps.metrics.errorsTotal.inc();
     return 'error';
   }
 
@@ -127,7 +138,7 @@ export async function claimOne(
       deps.log('info', 'Expiry claim skipped: epoch advanced or state changed', {
         reservation_id,
       });
-      deps.metrics?.skipsTotal.inc({ reason: 'epoch_advanced' });
+      deps.metrics.skipsTotal.inc({ reason: 'epoch_advanced' });
       return 'skipped';
     }
 
@@ -137,7 +148,7 @@ export async function claimOne(
       size_bytes: candidate.size_bytes,
       claim_epoch: candidate.epoch,
     });
-    deps.metrics?.claimsTotal.inc();
+    deps.metrics.claimsTotal.inc();
 
     // Step 4: Temp file cleanup (best-effort).
     const tempPath = tempPathFor(deps.mediaRoot, reservation_id);
