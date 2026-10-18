@@ -68,19 +68,46 @@ function startDeliveryWorker(app: {
         log: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => {
           app.log[level]({ ...data, workerId }, msg);
         },
-        // Send via app logger for now; production wires to PagerDuty/Opsgenie/webhook.
-        // The receiver must deduplicate on delivery_event_id.
-        send: async (event: { delivery_event_id: string; incident_id: string; severity: string }) => {
-          app.log.warn(
-            {
-              deliveryEventId: event.delivery_event_id,
-              incidentId: event.incident_id,
+        // B8: Real delivery — not just logging.
+        // If ALERT_WEBHOOK_URL is configured, POST the event and require 2xx.
+        // If not configured, THROW to keep the event pending (do NOT mark sent).
+        // Marking sent without actual delivery would lose the alert.
+        send: async (event: {
+          delivery_event_id: string;
+          incident_id: string;
+          reservation_id: string;
+          failure_type: string;
+          fire_count: number;
+          severity: string;
+        }) => {
+          const webhookUrl = process.env.ALERT_WEBHOOK_URL;
+          if (!webhookUrl) {
+            // No webhook configured: fail the send so the event stays pending
+            // and retries with backoff. Logging alone is NOT delivery.
+            throw new Error(
+              'ALERT_WEBHOOK_URL not configured; event remains pending for retry',
+            );
+          }
+          const resp = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              delivery_event_id: event.delivery_event_id,
+              incident_id: event.incident_id,
+              reservation_id: event.reservation_id,
+              failure_type: event.failure_type,
+              fire_count: event.fire_count,
               severity: event.severity,
-            },
-            `ALERT: temp cleanup ${event.severity} (dedupe key: ${event.delivery_event_id})`,
+              source: 're-newrld-temp-cleanup',
+            }),
+          });
+          if (!resp.ok) {
+            throw new Error(`Webhook returned ${resp.status}: ${await resp.text()}`);
+          }
+          app.log.info(
+            { deliveryEventId: event.delivery_event_id },
+            'Alert delivered via webhook',
           );
-          // In production, this would POST to the alert system.
-          // Throw to simulate failure for testing retry logic.
         },
       };
 
