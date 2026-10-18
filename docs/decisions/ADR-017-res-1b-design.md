@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 28 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 29 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -453,7 +453,16 @@ CREATE UNIQUE INDEX temp_cleanup_incidents_open_unique
 - **Recurrence UUID:** When a new incident opens (counter reaches 5 after a prior resolution), `gen_random_uuid()` generates a fresh ID. The old resolved incident remains in the table with `status='resolved'` (for audit). The partial unique index only applies to open/escalated statuses, so the new incident inserts cleanly. The old resolved row remains for audit.
 - **Stale incident reconciliation:** On startup, query for incidents with `status IN ('open','escalated')`. For each, check the current counter value:
   - If counter < 5 → the operation must have succeeded without resolving the incident (crash window). Resolve it: `SET status='resolved', resolved_at=now()`. Log at warning (`STALE_INCIDENT_RESOLVED`).
-  - If counter >= 5 → incident is legitimately open. Do NOT re-emit from the incident row. Instead, rely on the outbox: check for existing `pending` delivery events for this incident (`SELECT FROM temp_cleanup_delivery_outbox WHERE incident_id=? AND status='pending'`). If a pending event exists → the delivery worker's normal claim/retry protocol handles it (including stale-claim reclaim after 5 min). If NO pending event exists but the incident is open (e.g., event was marked sent but incident not resolved — crash window) → create a new delivery event for the current `fire_count` (deduplicated by `UNIQUE(incident_id, fire_count)`; if it already exists, the worker will pick it up).
+  - If counter >= 5 → incident is legitimately open. Reconcile via the outbox using the current `fire_count` (the firing threshold the counter has reached: 5, 10, 15, ...):
+    ```sql
+    SELECT delivery_event_id, status FROM temp_cleanup_delivery_outbox 
+    WHERE incident_id=? AND fire_count=<current_fire_count>;
+    ```
+    - **Case 1 — Pending event exists:** Leave it to the delivery worker's normal claim/retry protocol (including stale-claim reclaim after 5 min). No action.
+    - **Case 2 — No event exists:** INSERT a new delivery event (`fire_count=<current>`, `status='pending'`, `next_attempt_at=now()`) in a transaction. This covers the crash window where the incident committed but the event insert did not.
+    - **Case 3a — Event exists with `status='sent'`:** The notification was already delivered. Leave it alone. Do NOT create a duplicate. The incident remains open; the next firing threshold (e.g., counter reaching 10) will generate a new event with a new `fire_count`. Log at debug (`RECONCILIATION_SENT_EVENT_INTACT`).
+    - **Case 3b — Event exists with `status='failed'`:** Delivery exhausted all 10 attempts. Do NOT auto-retry (this would bypass the attempt limit). Do NOT create a new event for the same `fire_count`. The event remains `failed` awaiting manual intervention. Ensure visibility: log at warning (`RECONCILIATION_FAILED_EVENT_NEEDS_ATTENTION` with `delivery_event_id`, `incident_id`) so the operator knows a failed delivery exists for an still-open incident. The operator may manually reset the event to `pending` (per the manual retry path).
+    - **Never assume** that `UNIQUE(incident_id, fire_count)` makes an existing event pending. Always check `status` explicitly.
   - This ensures a resolved incident cannot remain active after recovery.
 
 **Alert delivery protocol (rev 25 — outbox pattern):**
@@ -914,6 +923,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Legacy cleanup (rev 27) — removed delivery_confirmed_at/delivery_attempts from incident schema; fixed stale test to use outbox.
 - [x] 10th-failure transaction (rev 27) — single fenced UPDATE transitions to 'failed'; attempts 1-9 remain pending with backoff; manual retry path defined.
 - [x] SQL validity and atomic threshold (rev 28) — trailing comma fixed; 10th-failure conditional on attempts=9 with fencing; reconciliation uses outbox.
+- [x] Reconciliation event states (rev 29) — explicit handling for pending/sent/failed/missing events; never assumes unique constraint implies pending.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -1103,3 +1113,13 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** UPDATE with `claim_token=T_A` affects 0 rows (token mismatch). Worker A's update is rejected. Worker B owns the event. E1 not marked 'sent' by the stale worker.
 - **Fenced retry:** Worker B's send fails. Worker B updates with T_B → succeeds, sets `next_attempt_at`. Worker A tries retry update with T_A → 0 rows. Only the current claimant modifies state.
 - **Crash during send:** Worker claims E1 (token T), sends to receiver, crashes before confirm. After 5 min, worker B reclaims (new token). Re-sends. Receiver deduplicates by `delivery_event_id` → single notification. Worker B confirms with its token → 'sent'.
+
+### 6.31 Reconciliation event-state regression (new, rev 29)
+- **Existing sent event:** Setup: incident open, counter at 7, outbox has event for `fire_count=5` with `status='sent'`. Simulate restart → reconciliation runs.
+- **Assert:** Reconciliation finds the sent event → leaves it alone. No new event created. No duplicate notification. Log shows `RECONCILIATION_SENT_EVENT_INTACT` at debug. Incident remains open; when counter reaches 10, a new event for `fire_count=10` will be created normally.
+- **Existing failed event:** Setup: incident open, counter at 7, outbox has event for `fire_count=5` with `status='failed'` (delivery exhausted). Simulate restart → reconciliation runs.
+- **Assert:** Reconciliation finds the failed event → does NOT auto-retry, does NOT create a new event for `fire_count=5`, does NOT reset attempts. Logs `RECONCILIATION_FAILED_EVENT_NEEDS_ATTENTION` at warning with event and incident IDs. The event remains `failed` for manual intervention. The 10-attempt limit is not bypassed.
+- **Missing event:** Setup: incident open, counter at 7, NO outbox event for `fire_count=5` (crash before event insert). Simulate restart.
+- **Assert:** Reconciliation finds no event → INSERTs new event (`fire_count=5`, `status='pending'`, `next_attempt_at=now()`). Delivery worker picks it up normally.
+- **Pending event:** Setup: incident open, outbox has `pending` event. Simulate restart.
+- **Assert:** Reconciliation finds pending event → takes no action. Worker claim/retry protocol handles it (including stale claim reclaim).
