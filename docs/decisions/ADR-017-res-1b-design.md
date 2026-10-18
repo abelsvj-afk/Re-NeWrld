@@ -1,11 +1,11 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 2 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 3 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
 
-**Rev 2 changes:** (1) Crash-safe publication protocol — the rename is NOT part of the DB transaction; DB commits first with asset as PENDING, then rename, then mark ACTIVE, with DB-driven recovery. (2) Single-writer ownership via a dedicated lockfile with `LOCK_EX|LOCK_NB`.
+**Rev 3 changes:** (1) Recovery workers must acquire the ownership lock before touching PENDING assets — prevents recovery/recovery and recovery/writer races. (2) Lockfile cleanup requires holding the lock + inode verification before unlink — closes the stale-inode ownership break. (3) Lock lifecycle clarified: LOCK_SH covers Phase A only; ownership lock covers all phases; I4 updated to the three-phase boundaries.
 
 ---
 
@@ -120,7 +120,30 @@ UPDATE storage_reservations
 10. BEGIN; `UPDATE world_media_assets SET publication_status='ACTIVE' WHERE asset_id=? AND publication_status='PENDING'`; COMMIT.
 11. Release `LOCK_SH`. Release ownership lock. Close fds.
 
-**Lock-release ordering (A18):** `LOCK_SH` on the data file is held through Phase A (the DB transaction) and released only after Phase A commits or rolls back. It is NOT held during Phase B (the rename) — the rename is idempotent and the PENDING status protects readers. The ownership lock is held through all three phases.
+**Lock-release ordering (A18, rev 3 clarified):**
+
+Two distinct locks with different lifetimes:
+
+**`LOCK_SH` on the data file (per-chunk + Phase A):**
+- Acquired per-chunk during writes; released immediately after each `write()`.
+- Acquired for Phase A (the DB transaction); released AFTER Phase A commits or rolls back.
+- NOT held during Phase B (rename) or Phase C (activation).
+- **Why safe to release before Phase B/C:** After Phase A commits, the reservation is `COMMITTED` (terminal). The expiry claim only acts on active reservations (`RESERVED`/`WRITING`). The abandoned-temp cleanup only acts on `ABANDONED` rows. No background process will touch a COMMITTED reservation's files. Readers filter by `publication_status='ACTIVE'`, so the PENDING asset is invisible. The only remaining concurrency risk is another writer, which is excluded by the ownership lock (still held).
+
+**Ownership lock on the lockfile (`LOCK_EX`):**
+- Acquired before the first chunk (via inode-verified protocol).
+- Held through ALL phases: chunk writes, Phase A, Phase B, Phase C.
+- Released after Phase C completes (via cleanup protocol), or after rollback/abort cleanup.
+- Released by the kernel on process crash.
+
+**Which lock protects which phase:**
+| Phase | LOCK_SH (data) | Ownership lock | Why |
+|-------|----------------|----------------|-----|
+| Chunk writes | Per-chunk hold | Held | LOCK_SH excludes claim's LOCK_EX; ownership excludes other writers |
+| Phase A (DB txn) | Held through COMMIT/ROLLBACK | Held | LOCK_SH prevents claim finalizing mid-transaction; ownership prevents writer conflict |
+| Phase B (rename) | Released | Held | Reservation is COMMITTED (terminal); no claim/cleanup acts on it. Ownership prevents writer conflict. Rename is atomic and idempotent. |
+| Phase C (activation) | Released | Held | Same as Phase B. DB UPDATE is transactional. |
+| Recovery | Not held | Must acquire | Recovery worker proves writer is dead via lock acquisition. |
 
 **Schema requirement:** `world_media_assets` needs a `publication_status` column (`PENDING`, `ACTIVE`, `PUBLICATION_FAILED`), default `PENDING`. The serving layer MUST NOT serve assets with `publication_status != 'ACTIVE'`.
 
@@ -129,6 +152,29 @@ For each asset with `publication_status='PENDING'`:
 - If file exists at `final_path` → the rename completed → `UPDATE ... SET publication_status='ACTIVE'`. (Crash between Phase B and Phase C.)
 - Else if file exists at `temp_path` → the rename did not complete → execute Phase B + C now. (Crash after Phase A commit, before Phase B.)
 - Else (neither path exists) → the temp file was lost → `UPDATE ... SET publication_status='PUBLICATION_FAILED'`, alert. The reservation is COMMITTED but the bytes are gone. Operator intervention or re-upload required.
+
+### 1.6a Recovery Ownership Protocol (rev 3)
+
+**The problem:** The startup scan says "any worker finding a PENDING asset can rename or activate." But two recovery workers — or a recovery worker and the still-alive original writer — could race: both renaming, one activating while the other is still modifying the file, or acting on stale filesystem observations.
+
+**The rule:** A recovery worker MUST acquire the ownership lock (via the inode-verified protocol in §1.1b) BEFORE performing any filesystem operation on a PENDING asset. Database-only observations (reading the PENDING row) do not require the lock, but any `rename`, `stat` used for a decision, or `unlink` does.
+
+**Protocol:**
+1. Recovery worker scans for `publication_status='PENDING'` assets.
+2. For each PENDING asset, attempt to acquire the ownership lock for its `reservation_id` using the inode-verified protocol.
+   - If `EWOULDBLOCK` → another worker (or the original writer) owns it → SKIP this asset this cycle. Do not touch its files. Do not update its row.
+   - If acquired → this worker owns the recovery for this asset.
+3. While holding the ownership lock, perform the filesystem checks and operations (stat temp/final, rename if needed).
+4. Update the asset row (`ACTIVE` or `PUBLICATION_FAILED`).
+5. Release the ownership lock (via the cleanup protocol if the lockfile should be removed, or just unlock if the reservation may still need it).
+
+**Why this works:**
+- **Recovery vs. original writer:** The original writer holds the ownership lock through all three phases (A, B, C). If the writer is still alive and working, the recovery worker's acquire fails → skips. The writer completes normally. No interference.
+- **Recovery vs. crashed writer:** The kernel released the lock on crash. The recovery worker acquires it and proceeds. The original writer is dead; its file descriptors are closed.
+- **Recovery vs. recovery:** Two workers scanning simultaneously → exactly one acquires the lock → the other skips. No double-rename, no conflicting updates.
+- **Stale filesystem observations:** The lock guarantees no other party is modifying the files. The worker's `stat` results are valid for the duration of the lock hold.
+
+**Lockfile existence:** If the lockfile was already cleaned up (unlinked), the recovery worker creates it with `O_CREAT` during acquisition. This is safe: if no lockfile exists, no one can be holding the ownership lock (they would have created it). The new lockfile establishes a fresh lock domain for the recovery.
 
 **Crash boundaries and recovery:**
 
@@ -195,13 +241,42 @@ The heartbeat is a *liveness signal*, not a *write authorization*. Every chunk w
 
 3. **I3 (Heartbeat integrity):** Every heartbeat increments `epoch`. A 0-row heartbeat update causes immediate abort.
 
-4. **I4 (Commit atomicity):** The commit transaction (rename + asset INSERT + reservation→COMMITTED) is atomic. A 0-row reservation UPDATE causes full ROLLBACK including the asset row.
+4. **I4 (Commit phases):** Publication proceeds in three ordered phases: (A) Database transaction commits the asset row as PENDING and the reservation as COMMITTED atomically; (B) Filesystem rename moves temp→final (idempotent, atomic); (C) Database transaction marks the asset ACTIVE. A 0-row reservation UPDATE in Phase A causes full ROLLBACK of Phase A (including the asset INSERT). Phases B and C are idempotent and recoverable via the startup scan. No single transaction spans the DB and filesystem.
 
 5. **I5 (Lock-release ordering):** `LOCK_SH` is released only after the enclosing DB transaction has committed or rolled back, on all exit paths.
 
 6. **I6 (Temp-path exclusivity):** One writer per deterministic path. No two writers address the same temp file.
 
 6a. **I6a (Single-writer ownership):** At most one writer holds the ownership lock (`{reservation_id}.lock`, `LOCK_EX|LOCK_NB`) for a given reservation at any time. A writer that cannot acquire the ownership lock MUST NOT open, write to, or modify the temp data file. The lock is held for the entire upload and released by the kernel on crash.
+
+### 1.1b Ownership Lock Acquisition and Cleanup (rev 3)
+
+**The inode problem:** `flock` locks an inode, not a path. If process A holds `LOCK_EX` on inode 100 (path P), and process B unlinks P and creates a new file at P (inode 200), process C can acquire `LOCK_EX` on inode 200. A and C both believe they own the reservation. Unlinking a lockfile while the lock might be held breaks the ownership guarantee.
+
+**Acquisition protocol (inode-verified):**
+1. Open P with `O_CREAT | O_RDWR` → fd.
+2. `fstat(fd)` → record `(dev1, ino1)`.
+3. `flock(fd, LOCK_EX | LOCK_NB)`. If `EWOULDBLOCK` → close fd, abort with `WRITER_CONFLICT`.
+4. `stat(P)` → if ENOENT → someone unlinked it → `flock(fd, LOCK_UN)`, close, abort/retry.
+5. `stat(P)` → `(dev2, ino2)`. If `(dev1, ino1) != (dev2, ino2)` → the file was replaced → `flock(fd, LOCK_UN)`, close, retry from step 1 (max 3 attempts, then abort with `LOCKFILE_UNSTABLE`).
+6. Success: we hold `LOCK_EX` on the inode that P currently resolves to.
+
+**Cleanup protocol (proving the lock is free):**
+The lockfile MUST NOT be unlinked unless the cleaning process holds the ownership lock.
+1. Open P (without `O_CREAT` — if ENOENT, nothing to clean).
+2. Attempt `flock(fd, LOCK_EX | LOCK_NB)` with inode verification (steps 2–5 above).
+   - If `EWOULDBLOCK` → an owner is active → ABORT cleanup for this reservation. Do NOT unlink.
+   - If inode verification fails → retry or abort.
+3. We now hold the lock. No other process can believe it owns the reservation (any other holder would have blocked our acquisition; any stale fd refers to an inode we now own).
+4. Unlink P.
+5. `flock(fd, LOCK_UN)`, close fd.
+
+**Why this is safe:**
+- If writer A holds the lock, cleanup B's non-blocking acquire fails → B does not unlink. The path→inode mapping remains stable.
+- If A crashed, the kernel released the lock. B acquires it, verifies the inode, unlinks. Any stale fd held by a dead process is irrelevant.
+- The race "A opens but hasn't locked yet when B unlinks" is closed by B's lock acquisition: B can only unlink after acquiring the lock. If A hasn't locked yet, B gets the lock first. A then fails its `LOCK_EX|LOCK_NB` (B holds it) or fails inode verification (B unlinked). Either way, A does not proceed.
+
+**Cleanup timing:** The lockfile is unlinked only after (a) successful publication (Phase C complete), (b) voluntary rollback committed, or (c) abandoned-temp cleanup of an ABANDONED row — and in all cases only via the cleanup protocol above.
 
 7. **I7 (No level-1 during chunks):** Phase-2 chunk writes never acquire the level-1 advisory lock. Domain R protection (reservation + flock) is sufficient and necessary to avoid multi-minute lock holds.
 
@@ -299,6 +374,27 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Stale worker:** Writer holds ownership lock; reservation is claimed (ABANDONED) by the expiry worker. A restarted worker validates state → sees ABANDONED → does NOT acquire the lock, does NOT write. Assert: no bytes written to the abandoned temp file.
 - **Lockfile cleanup:** After successful commit, assert the `.lock` file is removed along with the temp file. After abandoned-temp cleanup, assert the `.lock` file is also removed.
 
+### 6.10 Concurrent recovery (new, rev 3)
+- **Setup:** Create a PENDING asset (simulate crash after Phase A). Start two recovery workers simultaneously.
+- **Assert:** Exactly one worker acquires the ownership lock; the other skips the asset (no filesystem operations, no row updates).
+- **Assert:** The asset is renamed (if needed) and marked ACTIVE exactly once. No double-rename, no conflicting updates.
+- **Recovery vs. live writer:** Start a writer (holding ownership lock, in Phase B). Start a recovery worker. Assert: recovery worker fails to acquire the lock → skips the asset. Writer completes normally. No interference.
+
+### 6.11 Lockfile cleanup race (new, rev 3)
+- **Setup:** Writer A holds the ownership lock (inode 100). Cleanup process B attempts to unlink the lockfile.
+- **Assert:** B's `LOCK_EX|LOCK_NB` fails with `EWOULDBLOCK` → B aborts cleanup, does NOT unlink. The path→inode mapping remains stable.
+- **Action:** Kill writer A (kernel releases lock). B retries.
+- **Assert:** B acquires the lock, verifies inode identity, unlinks the path, releases. 
+- **Race variant:** Writer C opens the lockfile path but hasn't acquired the lock yet when B unlinks (after acquiring it). Assert: C's subsequent `LOCK_EX|LOCK_NB` fails (B holds it) OR C's inode verification fails (path unlinked) → C does not proceed as owner.
+- **Stale inode:** Simulate the inode-replacement attack (unlink + create new file at same path while A holds lock on old inode). Assert: A's inode verification on next acquisition attempt fails → A does not proceed with a stale lock.
+
+### 6.12 Lock lifecycle verification (new, rev 3)
+- **Instrument:** Track `LOCK_SH` (data file) and ownership lock (`LOCK_EX` on lockfile) acquisition/release times relative to Phase A/B/C boundaries.
+- **Assert:** `LOCK_SH` is released after Phase A COMMIT/ROLLBACK and before Phase B starts. It is never held during Phase B or Phase C.
+- **Assert:** Ownership lock is held continuously from before the first chunk through Phase C completion.
+- **Assert:** During Phase B and C (when `LOCK_SH` is released), no expiry claim or cleanup operation modifies the reservation's files (verified by attempting claims/cleanups and asserting they skip COMMITTED reservations).
+- **Kill at boundary:** Kill the writer between Phase A COMMIT and Phase B. Assert: startup scan recovers via the ownership lock protocol; no `LOCK_SH` is leaked (it was already released); the ownership lock was released by the kernel.
+
 ---
 
 ## 7. Out of Scope (RES-1c, QUOTA-1)
@@ -321,4 +417,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Fencing-authority race constraint addressed (§2).
 - [x] Crash-safe publication protocol defined (rev 2, §1.6) — rename not in DB transaction; PENDING/ACTIVE with DB-driven recovery.
 - [x] Single-writer ownership mechanism defined (rev 2, §1.1a) — dedicated lockfile, kernel release on crash, restarted-worker rules.
+- [x] Recovery ownership protocol defined (rev 3, §1.6a) — recovery workers must acquire ownership lock; prevents recovery/recovery and recovery/writer races.
+- [x] Lockfile cleanup inode safety defined (rev 3, §1.1b) — unlink only while holding the lock + inode verification.
+- [x] Lock lifecycle clarified (rev 3) — LOCK_SH covers Phase A only; ownership lock covers all phases; I4 updated to three-phase boundaries.
 - [x] No implementation written; design-only.
