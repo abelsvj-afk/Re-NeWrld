@@ -91,10 +91,17 @@ async function createReservation(worldId: string = TEST_WORLD_ID): Promise<strin
 }
 
 async function createWorld(): Promise<string> {
-  // Worlds table may have required fields; use minimal insert.
-  const r = await pool.query(
-    `INSERT INTO worlds (world_id, title, owner_id) VALUES ($1, 'Test World', $2) ON CONFLICT (world_id) DO NOTHING RETURNING world_id`,
-    [TEST_WORLD_ID, '00000000-0000-0000-0000-000000000000'],
+  // Create a user first (for creator_id FK), then the world.
+  const userId = '00000000-0000-0000-0000-000000000000';
+  await pool.query(
+    `INSERT INTO users (user_id, email, password_hash, role) VALUES ($1, 'test@test.com', 'hash', 'creator')
+     ON CONFLICT (user_id) DO NOTHING`,
+    [userId],
+  );
+  await pool.query(
+    `INSERT INTO worlds (world_id, title, creator_id) VALUES ($1, 'Test World', $2)
+     ON CONFLICT (world_id) DO NOTHING`,
+    [TEST_WORLD_ID, userId],
   );
   return TEST_WORLD_ID;
 }
@@ -104,10 +111,12 @@ beforeAll(async () => {
   if (!url) throw new Error('TEST_DATABASE_URL not set');
   pool = new Pool({ connectionString: url });
 
-  // Run migrations 014, 015, 016.
-  const { readFile } = await import('node:fs/promises');
-  for (const mig of ['014_media_durable_ops.sql', '015_media_registry.sql', '016_res1b_phase2_writer.sql']) {
-    const sql = await readFile(join(process.cwd(), 'db/migrations', mig), 'utf-8');
+  // Run all migrations in order (001-016).
+  const { readFile, readdir } = await import('node:fs/promises');
+  const migDir = join(process.cwd(), 'db/migrations');
+  const files = (await readdir(migDir)).filter(f => f.endsWith('.sql')).sort();
+  for (const mig of files) {
+    const sql = await readFile(join(migDir, mig), 'utf-8');
     await pool.query(sql);
   }
 
