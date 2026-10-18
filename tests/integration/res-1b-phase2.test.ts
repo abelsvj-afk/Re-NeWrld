@@ -703,8 +703,43 @@ describe('RES-1b Webhook Adapter (B8)', () => {
   }, 15000);
 });
 
-describe('RES-1c Lock Error Classification (B2 rev 5)', () => {
-  it('held lock → LockContentionError (exit 250)', async () => {
+describe('RES-1c Lock Error Classification (B2 rev 6)', () => {
+  it('classifyFlockExit: 250 → LockContentionError', async () => {
+    const { classifyFlockExit, FLOCK_CONFLICT_EXIT_CODE } = await import(
+      '../../src/shared/fs/flock.js'
+    );
+    const err = classifyFlockExit(FLOCK_CONFLICT_EXIT_CODE, null, '/tmp/x.lock');
+    expect(err.name).toBe('LockContentionError');
+    expect(err.message).toContain('held by another process');
+  });
+
+  it('classifyFlockExit: exit 1 → LockVerificationError (not contention)', async () => {
+    const { classifyFlockExit } = await import('../../src/shared/fs/flock.js');
+    const err = classifyFlockExit(1, null, '/tmp/x.lock');
+    expect(err.name).toBe('LockVerificationError');
+    expect(err.name).not.toBe('LockContentionError');
+  });
+
+  it('classifyFlockExit: exit 66 → LockVerificationError', async () => {
+    const { classifyFlockExit } = await import('../../src/shared/fs/flock.js');
+    const err = classifyFlockExit(66, null, '/tmp/x.lock');
+    expect(err.name).toBe('LockVerificationError');
+  });
+
+  it('classifyFlockExit: signal death → LockVerificationError', async () => {
+    const { classifyFlockExit } = await import('../../src/shared/fs/flock.js');
+    const err = classifyFlockExit(null, 'SIGKILL', '/tmp/x.lock');
+    expect(err.name).toBe('LockVerificationError');
+  });
+
+  it('classifyFlockExit: exit 0 (unexpected) → LockVerificationError', async () => {
+    // Exit 0 with no lock verified should not happen; fail closed.
+    const { classifyFlockExit } = await import('../../src/shared/fs/flock.js');
+    const err = classifyFlockExit(0, null, '/tmp/x.lock');
+    expect(err.name).toBe('LockVerificationError');
+  });
+
+  it('held lock via helper → LockContentionError (integration)', async () => {
     const { acquireExclusiveNonBlocking, releaseLock } = await import(
       '../../src/shared/fs/flock.js'
     );
@@ -718,26 +753,100 @@ describe('RES-1c Lock Error Classification (B2 rev 5)', () => {
       const holder = await acquireExclusiveNonBlocking(lockPath);
       try {
         let thrownName: string | null = null;
-        let thrownMessage: string | null = null;
         try {
           await acquireExclusiveNonBlocking(lockPath);
           thrownName = 'NO_ERROR_THROWN';
         } catch (err) {
           thrownName = (err as Error).name || 'UNNAMED';
-          thrownMessage = (err as Error).message || '';
         }
         expect(thrownName).toBe('LockContentionError');
-        expect(thrownMessage).toContain('held by another process');
       } finally {
         await releaseLock(holder);
       }
-      // After release, acquisition succeeds.
-      const holder2 = await acquireExclusiveNonBlocking(lockPath);
-      await releaseLock(holder2);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('releaseLock kills flock AND sleep child (process group)', async () => {
+    const { acquireExclusiveNonBlocking, releaseLock } = await import(
+      '../../src/shared/fs/flock.js'
+    );
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { exec } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execAsync = promisify(exec);
+
+    const dir = await mkdtemp(join(tmpdir(), 'flock-test-'));
+    const lockPath = join(dir, 'test.lock');
+    // Unique marker to identify our sleep child.
+    const marker = `flock-test-${Date.now()}`;
+    try {
+      const handle = await acquireExclusiveNonBlocking(lockPath);
+      const pid = handle.pid;
+
+      // Find the sleep child via ppid.
+      let sleepPid: string = '';
+      try {
+        const { stdout } = await execAsync(`ps --ppid ${pid} -o pid= 2>/dev/null`);
+        sleepPid = stdout.trim().split(/\s+/)[0] || '';
+      } catch { /* none */ }
+
+      await releaseLock(handle);
+      await new Promise((r) => setTimeout(r, 800));
+
+      // Verify flock is gone.
+      let flockAlive = false;
+      try {
+        const { stdout } = await execAsync(`ps -p ${pid} -o pid= 2>/dev/null`);
+        flockAlive = stdout.trim() !== '';
+      } catch { flockAlive = false; }
+      expect(flockAlive).toBe(false);
+
+      // Verify the sleep child is also gone (if we found one).
+      if (sleepPid) {
+        let sleepAlive = false;
+        try {
+          const { stdout } = await execAsync(`ps -p ${sleepPid} -o pid= 2>/dev/null`);
+          sleepAlive = stdout.trim() !== '';
+        } catch { sleepAlive = false; }
+        expect(sleepAlive).toBe(false);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('caller routing: contention → skip; verification → fail-closed', async () => {
+    const {
+      classifyFlockExit,
+      LockContentionError,
+      LockVerificationError,
+    } = await import('../../src/shared/fs/flock.js');
+
+    // Simulate the worker's dispatch for both error types.
+    function route(err: Error): string {
+      if (err.name === 'LockContentionError') return 'skip';
+      if (err.name === 'LockVerificationError') return 'fail-closed';
+      if (err.name === 'LockSpawnError') return 'fail-closed';
+      return `unexpected:${err.name}`;
+    }
+
+    // Contention path.
+    const contentionErr = classifyFlockExit(250, null, '/tmp/x.lock');
+    expect(route(contentionErr)).toBe('skip');
+
+    // Verification failure path (e.g., exit 66).
+    const verifyErr = classifyFlockExit(66, null, '/tmp/x.lock');
+    expect(route(verifyErr)).toBe('fail-closed');
+
+    // Command failure path (exit 1).
+    const cmdErr = classifyFlockExit(1, null, '/tmp/x.lock');
+    expect(route(cmdErr)).toBe('fail-closed');
+  });
+});
 
   it('flock open failure → LockVerificationError (not contention)', async () => {
     // Exercises the real acquire path with a lock path that flock cannot open.

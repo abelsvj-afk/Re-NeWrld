@@ -189,6 +189,30 @@ export function encodeDev(major: number, minor: number): number {
 }
 
 /**
+ * Classifies a flock child-process exit into the typed error contract.
+ *
+ * Pure function — directly unit-testable. This is the single place where
+ * exit statuses are mapped to error types.
+ *
+ * B2 (rev 6): Only FLOCK_CONFLICT_EXIT_CODE (250, via `flock -E`) means
+ * contention. All other exits and signals are verification/operational
+ * failures → fail closed. Never infers contention from a generic non-zero.
+ */
+export function classifyFlockExit(
+  exitCode: number | null,
+  signalCode: string | null,
+  targetPath: string,
+): FlockError {
+  if (exitCode === FLOCK_CONFLICT_EXIT_CODE) {
+    return new LockContentionError(targetPath);
+  }
+  return new LockVerificationError(
+    `flock exited with code ${exitCode} (signal: ${signalCode}) on ${targetPath}; ` +
+    `not contention (expected ${FLOCK_CONFLICT_EXIT_CODE} for conflict)`,
+  );
+}
+
+/**
  * Waits for the lock to appear in /proc/locks, up to timeoutMs.
  * Throws FlockError on timeout or if the process exits.
  */
@@ -206,18 +230,7 @@ async function waitForLock(
     // Check if process exited.
     if (child.exitCode !== null || child.signalCode !== null) {
       if (nonBlocking) {
-        // B2 (rev 5): Classify by dedicated conflict exit code.
-        // `flock -n -E 250` exits 250 ONLY on lock conflict. This cannot
-        // be confused with the executed command's exit status (sleep
-        // infinity never exits 250 on its own) or with sysexits codes
-        // (64-78 for operational failures like "cannot open file").
-        // Only 250 is confirmed contention; everything else fails closed.
-        if (child.exitCode === FLOCK_CONFLICT_EXIT_CODE) {
-          throw new LockContentionError(targetPath);
-        }
-        throw new LockVerificationError(
-          `flock -n exited with code ${child.exitCode} (signal: ${child.signalCode}) on ${targetPath}; not contention (expected ${FLOCK_CONFLICT_EXIT_CODE})`,
-        );
+        throw classifyFlockExit(child.exitCode, child.signalCode, targetPath);
       }
       // Blocking mode: unexpected exit means the lock was never acquired.
       throw new LockVerificationError(
