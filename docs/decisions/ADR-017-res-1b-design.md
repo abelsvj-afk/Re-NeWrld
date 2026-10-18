@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 21 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 22 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -410,6 +410,48 @@ ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMP
 5. Later, unlink fails 5x again → new incident U2 opens (warning, `incident_id=bbb`, NOT escalated). The prior escalation does not carry over.
 6. Meanwhile, fsync fails 5x → incident F1 opens (`failure_type='fsync'`, `incident_id=ccc`). Independent of U1/U2.
 
+**Incident persistence contract (rev 22):**
+
+**Schema:**
+```sql
+CREATE TABLE temp_cleanup_incidents (
+    incident_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    reservation_id UUID NOT NULL,
+    failure_type TEXT NOT NULL CHECK (failure_type IN ('unlink', 'fsync')),
+    status TEXT NOT NULL CHECK (status IN ('open', 'escalated', 'resolved')),
+    -- 'open': warning alert fired, not yet escalated
+    -- 'escalated': critical alert fired (counter reached 15)
+    -- 'resolved': operation succeeded, incident closed
+    opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,
+    escalated_at TIMESTAMPTZ,
+    last_fired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_fired_count INT NOT NULL,  -- counter value at last fire (5, 10, 15...)
+    acknowledged_at TIMESTAMPTZ,    -- operator ack (suppresses notifications, does NOT resolve)
+    UNIQUE (reservation_id, failure_type, status) 
+    -- At most one non-resolved incident per (reservation, type).
+    -- Partial index: WHERE status IN ('open', 'escalated')
+);
+CREATE INDEX ON temp_cleanup_incidents (reservation_id, failure_type) 
+    WHERE status IN ('open', 'escalated');
+```
+
+**Atomicity with counters:** Incident state changes occur in the SAME database transaction as counter updates:
+- When counter increments to 5 (first fire): `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status='open', last_fired_count=5)` in the same txn as the counter UPDATE. If the txn rolls back, neither the counter nor the incident persists.
+- When counter reaches 10, 15: `UPDATE temp_cleanup_incidents SET last_fired_at=now(), last_fired_count=10 WHERE incident_id=? AND status='open'`. At 15: also `SET status='escalated', escalated_at=now()`.
+- When operation succeeds: `UPDATE temp_cleanup_incidents SET status='resolved', resolved_at=now() WHERE reservation_id=? AND failure_type=? AND status IN ('open','escalated')` in the same txn as the counter reset. Atomic: either both the counter resets and the incident resolves, or neither does.
+
+**Crash recovery:**
+- **Crash after operation succeeds but before incident resolution commits:** The transaction rolls back. Counter remains >= 5, incident remains open/escalated. Next cycle retries the operation (which will succeed again, idempotent) and resolves the incident. No stale resolved state.
+- **Crash after incident opens but before alert delivery:** The incident row is committed (in the same txn as the counter). Alert delivery is a separate, at-least-once notification. On restart, the recovery scans for `status IN ('open','escalated')` incidents and re-emits alerts for any without confirmed delivery (tracked via a `delivery_confirmed_at` column, or the alert system deduplicates by `incident_id`). The incident is not lost.
+- **Recurrence UUID:** When a new incident opens (counter reaches 5 after a prior resolution), `gen_random_uuid()` generates a fresh ID. The old resolved incident remains in the table with `status='resolved'` (for audit). The UNIQUE constraint only applies to non-resolved statuses, so the new incident inserts cleanly without conflicting with the old resolved row.
+- **Stale incident reconciliation:** On startup, query for incidents with `status IN ('open','escalated')`. For each, check the current counter value:
+  - If counter < 5 → the operation must have succeeded without resolving the incident (crash window). Resolve it: `SET status='resolved', resolved_at=now()`. Log at warning (`STALE_INCIDENT_RESOLVED`).
+  - If counter >= 5 → incident is legitimately open. Re-emit alert if delivery unconfirmed.
+  - This ensures a resolved incident cannot remain active after recovery.
+
+**Acknowledgment persistence:** `acknowledged_at` is set by operator action (separate txn). It does NOT change `status`. An acknowledged incident remains 'open' or 'escalated' until the operation succeeds. The alert system suppresses notifications for acknowledged incidents but continues to track them. Acknowledgment is cleared (set to NULL) when a new incident opens (recurrence).
+
 **Why this works:**
 - The retry state is in the database, surviving process restarts and crashes.
 - The retry does not require the temp file to exist — it fsyncs the directory, which is the actual durability mechanism.
@@ -728,6 +770,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Marker-counter separation (rev 19) — marker write never touches counters; pending recovery applies ENOENT reset consistently; fsync affects only fsync counter.
 - [x] Test consistency (rev 20) — §6.21 rewritten to match rev 19; no contradictory marker-reset language remains.
 - [x] Complete alert lifecycle (rev 21) — identity per (reservation_id, failure_type); incident model with resolution/recurrence; escalation resets on new incident; manual ack never resolves.
+- [x] Incident persistence contract (rev 22) — DB table with atomic counter+incident updates; crash recovery reconciles stale incidents; recurrence generates fresh UUIDs.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -876,3 +919,15 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Recurrence:** Later, unlink fails 5 times again. Assert NEW alert fires with DIFFERENT `incident_id`. NOT escalated (starts at warning). The prior escalation does not carry over.
 - **Independent types:** During the second unlink incident, simulate fsync failures reaching 5. Assert fsync alert fires with `failure_type='fsync'` and its own `incident_id`. The unlink incident is unaffected. Two independent open incidents.
 - **Manual ack does not resolve:** Acknowledge the unlink alert (operator marks seen). Assert incident remains open (`unlink_attempts` still >= 5). The alert is suppressed for notifications but NOT resolved. Only a successful unlink resolves it.
+
+### 6.27 Incident persistence crash recovery (new, rev 22)
+- **Crash after success, before resolution:** Setup: `unlink_attempts=5`, incident open. Cleanup: `unlink()` succeeds. Simulate crash BEFORE the transaction commits (counter reset + incident resolution).
+- **Assert:** After restart, DB shows `unlink_attempts=5` (not reset, txn rolled back), incident still `status='open'`. Recovery retries: `unlink()` succeeds again (idempotent, file already gone → ENOENT → treated as success) → transaction commits: counter reset, incident resolved. No stale open incident.
+- **Crash after incident open, before alert delivery:** Setup: counter reaches 5, incident INSERT commits, then crash before alert system sends notification.
+- **Assert:** After restart, incident exists with `status='open'`. Startup reconciliation finds it, checks `delivery_confirmed_at` (NULL) → re-emits alert. The incident was not lost. Alert deduplicated by `incident_id` (alert system tracks sent IDs).
+- **Stale incident reconciliation:** Setup: manually set incident to `status='open'` with counter at 3 (simulating a crash where counter reset but incident didn't).
+- **Assert:** Startup scan finds open incident with counter < 5 → resolves it: `status='resolved'`, `resolved_at` set. Logs `STALE_INCIDENT_RESOLVED` at warning. The resolved incident cannot remain active.
+- **Recurrence UUID uniqueness:** Setup: incident U1 resolved. New failures reach 5.
+- **Assert:** New incident U2 inserted with different UUID. Old U1 remains with `status='resolved'`. UNIQUE constraint allows this (only enforces uniqueness for open/escalated). No conflict, no accidental reopen of U1.
+- **Atomic counter+incident:** Simulate DB failure during the transaction that increments counter to 5 and inserts incident.
+- **Assert:** Transaction rolls back. Counter remains at 4, no incident row exists. The two are always consistent — never a counter at 5 without an incident, never an incident without the counter.
