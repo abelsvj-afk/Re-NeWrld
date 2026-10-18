@@ -27,6 +27,8 @@ export interface LockHandle {
   process: ChildProcess;
   /** PID of the holder (for /proc/locks verification). */
   pid: number;
+  /** Device of the locked file (for /proc/locks verification). */
+  dev: number;
   /** Inode of the locked file (for /proc/locks verification). */
   inode: number;
   /** Path being locked. */
@@ -39,25 +41,31 @@ export interface LockHandle {
  * Checks /proc/locks for a lock held by pid on inode.
  * Returns the lock mode ('ADVISORY', 'FLOCK') or null if not found.
  */
-async function checkProcLocks(pid: number, inode: number): Promise<string | null> {
+async function checkProcLocks(pid: number, dev: number, inode: number): Promise<string | null> {
   try {
     const content = await readFile('/proc/locks', 'utf-8');
     // Format: "1: FLOCK  ADVISORY  WRITE 1234 00:00:12345 0 EOF"
     // Fields: id, type, mode, access, pid, dev:ino, start, end
+    // dev:ino is "major:minor:inode" in hex:hex:decimal
     for (const line of content.split('\n')) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 6) continue;
       const lockPid = parseInt(parts[4], 10);
-      const devIno = parts[5]; // format: "00:00:12345" (major:minor:inode)
-      const inoMatch = devIno.match(/:(\d+)$/);
-      if (!inoMatch) continue;
-      const lockIno = parseInt(inoMatch[1], 10);
-      if (lockPid === pid && lockIno === inode) {
+      const devIno = parts[5];
+      // Parse "major:minor:inode" — major/minor are hex, inode is decimal.
+      const m = devIno.match(/^([0-9a-f]+):([0-9a-f]+):(\d+)$/i);
+      if (!m) continue;
+      const lockDev = (parseInt(m[1], 16) << 8) | parseInt(m[2], 16); // makedev
+      const lockIno = parseInt(m[3], 10);
+      // B5: Match BOTH device and inode. Same inode number on different
+      // filesystems is a different file — must not confuse them.
+      if (lockPid === pid && lockDev === dev && lockIno === inode) {
         return parts[1]; // lock type (FLOCK)
       }
     }
   } catch {
-    // /proc/locks not available (non-Linux). Fall back to process-alive check.
+    // /proc/locks not available (non-Linux). Fail closed — do not assume lock held.
+    throw new FlockError('/proc/locks not available; cannot verify lock acquisition');
   }
   return null;
 }
@@ -69,6 +77,7 @@ async function checkProcLocks(pid: number, inode: number): Promise<string | null
 async function waitForLock(
   child: ChildProcess,
   pid: number,
+  dev: number,
   inode: number,
   timeoutMs: number,
 ): Promise<void> {
@@ -84,7 +93,7 @@ async function waitForLock(
     }
 
     // Check /proc/locks.
-    const found = await checkProcLocks(pid, inode);
+    const found = await checkProcLocks(pid, dev, inode);
     if (found) return; // Lock confirmed.
 
     await new Promise((r) => setTimeout(r, pollInterval));
@@ -108,17 +117,32 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
     await fh.close();
     return stat(path);
   });
+  const dev = fileStat.dev;
   const inode = fileStat.ino;
 
   const child = spawn('flock', ['-n', path, 'sleep', 'infinity'], { stdio: 'ignore' });
-  const pid = child.pid;
-  if (!pid) throw new FlockError('Failed to spawn flock process');
 
-  // Handle spawn errors.
-  const spawnError = await new Promise<Error | null>((resolve) => {
+  // B5: Attach error listener BEFORE checking pid. If spawn fails, the
+  // 'error' event fires; without a listener it becomes an unhandled rejection.
+  const spawnErrorPromise = new Promise<Error | null>((resolve) => {
     child.on('error', (err) => resolve(err));
-    setTimeout(() => resolve(null), 50);
   });
+
+  const pid = child.pid;
+  if (!pid) {
+    // Spawn failed synchronously; wait for the error event.
+    const err = await Promise.race([
+      spawnErrorPromise,
+      new Promise<null>((r) => setTimeout(() => r(null), 100)),
+    ]);
+    throw new FlockError(`Failed to spawn flock: ${err?.message ?? 'unknown'}`);
+  }
+
+  // Check for async spawn error (e.g., ENOENT for missing binary).
+  const spawnError = await Promise.race([
+    spawnErrorPromise,
+    new Promise<null>((r) => setTimeout(() => r(null), 50)),
+  ]);
   if (spawnError) {
     throw new FlockError(`Failed to spawn flock: ${spawnError.message}`);
   }
@@ -126,14 +150,14 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
   try {
     // For non-blocking, the process exits immediately if locked.
     // Wait for lock confirmation with a short timeout.
-    await waitForLock(child, pid, inode, 2000);
+    await waitForLock(child, pid, dev, inode, 2000);
   } catch (err) {
     // Ensure child is dead.
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
     throw err;
   }
 
-  return { process: child, pid, inode, path, mode: 'exclusive' };
+  return { process: child, pid, dev, inode, path, mode: 'exclusive' };
 }
 
 /**
@@ -142,29 +166,42 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
  */
 export async function acquireShared(path: string, timeoutMs: number = 10000): Promise<LockHandle> {
   const fileStat = await stat(path);
+  const dev = fileStat.dev;
   const inode = fileStat.ino;
 
   const child = spawn('flock', ['-s', path, 'sleep', 'infinity'], { stdio: 'ignore' });
-  const pid = child.pid;
-  if (!pid) throw new FlockError('Failed to spawn flock process');
 
-  const spawnError = await new Promise<Error | null>((resolve) => {
+  // B5: Attach error listener before pid check.
+  const spawnErrorPromise = new Promise<Error | null>((resolve) => {
     child.on('error', (err) => resolve(err));
-    setTimeout(() => resolve(null), 50);
   });
+
+  const pid = child.pid;
+  if (!pid) {
+    const err = await Promise.race([
+      spawnErrorPromise,
+      new Promise<null>((r) => setTimeout(() => r(null), 100)),
+    ]);
+    throw new FlockError(`Failed to spawn flock: ${err?.message ?? 'unknown'}`);
+  }
+
+  const spawnError = await Promise.race([
+    spawnErrorPromise,
+    new Promise<null>((r) => setTimeout(() => r(null), 50)),
+  ]);
   if (spawnError) {
     throw new FlockError(`Failed to spawn flock: ${spawnError.message}`);
   }
 
   try {
     // Wait for the lock to actually be acquired (not just process alive).
-    await waitForLock(child, pid, inode, timeoutMs);
+    await waitForLock(child, pid, dev, inode, timeoutMs);
   } catch (err) {
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
     throw err;
   }
 
-  return { process: child, pid, inode, path, mode: 'shared' };
+  return { process: child, pid, dev, inode, path, mode: 'shared' };
 }
 
 /**

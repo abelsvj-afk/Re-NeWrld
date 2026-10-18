@@ -164,17 +164,38 @@ export async function handleDeliveryFailure(
 }
 
 /**
- * Runs one delivery worker iteration: claim → send → confirm/fail.
+ * Runs one delivery worker iteration.
+ *
+ * B8: Transaction boundaries are split:
+ *   1. Tx1: Claim the event (durably committed before send starts).
+ *   2. No tx: Send via external notifier (may take time; no DB lock held).
+ *   3. Tx2: Fenced confirm or failure handling (validates claim token).
+ *
+ * If the process crashes after send but before Tx2, the event remains
+ * 'pending' with a stale claim. On restart, another worker reclaims it
+ * (after 5min) and re-sends. The receiver deduplicates on delivery_event_id,
+ * so the operator is not double-paged.
  */
 export async function runDeliveryOnce(deps: DeliveryWorkerDeps): Promise<boolean> {
-  return deps.withTransaction(async (tx) => {
-    const claimed = await claimDeliveryEvent(deps, tx);
-    if (!claimed) return false; // No work.
+  // Tx1: Claim.
+  const claimed = await deps.withTransaction(async (tx) => {
+    return claimDeliveryEvent(deps, tx);
+  });
+  if (!claimed) return false; // No work.
 
-    const { event, claimToken } = claimed;
+  const { event, claimToken } = claimed;
 
-    try {
-      await deps.send(event);
+  // No tx: Send (external I/O, no DB lock held).
+  let sendError: Error | null = null;
+  try {
+    await deps.send(event);
+  } catch (err) {
+    sendError = err as Error;
+  }
+
+  // Tx2: Fenced confirm or failure.
+  await deps.withTransaction(async (tx) => {
+    if (!sendError) {
       const confirmed = await confirmDelivery(event.delivery_event_id, claimToken, tx);
       if (!confirmed) {
         deps.log('warn', 'Claim superseded during send', {
@@ -186,11 +207,11 @@ export async function runDeliveryOnce(deps: DeliveryWorkerDeps): Promise<boolean
           incidentId: event.incident_id,
         });
       }
-    } catch (err) {
+    } else {
       const outcome = await handleDeliveryFailure(
         event.delivery_event_id,
         claimToken,
-        (err as Error).message,
+        sendError.message,
         tx,
       );
       deps.log(outcome === 'failed' ? 'error' : 'warn', `Delivery ${outcome}`, {
@@ -198,7 +219,6 @@ export async function runDeliveryOnce(deps: DeliveryWorkerDeps): Promise<boolean
         outcome,
       });
       if (outcome === 'failed') {
-        // Log critical for exhausted deliveries.
         deps.log('error', 'ALERT_DELIVERY_FAILED', {
           deliveryEventId: event.delivery_event_id,
           incidentId: event.incident_id,
@@ -206,7 +226,7 @@ export async function runDeliveryOnce(deps: DeliveryWorkerDeps): Promise<boolean
         });
       }
     }
-
-    return true;
   });
+
+  return true;
 }

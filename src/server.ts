@@ -1,5 +1,7 @@
 import { buildApp } from './app.js';
 import { env } from './config/env.js';
+import { runDeliveryOnce } from './modules/world/domain/services/delivery-worker.service.js';
+import { withTransaction } from './shared/database/db.js';
 import { SessionService } from './modules/auth/infrastructure/services/session.service.js';
 import { PostgresPasswordResetRepository } from './modules/auth/infrastructure/persistence/postgres-password-reset.repository.js';
 import { PostgresIdempotencyRepository } from './modules/session/infrastructure/persistence/postgres-idempotency.repository.js';
@@ -39,12 +41,73 @@ function startSessionJanitor(app: { log: { info: (o: object, m: string) => void;
   timer.unref();
 }
 
+/**
+ * Starts the temp-cleanup alert delivery worker.
+ *
+ * Polls the delivery outbox every 30 seconds, claims pending events,
+ * and sends notifications. Runs in-process (like the session janitor).
+ *
+ * Boundary: The cleanup service creates durable outbox events transactionally
+ * with the failure counters. This worker claims and delivers them. The two
+ * are decoupled — event creation never blocks on delivery, and delivery
+ * retries independently via the outbox protocol.
+ */
+function startDeliveryWorker(app: {
+  log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void; error: (o: object, m: string) => void };
+}): void {
+  const workerId = `delivery-${process.pid}`;
+  let running = false;
+
+  const run = async () => {
+    if (running) return; // Prevent overlap.
+    running = true;
+    try {
+      const deps = {
+        withTransaction,
+        workerId,
+        log: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => {
+          app.log[level]({ ...data, workerId }, msg);
+        },
+        // Send via app logger for now; production wires to PagerDuty/Opsgenie/webhook.
+        // The receiver must deduplicate on delivery_event_id.
+        send: async (event: { delivery_event_id: string; incident_id: string; severity: string }) => {
+          app.log.warn(
+            {
+              deliveryEventId: event.delivery_event_id,
+              incidentId: event.incident_id,
+              severity: event.severity,
+            },
+            `ALERT: temp cleanup ${event.severity} (dedupe key: ${event.delivery_event_id})`,
+          );
+          // In production, this would POST to the alert system.
+          // Throw to simulate failure for testing retry logic.
+        },
+      };
+
+      // Process up to 10 events per tick.
+      for (let i = 0; i < 10; i++) {
+        const didWork = await runDeliveryOnce(deps);
+        if (!didWork) break;
+      }
+    } catch (err) {
+      app.log.error({ err, workerId }, 'Delivery worker iteration failed');
+    } finally {
+      running = false;
+    }
+  };
+
+  void run();
+  const timer = setInterval(run, 30 * 1000); // Every 30 seconds.
+  timer.unref();
+}
+
 async function start() {
   try {
     const app = await buildApp();
     await app.listen({ port: env.PORT, host: env.HOST });
     app.log.info(`Server listening on http://${env.HOST}:${env.PORT}`);
     startSessionJanitor(app);
+    startDeliveryWorker(app);
 
     // Graceful shutdown on SIGTERM/SIGINT (Fly.io scale-to-zero)
     const shutdown = async (signal: string) => {

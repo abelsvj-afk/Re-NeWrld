@@ -31,17 +31,10 @@ export interface CleanupDeps {
   mediaRoot: string;
   withTransaction: <T>(fn: (tx: pkg.PoolClient) => Promise<T>) => Promise<T>;
   log: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => void;
-  /** Sends a notification; receiver deduplicates on delivery_event_id. */
-  notify: (event: DeliveryEvent) => Promise<void>;
-}
-
-export interface DeliveryEvent {
-  delivery_event_id: string;
-  incident_id: string;
-  reservation_id: string;
-  failure_type: 'unlink' | 'fsync';
-  fire_count: number;
-  severity: 'warning' | 'critical';
+  // Note: No notify dependency. The cleanup service creates durable outbox
+  // events; the delivery worker (server.ts) claims and sends them.
+  // This separates event creation (transactional with counters) from
+  // delivery (external I/O with retry).
 }
 
 // ---------------------------------------------------------------------------
@@ -442,8 +435,8 @@ export async function checkAlertThreshold(
     incidentId,
   });
 
-  // Notify (outside tx? For now, after commit the worker picks it up).
-  // The delivery worker will claim pending events.
+  // Event is durably in the outbox. The delivery worker (server.ts)
+  // will claim it via FOR UPDATE SKIP LOCKED and send it.
 }
 
 /**

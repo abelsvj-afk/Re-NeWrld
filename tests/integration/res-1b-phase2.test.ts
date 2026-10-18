@@ -79,7 +79,6 @@ function makeDeps() {
     },
     withTransaction,
     log: () => {},
-    notify: async () => {},
   };
 }
 
