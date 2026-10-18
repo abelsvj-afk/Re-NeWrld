@@ -608,6 +608,12 @@ Full 15-slice dependency-ordered breakdown lives in the implementation-breakdown
   - **Definition of Done**: All 7 tests PASS with verbatim output recorded; DDL pglast-clean; no existing tables touched. **Evidence (2026-10-18)**: 7/7 passed on PostgreSQL 16.15; pre-existing `migration.test.ts` still 4/4. One test-authoring defect found and fixed in-run (wrong `pg_trigger` column `tgisdisabled` → `tgenabled <> 'D'`); no DDL defects found.
   - **Next slice**: OPS-0 (volume provisioning runbook §2.1) — backfill MUST NOT run before the persistent volume exists.
 
+- **Task OPS-0: Provision persistent media volume + storage-health assertion** 🔄 IN PROGRESS 2026-10-18
+  - **Phase**: ADR-017 slice OPS-0 (volume provisioning + pre-mount observability)
+  - **Completed**: `media_data` volume provisioned (`vol_4912jm2g8pjgw86r`, 2GB, ams, encrypted, unattached); `/data/media` inventoried EMPTY on both machines (0 files — no transfer needed); storage-health module implemented (`src/shared/storage/storage-health.ts` + `/health` `media_storage` assertion, 32/32 tests, tsc clean) — ChatGPT code review PASS 2026-10-18 (commits `4205c34`, `20091a1`).
+  - **Pending (NOT authorized)**: machine destruction (2→1 per ADR-017 §9.2), fly.toml mount commit/deploy, volume attachment, backfill, enforcement.
+  - **Notes**: fly.toml mount block prepared locally, uncommitted; all temp Fly API tokens revoked (user-confirmed 2026-10-18).
+
 ---
 
 ## 3. Post-MVP Implementation Backlog (Deferred / Future Extensions)
@@ -634,6 +640,10 @@ The following were explicitly deferred from Phase H MVP but the user requires th
 - **H-UI-monetization**: Creator subscriptions, premium chapters, monetization tools (US-P03). Future — depends on payment gateway decisions.
 - **H-UI-social**: Creator profiles, follows, ratings/reviews, story recommendations (US-P01, US-P02). Future.
 - **H-UI-mobile**: Companion mobile apps with offline reading + sync (vision §4 post-MVP). Future.
+- **H-UI-creator-nav-redundancy** (reported 2026-10-18): Creator screen left-nav duplicates visible content — e.g. "Worlds" nav option is redundant when the worlds list is already displayed in the main panel on login. Nav must reflect actual navigation, not duplicate what's on screen. Needs a full creator-screen pass for redundant/confusing options (user: "you should be able to look at the site and spot what's missing or duplicated on every page").
+- **H-UI-creator-writing** (reported 2026-10-18): Creator studio has NO writing ability — clicking Edit on a draft opens a page with empty tabs and no way to write scenes/content. The writing portion should be NovelCrafter-like (not identical): actual scene/prose editing surface, not placeholder tabs.
+- **H-UI-cross-account-story-visibility** (reported 2026-10-18): Story uploaded via one account is not visible when logged into a different account — cross-account story visibility/sharing is broken or missing.
+- **H-UI-codex-ai-integration** (reported 2026-10-18): Codex + AI assistant must work together (extends H-UI-codex and H-UI-ai-assistant): AI reads the story's codex (characters, history, world state) and provides continuity checking ("this character wouldn't act this way given their sheet"), choice recommendations ("consider these more powerful choices"), auto-generated choices, location/age/timeline consistency, and scene/chapter review against codex context ("this doesn't make sense given what happened").
 - **H-UI-tts**: Audio TTS narration and dynamic generated scene illustrations (vision §4 post-MVP). **PULLED FORWARD 2026-10-15** — Phase 21: ADR-016 (scene narration via ElevenLabs, v1 single narrator) approved by product owner; System Completeness Gate §8 evaluated PASS. Illustrations remain Future.
   - **T1 (backend)**: `scene_narrations` migration; narration service (ElevenLabs proxy, content-hash cache, quota checks, circuit breaker); `POST /worlds/:id/scenes/:sceneId/narration` (creator), `GET` audio serve, `GET /worlds/:id/narration/quota` (creator).
     - AC: generation triggered once per content hash; concurrent first-reads converge on one synthesis; quota exhausted → 402, reading unaffected; key never leaves server.
