@@ -781,18 +781,24 @@ describe('RES-1c Lock Error Classification (B2 rev 6)', () => {
 
     const dir = await mkdtemp(join(tmpdir(), 'flock-test-'));
     const lockPath = join(dir, 'test.lock');
-    // Unique marker to identify our sleep child.
-    const marker = `flock-test-${Date.now()}`;
     try {
       const handle = await acquireExclusiveNonBlocking(lockPath);
       const pid = handle.pid;
+      expect(pid).toBeGreaterThan(0);
 
-      // Find the sleep child via ppid.
-      let sleepPid: string = '';
-      try {
-        const { stdout } = await execAsync(`ps --ppid ${pid} -o pid= 2>/dev/null`);
-        sleepPid = stdout.trim().split(/\s+/)[0] || '';
-      } catch { /* none */ }
+      // MANDATORY: Find the sleep child via ppid. The test must prove
+      // a child existed before release, otherwise it proves nothing.
+      // Retry briefly — the child may take a moment to spawn.
+      let sleepPid = '';
+      for (let i = 0; i < 10 && !sleepPid; i++) {
+        try {
+          const { stdout } = await execAsync(`ps --ppid ${pid} -o pid= 2>/dev/null`);
+          sleepPid = stdout.trim().split(/\s+/).filter(Boolean)[0] || '';
+        } catch { /* retry */ }
+        if (!sleepPid) await new Promise((r) => setTimeout(r, 200));
+      }
+      expect(sleepPid).not.toBe('');
+      expect(parseInt(sleepPid, 10)).toBeGreaterThan(0);
 
       await releaseLock(handle);
       await new Promise((r) => setTimeout(r, 800));
@@ -805,15 +811,13 @@ describe('RES-1c Lock Error Classification (B2 rev 6)', () => {
       } catch { flockAlive = false; }
       expect(flockAlive).toBe(false);
 
-      // Verify the sleep child is also gone (if we found one).
-      if (sleepPid) {
-        let sleepAlive = false;
-        try {
-          const { stdout } = await execAsync(`ps -p ${sleepPid} -o pid= 2>/dev/null`);
-          sleepAlive = stdout.trim() !== '';
-        } catch { sleepAlive = false; }
-        expect(sleepAlive).toBe(false);
-      }
+      // Verify the sleep child is ALSO gone (mandatory — we proved it existed).
+      let sleepAlive = false;
+      try {
+        const { stdout } = await execAsync(`ps -p ${sleepPid} -o pid= 2>/dev/null`);
+        sleepAlive = stdout.trim() !== '';
+      } catch { sleepAlive = false; }
+      expect(sleepAlive).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -848,143 +852,3 @@ describe('RES-1c Lock Error Classification (B2 rev 6)', () => {
   });
 });
 
-  it('flock open failure → LockVerificationError (not contention)', async () => {
-    // Exercises the real acquire path with a lock path that flock cannot open.
-    // flock exits 66; waitForLock must map it to LockVerificationError.
-    const { acquireExclusiveNonBlocking } = await import(
-      '../../src/shared/fs/flock.js'
-    );
-
-    let thrownName: string | null = null;
-    try {
-      // Nonexistent parent dir: our helper's stat() fails, then open('w')
-      // fails → the error surfaces before flock even spawns. To force a
-      // flock-level failure, we need flock itself to fail. Use a path
-      // where the file exists but flock cannot open it: a directory with
-      // no write permission won't work (flock needs read).
-      // Instead: create the file, then replace it with a FIFO? flock on
-      // FIFO blocks... Simplest reliable: mock via direct spawn test below.
-      await acquireExclusiveNonBlocking('/nonexistent-dir-xyz-123/test.lock');
-      thrownName = 'NO_ERROR_THROWN';
-    } catch (err) {
-      thrownName = (err as Error).name || 'UNNAMED';
-    }
-    // The helper creates the file, so this throws before flock spawns
-    // (ENOENT on parent). That's still not contention.
-    expect(thrownName).not.toBe('LockContentionError');
-  });
-
-  it('flock exit 66 maps to LockVerificationError via real helper', async () => {
-    // Direct test of the classification: spawn flock -n -E 250 on a bad
-    // path, verify exit is 66 (not 250), proving the mapping is sound.
-    const { FLOCK_CONFLICT_EXIT_CODE } = await import(
-      '../../src/shared/fs/flock.js'
-    );
-    const { spawn } = await import('node:child_process');
-
-    const child = spawn('flock', [
-      '-n', '-E', String(FLOCK_CONFLICT_EXIT_CODE),
-      '/nonexistent-dir-xyz-123/test.lock', 'true',
-    ]);
-    const exitCode: number | null = await new Promise((resolve) => {
-      child.on('close', (code) => resolve(code));
-    });
-    expect(exitCode).toBe(66);
-    expect(exitCode).not.toBe(FLOCK_CONFLICT_EXIT_CODE);
-  });
-
-  it('command exit 1 is NOT classified as contention', async () => {
-    // Proves -E isolation: flock acquires the lock, command exits 1,
-    // flock propagates 1 — which is NOT the contention code (250).
-    const { FLOCK_CONFLICT_EXIT_CODE } = await import(
-      '../../src/shared/fs/flock.js'
-    );
-    const { spawn } = await import('node:child_process');
-    const { mkdtemp, rm } = await import('node:fs/promises');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-
-    const dir = await mkdtemp(join(tmpdir(), 'flock-test-'));
-    const lockPath = join(dir, 'test.lock');
-    try {
-      const child = spawn('flock', [
-        '-n', '-E', String(FLOCK_CONFLICT_EXIT_CODE),
-        lockPath, 'sh', '-c', 'exit 1',
-      ]);
-      const exitCode: number | null = await new Promise((resolve) => {
-        child.on('close', (code) => resolve(code));
-      });
-      expect(exitCode).toBe(1);
-      expect(exitCode).not.toBe(FLOCK_CONFLICT_EXIT_CODE);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('releaseLock terminates flock and its sleep child', async () => {
-    const { acquireExclusiveNonBlocking, releaseLock } = await import(
-      '../../src/shared/fs/flock.js'
-    );
-    const { mkdtemp, rm } = await import('node:fs/promises');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    const { exec } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execAsync = promisify(exec);
-
-    const dir = await mkdtemp(join(tmpdir(), 'flock-test-'));
-    const lockPath = join(dir, 'test.lock');
-    try {
-      const handle = await acquireExclusiveNonBlocking(lockPath);
-      const pid = handle.pid;
-      expect(pid).toBeGreaterThan(0);
-
-      await releaseLock(handle);
-      await new Promise((r) => setTimeout(r, 500));
-
-      // Both flock and sleep should be gone.
-      let stillAlive = false;
-      try {
-        const { stdout } = await execAsync(`ps -p ${pid} -o pid= 2>/dev/null`);
-        stillAlive = stdout.trim() !== '';
-      } catch {
-        stillAlive = false; // ps failed = process gone.
-      }
-      expect(stillAlive).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('caller routes contention to skip, other errors to fail-closed', async () => {
-    const { acquireExclusiveNonBlocking, releaseLock } = await import(
-      '../../src/shared/fs/flock.js'
-    );
-    const { mkdtemp, rm } = await import('node:fs/promises');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-
-    const dir = await mkdtemp(join(tmpdir(), 'flock-test-'));
-    const lockPath = join(dir, 'test.lock');
-    try {
-      const holder = await acquireExclusiveNonBlocking(lockPath);
-
-      // Simulate worker dispatch logic.
-      let outcome = 'none';
-      try {
-        await acquireExclusiveNonBlocking(lockPath);
-      } catch (err) {
-        const name = (err as Error).name;
-        if (name === 'LockContentionError') outcome = 'skip';
-        else if (name === 'LockVerificationError') outcome = 'fail-closed';
-        else if (name === 'LockSpawnError') outcome = 'fail-closed';
-        else outcome = `unexpected:${name}`;
-      }
-      expect(outcome).toBe('skip');
-
-      await releaseLock(holder);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-});
