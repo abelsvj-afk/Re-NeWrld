@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 19 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 20 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -700,6 +700,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Independent alert lifecycle (rev 17) — unlink alert clears on unlink success; fsync alert clears on fsync success; no cross-contamination; escalation per counter.
 - [x] Counter reset isolation (rev 18) — fsync success resets only fsync counter; unlink counter resets only on unlink success/ENOENT; stale manual-clear text removed.
 - [x] Marker-counter separation (rev 19) — marker write never touches counters; pending recovery applies ENOENT reset consistently; fsync affects only fsync counter.
+- [x] Test consistency (rev 20) — §6.21 rewritten to match rev 19; no contradictory marker-reset language remains.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -795,9 +796,9 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Duplicate processing in one cycle:** Setup: ACTIVE asset with temp entry; marker not yet set. Cleanup cycle runs Pass 1: processes the temp file, `unlink()` succeeds, `fsync()` fails → marker set (attempts=1). Pass 2 queries DB and finds the same reservation with pending=TRUE.
 - **Assert:** Pass 2 skips the reservation (already in `processed` set). The fsync is NOT retried in the same cycle. Attempts remains 1 (not incremented to 2). No premature alert. The retry occurs on the NEXT cycle, not the same one.
 - **Counter preservation on rediscovery:** Setup: reservation with `pending=TRUE`, `attempts=3` (from prior failures). Temp file reappears (unlink not durable). Cleanup cycle discovers via file listing.
-- **Assert:** Marker write uses conditional logic → attempts remains 3 (not reset to 0). The existing failure history is preserved. After the retry fsync fails → attempts becomes 4. After 5th failure → alert fires correctly (not prematurely due to reset).
-- **Counter reset on new obligation:** Setup: reservation with no marker (`pending=FALSE`, `attempts=0` from a prior completed cleanup). New temp file appears (new upload with same reservation_id — should not happen, but test the logic).
-- **Assert:** Marker write sees `pending=FALSE` → initializes attempts to 0. This is a new obligation, not a continuation.
+- **Assert:** Marker write never touches counters (rev 19) → attempts remains 3. The existing failure history is preserved. After the retry fsync fails → attempts becomes 4. After 5th failure → alert fires correctly (not prematurely due to reset).
+- **Counter preservation on new obligation (rev 20):** Setup: reservation with no marker (`pending=FALSE`), `unlink_attempts=2`, `fsync_attempts=1` (residual from a prior incomplete cleanup — should not happen normally, but test the logic). New temp file appears.
+- **Assert:** Marker write sets `pending=TRUE` but does NOT modify either counter. `unlink_attempts` remains 2, `fsync_attempts` remains 1. **Rev 19 rule: marker initialization never resets counters, regardless of previous marker state.** The counters change only on operation success/failure, not on marker creation.
 - **Attempts increment only on fsync failure:** Setup: pending marker with attempts=2. Cycle runs but lock acquisition fails (another process holds it).
 - **Assert:** Attempts remains 2 (not incremented). Lock failure is not an fsync failure. Next cycle retries.
 
