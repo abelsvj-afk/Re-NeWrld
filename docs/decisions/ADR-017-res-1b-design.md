@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 18 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 19 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -285,19 +285,12 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
    ```sql
    UPDATE world_media_assets 
    SET temp_cleanup_fsync_pending = TRUE,
-       temp_cleanup_fsync_attempts = CASE 
-           WHEN temp_cleanup_fsync_pending = FALSE THEN 0 
-           ELSE temp_cleanup_fsync_attempts 
-       END,
-       temp_cleanup_unlink_attempts = CASE 
-           WHEN temp_cleanup_fsync_pending = FALSE THEN 0 
-           ELSE temp_cleanup_unlink_attempts 
-       END,
        temp_cleanup_last_attempt_at = now()
    WHERE reservation_id = ? AND publication_status = 'ACTIVE'
    ```
-   - If the marker was previously FALSE (new cleanup obligation) → attempts initialized to 0.
-   - If the marker was already TRUE (rediscovering an already-pending cleanup, e.g., temp file reappeared) → attempts PRESERVED. The existing failure history is not erased.
+   - **Rev 19:** The marker write NEVER modifies either failure counter. Counters are initialized to 0 by the schema default and reset only by their specific success conditions (unlink success/ENOENT for unlink counter; fsync success for fsync counter).
+   - If the marker was already TRUE (rediscovering a pending cleanup) → counters preserved (untouched by this UPDATE).
+   - If the marker was FALSE (new cleanup) → counters retain whatever value they have (should be 0 from prior successes, but never forcibly reset here).
    - If this UPDATE fails (DB error) → abort cleanup, release lock, retry next cycle. Do NOT proceed to unlink without the marker.
    - The marker must be durably committed before the unlink executes.
 
@@ -371,7 +364,7 @@ ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMP
    - Acquire ownership lock (non-blocking). If fails → skip.
    - Check if temp file exists:
      - If exists → verify inode identity → proceed with unlink + fsync (steps 3–4 of cleanup protocol). The marker is already set.
-     - If absent → the unlink already happened (or never needed). Proceed directly to `fsync(temp_dir_fd)`.
+     - If absent → the unlink obligation is satisfied by absence (rev 18 ENOENT rule). Reset unlink counter: `UPDATE ... SET temp_cleanup_unlink_attempts = 0 WHERE reservation_id = ?`. Then proceed directly to `fsync(temp_dir_fd)`. **The absent-file observation resets the unlink counter in recovery exactly as ENOENT does in normal cleanup** (rev 19 consistency). The subsequent fsync result affects only the fsync counter.
    - `fsync(temp_dir_fd)`:
      - If succeeds → clear marker: `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_fsync_attempts = 0`. Log at info. **Do NOT reset unlink counter** (rev 18 invariant).
      - If fails → increment attempts. If >= 5 → alert `TEMP_CLEANUP_FAILED`.
@@ -706,6 +699,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Separate unlink counter (rev 16) — temp_cleanup_unlink_attempts tracks unlink failures independently; 5-failure alert per counter.
 - [x] Independent alert lifecycle (rev 17) — unlink alert clears on unlink success; fsync alert clears on fsync success; no cross-contamination; escalation per counter.
 - [x] Counter reset isolation (rev 18) — fsync success resets only fsync counter; unlink counter resets only on unlink success/ENOENT; stale manual-clear text removed.
+- [x] Marker-counter separation (rev 19) — marker write never touches counters; pending recovery applies ENOENT reset consistently; fsync affects only fsync counter.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -835,3 +829,13 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** `unlink_attempts` reset to 0 (ENOENT satisfies the obligation). `fsync_attempts` reset to 0. Marker cleared. The fsync success did not "clear" the unlink counter — the ENOENT observation did.
 - **Setup:** Reservation with `unlink_attempts=3`, `fsync_attempts=2`. Cleanup runs: `unlink()` succeeds, `fsync()` fails.
 - **Assert:** After unlink → `unlink_attempts=0`. After fsync failure → `fsync_attempts=3` (incremented from 2). Marker remains set. **The successful unlink did NOT reset the fsync counter.** The failed fsync did NOT affect the (now-zero) unlink counter. Counters are fully independent.
+
+### 6.25 Marker and counter consistency (new, rev 19)
+- **New marker preserves counters:** Setup: reservation with `unlink_attempts=3`, `fsync_attempts=2`, `pending=FALSE` (simulating a state where prior cleanup left counters non-zero). Start new cleanup → marker write executes.
+- **Assert:** After marker write, `unlink_attempts` still 3, `fsync_attempts` still 2, `pending=TRUE`. The marker write did NOT reset either counter. Counters are only modified by operation successes/failures, never by marker initialization.
+- **Pending recovery with absent temp:** Setup: `pending=TRUE`, `unlink_attempts=3`, `fsync_attempts=1`. Temp file absent. Recovery runs.
+- **Assert:** Recovery observes absence → resets `unlink_attempts` to 0 (ENOENT rule). Then `fsync()` succeeds → `fsync_attempts` reset to 0, marker cleared. Final: both counters 0, pending FALSE. The absence reset the unlink counter; the fsync success reset only the fsync counter.
+- **Fsync failure after absence reset:** Setup: `pending=TRUE`, `unlink_attempts=3`. Temp absent. Recovery: resets unlink to 0, then `fsync()` fails.
+- **Assert:** `unlink_attempts=0` (reset by absence), `fsync_attempts` incremented (from prior value). Marker remains set. The fsync failure did NOT re-increment the unlink counter.
+- **Restart preserves history:** Setup: `pending=TRUE`, `unlink_attempts=4`. Crash. Restart. Recovery finds marker.
+- **Assert:** `unlink_attempts` still 4 (not reset by marker rewrite, not reset by restart). The history survives until unlink succeeds or ENOENT is observed.
