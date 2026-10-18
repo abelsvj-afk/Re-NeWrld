@@ -443,6 +443,17 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
     await waitForTxWaiter(tx2Pid);
     expect(tx2Done).toBe(false);
 
+    // Prove the blocker relationship: tx1's PID must be blocking tx2.
+    // Capture tx1's PID from its client connection.
+    const tx1PidResult = await client1.query(`SELECT pg_backend_pid() AS pid`);
+    const tx1Pid = Number(tx1PidResult.rows[0].pid);
+    const blockingResult = await query(
+      `SELECT pg_blocking_pids($1) AS blockers`,
+      [tx2Pid]
+    );
+    const blockers: number[] = blockingResult.rows[0].blockers;
+    expect(blockers).toContain(tx1Pid);
+
     await client1.query('COMMIT');
     client1.release();
     await tx2Promise;
