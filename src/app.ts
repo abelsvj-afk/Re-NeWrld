@@ -11,6 +11,7 @@ import {
   readMountTable,
   toTopLevelStatus,
 } from './shared/storage/storage-health.js';
+import { getWorkerMetrics } from './shared/metrics/worker-metrics.js';
 import { AuthRepositoryPort } from './modules/auth/domain/ports/auth.repository.port.js';
 import { WorldRepositoryPort } from './modules/world/domain/ports/world.repository.port.js';
 import { SceneRepositoryPort } from './modules/world/domain/ports/scene.repository.port.js';
@@ -234,12 +235,25 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       env.MEDIA_STORAGE_PATH,
       mediaStorageWritable,
     );
+    const wm = getWorkerMetrics();
     return {
       // Explicit mapping: 'unknown' is reported as 'unknown', never masked
       // as 'ok'. HTTP stays 200; the body carries the uncertainty.
       status: toTopLevelStatus(mediaStorage.state),
       timestamp: new Date().toISOString(),
       media_storage: mediaStorage,
+      // B2: Background worker counters (RES-1b delivery + RES-1c expiry claim).
+      workers: {
+        expiry_claim: {
+          claimed: wm.expiryClaimsTotal.get(),
+          skipped: wm.expiryClaimSkipsTotal.get(),
+          errors: wm.expiryClaimErrorsTotal.get(),
+        },
+        delivery: {
+          sent: wm.deliverySentTotal.get(),
+          failed: wm.deliveryFailedTotal.get(),
+        },
+      },
     };
   });
 

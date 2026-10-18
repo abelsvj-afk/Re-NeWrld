@@ -219,37 +219,82 @@ describe('RES-1c Expiry Claim (§7)', () => {
     expect(candidates.map((c) => c.reservation_id)).not.toContain(rid);
   });
 
-  it('§7.10: two workers do not double-claim', async () => {
+  it('§7.10: two workers cannot double-claim the SAME reservation', async () => {
     const { claimOne, discoverCandidates } = await import(
       '../../src/modules/world/domain/services/expiry-claim.service.js'
     );
 
-    const rids: string[] = [];
-    for (let i = 0; i < 3; i++) {
-      rids.push(await createReservation(120));
-    }
-
+    const rid = await createReservation(120);
     const deps = (await makeDeps());
     const candidates = await discoverCandidates(deps);
+    const candidate = candidates.find((c) => c.reservation_id === rid)!;
+    expect(candidate).toBeTruthy();
 
-    // Simulate two workers claiming concurrently.
-    const results = await Promise.all(
-      rids.map((rid) => {
-        const c = candidates.find((x) => x.reservation_id === rid)!;
-        return claimOne(c, deps);
-      }),
-    );
+    // B1: Give the SAME candidate to two concurrent claimOne() calls.
+    // Exactly one must win (claimed); the other must lose (skipped).
+    const [r1, r2] = await Promise.all([
+      claimOne(candidate, deps),
+      claimOne(candidate, deps),
+    ]);
 
-    // Each should be claimed exactly once (second CAS gets 0 rows).
-    // Note: our claimOne is sequential per candidate in real ticks;
-    // this tests the CAS idempotency.
-    const claimedCount = results.filter((r) => r === 'claimed').length;
-    expect(claimedCount).toBe(3);
+    const claimedCount = [r1, r2].filter((r) => r === 'claimed').length;
+    const skippedCount = [r1, r2].filter((r) => r === 'skipped').length;
+    expect(claimedCount).toBe(1);
+    expect(skippedCount).toBe(1);
 
     const after = await pool.query(
-      `SELECT COUNT(*) as n FROM storage_reservations WHERE reservation_id = ANY($1) AND state='ABANDONED'`,
-      [rids],
+      `SELECT state, released_at, claim_epoch, claim_finalized_at
+         FROM storage_reservations WHERE reservation_id=$1`,
+      [rid],
     );
-    expect(Number(after.rows[0].n)).toBe(3);
+    expect(after.rows[0].state).toBe('ABANDONED');
+    expect(after.rows[0].released_at).not.toBeNull();
+    expect(after.rows[0].claim_epoch).not.toBeNull();
+    expect(after.rows[0].claim_finalized_at).not.toBeNull();
+  });
+
+  it('B2: metrics are incremented on claim/skip', async () => {
+    const { claimOne, discoverCandidates } = await import(
+      '../../src/modules/world/domain/services/expiry-claim.service.js'
+    );
+    const { createWorkerMetrics } = await import(
+      '../../src/shared/metrics/worker-metrics.js'
+    );
+
+    const m = createWorkerMetrics();
+    const deps = {
+      ...(await makeDeps()),
+      metrics: {
+        claimsTotal: { inc: () => m.expiryClaimsTotal.inc() },
+        skipsTotal: { inc: () => m.expiryClaimSkipsTotal.inc() },
+        errorsTotal: { inc: () => m.expiryClaimErrorsTotal.inc() },
+      },
+    };
+
+    const rid1 = await createReservation(120);
+    const candidates = await discoverCandidates(deps);
+    const c1 = candidates.find((c) => c.reservation_id === rid1)!;
+    expect(c1).toBeTruthy();
+
+    const r1 = await claimOne(c1, deps);
+    expect(r1).toBe('claimed');
+    expect(m.expiryClaimsTotal.get()).toBe(1);
+
+    const r2 = await claimOne(c1, deps);
+    expect(r2).toBe('skipped');
+    expect(m.expiryClaimSkipsTotal.get()).toBe(1);
+    expect(m.expiryClaimErrorsTotal.get()).toBe(0);
+  });
+
+  it('B2: worker metrics singleton is usable', async () => {
+    const { getWorkerMetrics } = await import(
+      '../../src/shared/metrics/worker-metrics.js'
+    );
+    const wm = getWorkerMetrics();
+    expect(typeof wm.expiryClaimsTotal.get()).toBe('number');
+    expect(typeof wm.expiryClaimSkipsTotal.get()).toBe('number');
+    expect(typeof wm.expiryClaimErrorsTotal.get()).toBe('number');
+    expect(typeof wm.deliverySentTotal.get()).toBe('number');
+    expect(typeof wm.deliveryFailedTotal.get()).toBe('number');
   });
 });
