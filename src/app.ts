@@ -5,6 +5,11 @@ import crypto from 'crypto';
 import { ZodError } from 'zod';
 import { env } from './config/env.js';
 import { logger } from './shared/logger/pino.logger.js';
+import {
+  checkStorageHealth,
+  probeWritable,
+  readMountTable,
+} from './shared/storage/storage-health.js';
 import { AuthRepositoryPort } from './modules/auth/domain/ports/auth.repository.port.js';
 import { WorldRepositoryPort } from './modules/world/domain/ports/world.repository.port.js';
 import { SceneRepositoryPort } from './modules/world/domain/ports/scene.repository.port.js';
@@ -216,10 +221,23 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
     });
   });
 
-  // Health check endpoint
+  // Health check endpoint (storage assertion: ADR-017 slice OPS-0).
+  // Reports whether MEDIA_STORAGE_PATH is a real mounted filesystem.
+  // HTTP is always 200; the signal is in the body (Fly's own checks need 200).
+  // mediaStorageWritable is initialized below during static setup; the handler
+  // only runs after buildApp completes, so the closure is safe.
   app.get('/health', async (request, reply) => {
     request.log.info('Health check accessed');
-    return { status: 'ok', timestamp: new Date().toISOString() };
+    const mediaStorage = checkStorageHealth(
+      readMountTable(),
+      env.MEDIA_STORAGE_PATH,
+      mediaStorageWritable,
+    );
+    return {
+      status: mediaStorage.state === 'degraded' ? 'degraded' : 'ok',
+      timestamp: new Date().toISOString(),
+      media_storage: mediaStorage,
+    };
   });
 
   // Serve the React SPA (Phase H). API routes take precedence; unmatched
@@ -241,6 +259,15 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   // Serve uploaded media (cover art, scene illustrations)
   const fastifyStatic = (await import('@fastify/static')).default;
   await fs.promises.mkdir(env.MEDIA_STORAGE_PATH, { recursive: true }).catch(() => {});
+  // Startup write probe (ADR-017 OPS-0): cached once, never per-request.
+  // A read-only or broken mount is reported via /health, never crashes boot.
+  const mediaStorageWritable = probeWritable(env.MEDIA_STORAGE_PATH);
+  if (!mediaStorageWritable) {
+    app.log.warn(
+      { path: env.MEDIA_STORAGE_PATH },
+      'Media storage path is not writable at startup; /health will report degraded',
+    );
+  }
   await app.register(fastifyStatic, { root: env.MEDIA_STORAGE_PATH, prefix: '/media/' });
   if (webDist) {
     await app.register(fastifyStatic, { root: webDist, prefix: '/', decorateReply: false });

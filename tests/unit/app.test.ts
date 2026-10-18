@@ -11,8 +11,15 @@ describe('Fastify Application Bootstrap & Health Check', () => {
 
     expect(response.statusCode).toBe(200);
     const json = response.json();
-    expect(json.status).toBe('ok');
+    // Top-level status is 'ok' or 'degraded' depending on storage state;
+    // in this environment /data/media is not a volume mount, so expect degraded.
+    expect(['ok', 'degraded']).toContain(json.status);
     expect(json.timestamp).toBeDefined();
+    // Storage assertion contract (ADR-017 OPS-0)
+    expect(json.media_storage).toBeDefined();
+    expect(json.media_storage.mountpoint).toBeDefined();
+    expect(['ok', 'degraded', 'unknown']).toContain(json.media_storage.state);
+    expect(typeof json.media_storage.writable).toBe('boolean');
 
     await app.close();
   });
