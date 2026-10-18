@@ -60,6 +60,14 @@ export class LockTimeoutError extends FlockError {
   }
 }
 
+/**
+ * Dedicated exit code for lock contention (B2 rev 5).
+ * Set via `flock -E`. Chosen high (250) to avoid collision with
+ * ordinary command exit statuses (0-125) and sysexits (64-78).
+ * Only this exact code means "lock held by another process".
+ */
+export const FLOCK_CONFLICT_EXIT_CODE = 250;
+
 export interface LockHandle {
   /** The child process holding the lock. Kill to release. */
   process: ChildProcess;
@@ -198,16 +206,17 @@ async function waitForLock(
     // Check if process exited.
     if (child.exitCode !== null || child.signalCode !== null) {
       if (nonBlocking) {
-        // B2 (rev 4): Classify by exit status, not just "exited".
-        // util-linux flock -n exits 1 when the lock is held by another
-        // process (contention). Other exit codes indicate operational
-        // failures (e.g., 66 = cannot open lock file, 64 = usage error).
-        // Only exit 1 is confirmed contention; everything else fails closed.
-        if (child.exitCode === 1) {
+        // B2 (rev 5): Classify by dedicated conflict exit code.
+        // `flock -n -E 250` exits 250 ONLY on lock conflict. This cannot
+        // be confused with the executed command's exit status (sleep
+        // infinity never exits 250 on its own) or with sysexits codes
+        // (64-78 for operational failures like "cannot open file").
+        // Only 250 is confirmed contention; everything else fails closed.
+        if (child.exitCode === FLOCK_CONFLICT_EXIT_CODE) {
           throw new LockContentionError(targetPath);
         }
         throw new LockVerificationError(
-          `flock -n exited with code ${child.exitCode} (signal: ${child.signalCode}) on ${targetPath}; not contention`,
+          `flock -n exited with code ${child.exitCode} (signal: ${child.signalCode}) on ${targetPath}; not contention (expected ${FLOCK_CONFLICT_EXIT_CODE})`,
         );
       }
       // Blocking mode: unexpected exit means the lock was never acquired.
@@ -246,7 +255,7 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
   });
   // Note: we don't need the inode here; verifyLockHeld gets it via stat.
 
-  const child = spawn('flock', ['-n', path, 'sleep', 'infinity'], { stdio: 'ignore', detached: true });
+  const child = spawn('flock', ['-n', '-E', String(FLOCK_CONFLICT_EXIT_CODE), path, 'sleep', 'infinity'], { stdio: 'ignore', detached: true });
 
   // B5: Attach error listener BEFORE checking pid. If spawn fails, the
   // 'error' event fires; without a listener it becomes an unhandled rejection.
@@ -294,6 +303,7 @@ export async function acquireShared(path: string, timeoutMs: number = 10000): Pr
   const fileStat = await stat(path);
   // Note: we don't need the inode here; verifyLockHeld gets it via stat.
 
+  // Note: blocking mode doesn't need -E (no contention exit; it waits).
   const child = spawn('flock', ['-s', path, 'sleep', 'infinity'], { stdio: 'ignore', detached: true });
 
   // B5: Attach error listener before pid check.

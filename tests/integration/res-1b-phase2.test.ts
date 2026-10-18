@@ -703,8 +703,8 @@ describe('RES-1b Webhook Adapter (B8)', () => {
   }, 15000);
 });
 
-describe('RES-1c Lock Error Classification (B2 rev 4)', () => {
-  it('contention (exit 1) → LockContentionError', async () => {
+describe('RES-1c Lock Error Classification (B2 rev 5)', () => {
+  it('contention (exit 250 via -E) → LockContentionError', async () => {
     const {
       acquireExclusiveNonBlocking,
       releaseLock,
