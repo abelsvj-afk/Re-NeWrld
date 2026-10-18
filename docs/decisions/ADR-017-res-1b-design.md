@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 23 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 24 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -428,6 +428,8 @@ CREATE TABLE temp_cleanup_incidents (
     last_fired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_fired_count INT NOT NULL,  -- counter value at last fire (5, 10, 15...)
     acknowledged_at TIMESTAMPTZ,    -- operator ack (suppresses notifications, does NOT resolve)
+    delivery_confirmed_at TIMESTAMPTZ,  -- alert system confirms notification sent
+    delivery_attempts INT NOT NULL DEFAULT 0  -- tracks delivery retries
     -- No UNIQUE on (reservation_id, failure_type, status): multiple resolved
     -- incidents must coexist for audit. Uniqueness enforced below.
 );
@@ -440,7 +442,11 @@ CREATE UNIQUE INDEX temp_cleanup_incidents_open_unique
 
 **Atomicity with counters:** Incident state changes occur in the SAME database transaction as counter updates:
 - When counter increments to 5 (first fire): `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status='open', last_fired_count=5)` in the same txn as the counter UPDATE. If the txn rolls back, neither the counter nor the incident persists.
-- When counter reaches 10, 15: `UPDATE temp_cleanup_incidents SET last_fired_at=now(), last_fired_count=10 WHERE incident_id=? AND status='open'`. At 15: also `SET status='escalated', escalated_at=now()`.
+- When counter reaches 10, 15, 20, 25, ...: `UPDATE temp_cleanup_incidents SET last_fired_at=now(), last_fired_count=<actual_counter_value> WHERE incident_id=? AND status IN ('open','escalated')`.
+  - `last_fired_count` is always the actual counter value at firing time (5, 10, 15, 20, ...), not a hardcoded value.
+  - The update path covers both 'open' and 'escalated' statuses. After escalation at 15, subsequent re-fires (20, 25, ...) continue to update the same incident row.
+  - At 15 (first escalation): also `SET status='escalated', escalated_at=now()` in the same UPDATE.
+  - Notifications after escalation: the critical alert re-fires at 20, 25, 30, ... with `severity='critical'` (not downgraded to warning). Each re-fire includes the same `incident_id` so the alert system correlates them.
 - When operation succeeds: `UPDATE temp_cleanup_incidents SET status='resolved', resolved_at=now() WHERE reservation_id=? AND failure_type=? AND status IN ('open','escalated')` in the same txn as the counter reset. Atomic: either both the counter resets and the incident resolves, or neither does.
 
 **Crash recovery:**
@@ -449,8 +455,29 @@ CREATE UNIQUE INDEX temp_cleanup_incidents_open_unique
 - **Recurrence UUID:** When a new incident opens (counter reaches 5 after a prior resolution), `gen_random_uuid()` generates a fresh ID. The old resolved incident remains in the table with `status='resolved'` (for audit). The partial unique index only applies to open/escalated statuses, so the new incident inserts cleanly. The old resolved row remains for audit.
 - **Stale incident reconciliation:** On startup, query for incidents with `status IN ('open','escalated')`. For each, check the current counter value:
   - If counter < 5 → the operation must have succeeded without resolving the incident (crash window). Resolve it: `SET status='resolved', resolved_at=now()`. Log at warning (`STALE_INCIDENT_RESOLVED`).
-  - If counter >= 5 → incident is legitimately open. Re-emit alert if delivery unconfirmed.
+  - If counter >= 5 → incident is legitimately open. Re-emit alert if delivery unconfirmed (see delivery protocol below).
   - This ensures a resolved incident cannot remain active after recovery.
+
+**Alert delivery protocol (rev 24 — authoritative):**
+
+The database is the authoritative delivery tracker. The alert system is a notifier, not the source of truth.
+
+**Delivery flow:**
+1. When an incident fires (or re-fires), the cleanup worker INSERTs/UPDATEs the incident row (with `delivery_confirmed_at=NULL`, `delivery_attempts=0` for new fires).
+2. A separate delivery worker (or the same process, after commit) picks up incidents where `delivery_confirmed_at IS NULL AND status IN ('open','escalated')`.
+3. The delivery worker sends the notification to the alert system (PagerDuty/Opsgenie/webhook).
+4. On successful send: `UPDATE temp_cleanup_incidents SET delivery_confirmed_at=now(), delivery_attempts=delivery_attempts+1 WHERE incident_id=?`.
+5. On failed send: `UPDATE ... SET delivery_attempts=delivery_attempts+1, last_fired_at=now() WHERE incident_id=?`. Retry with exponential backoff (1min, 5min, 15min). After 10 delivery failures → log at critical (`ALERT_DELIVERY_FAILED`), continue retrying (alerts must not be silently dropped).
+
+**Crash behavior:**
+- **Crash after incident commit, before delivery:** On restart, the delivery worker finds `delivery_confirmed_at IS NULL` → sends the alert. At-least-once delivery. The alert system deduplicates by `incident_id` (idempotent receiver).
+- **Crash after delivery, before confirmation update:** The alert was sent but `delivery_confirmed_at` is still NULL. On restart, the delivery worker re-sends. The alert system deduplicates by `incident_id` → no duplicate notification to the operator. Idempotency is required at the receiver.
+- **Receiver contract:** The alert system MUST deduplicate on `incident_id`. Receiving the same `incident_id` twice does not create a second alert or page twice. This is a hard requirement for the at-least-once delivery model.
+
+**Why DB authoritative (not alert-system deduplication alone):**
+- The database survives process restarts; in-memory deduplication state does not.
+- The `delivery_confirmed_at` column provides an auditable record of what was sent and when.
+- If the alert system is down, the DB retains the pending delivery for retry. A pure in-memory dedup would lose it.
 
 **Acknowledgment persistence:** `acknowledged_at` is set by operator action (separate txn). It does NOT change `status`. An acknowledged incident remains 'open' or 'escalated' until the operation succeeds. The alert system suppresses notifications for acknowledged incidents but continues to track them. Acknowledgment is cleared (set to NULL) when a new incident opens (recurrence).
 
@@ -774,6 +801,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Complete alert lifecycle (rev 21) — identity per (reservation_id, failure_type); incident model with resolution/recurrence; escalation resets on new incident; manual ack never resolves.
 - [x] Incident persistence contract (rev 22) — DB table with atomic counter+incident updates; crash recovery reconciles stale incidents; recurrence generates fresh UUIDs.
 - [x] Partial unique index (rev 23) — uniqueness on (reservation_id, failure_type) WHERE status IN ('open','escalated'); multiple resolved rows allowed for audit.
+- [x] Update path and delivery contract (rev 24) — covers open+escalated; last_fired_count uses actual value; delivery_confirmed_at with at-least-once + idempotent receiver.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
