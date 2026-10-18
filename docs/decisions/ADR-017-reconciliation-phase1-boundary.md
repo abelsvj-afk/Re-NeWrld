@@ -24,15 +24,18 @@ Phase-1 is a **single, short-lived transaction** that atomically decides admissi
 ### 2.1 Lock acquisition (strict order per §4.3c)
 
 1. **Level 1** — global media advisory lock: `SELECT pg_advisory_xact_lock(hashtext('media_global'))`.
-2. **Level 2** — per-world quota advisory lock: `SELECT pg_advisory_xact_lock(hashtext('media_quota:' || world_id))`.
-3. **Level 3** — world row lock: `SELECT ... FOR UPDATE OF worlds WHERE world_id = ?`.
+2. **Maintenance fence check (immediately after L1, before L2/L3):** Call `is_maintenance_active()`. If the fence is active → reject with 503 `FENCE_ACTIVE`, ROLLBACK. Per §4.3c, fence activation/deactivation serializes through L1; checking here ensures no reservation can interleave with a fence transition. The check must occur before any `FOR UPDATE` row lock is acquired.
+3. **Level 2** — per-world quota advisory lock: `SELECT pg_advisory_xact_lock(hashtext('media_quota:' || world_id))`.
+4. **Level 3** — world row lock: `SELECT ... FOR UPDATE OF worlds WHERE world_id = ?`.
 
 All locks are transaction-scoped (`pg_advisory_xact_lock`). They release on COMMIT or ROLLBACK. Phase-1 holds locks for milliseconds; it never spans the file write.
 
 ### 2.2 Admission checks (in order, inside the locked transaction)
 
-1. **Maintenance fence:** If `system_maintenance.fence_active` is true → reject with 503 `FENCE_ACTIVE`, ROLLBACK. (Per §4.3d; prevents new reservations during maintenance.)
-2. **Metric freshness:** If the cached capacity metric is stale (older than `STORAGE_METRIC_MAX_AGE_SEC`) → reject with 503 `STORAGE_METRIC_STALE`, ROLLBACK. (Fail-closed per §5.5.)
+The fence check (§2.1 step 2) runs before the remaining checks. The checks below run after L2/L3 are acquired:
+
+1. **Metric freshness:** If the cached capacity metric is stale (older than `STORAGE_METRIC_MAX_AGE_SEC`) → reject with 503 `STORAGE_METRIC_STALE`, ROLLBACK. (Fail-closed per §5.5.)
+2. **Narration reserve:** If `narration_bytes >= NARRATION_RESERVE_BYTES` → reject with 503 `NARRATION_CAPACITY_EXCEEDED`, ROLLBACK. (Hard boundary per Addendum 001 §2.3.)
 3. **Per-world quota:** Compute `quota_used_bytes(world_id)` = registered media bytes + `active_reservations_bytes(world_id)` (SUM of `storage_reservations.size_bytes` WHERE `world_id = ?` AND `released_at IS NULL`). If `quota_used + incoming_file_size > MEDIA_WORLD_QUOTA_MB` → reject with 507 `QUOTA_EXCEEDED`, ROLLBACK.
 4. **Physical capacity:** Compute `effective_available` per §5.5 (using the **media** capacity from Addendum 001 §2.2, not the raw volume size). If `effective_available < incoming_file_size` → reject with 507 `STORAGE_FULL`, ROLLBACK.
 
@@ -103,8 +106,8 @@ These are separate slices with their own acceptance criteria. RES-1a must not si
 - Reservation larger than remaining quota or capacity → rejected, no row.
 
 ### 5.3 Fence
-- Fence active at admission → 503 FENCE_ACTIVE, no row.
-- Fence activation racing Phase-1: either Phase-1 commits before fence (then fence invalidates per contract) or observes fence and rejects. Test establishes the serial order; does not claim Phase-2 safety.
+- Fence active at admission → 503 `FENCE_ACTIVE`, no row. The fence check occurs immediately after L1 acquisition and before L2/L3 (per §2.1); the test must verify this ordering by asserting that a fence activated after L1 acquisition but before the transaction's quota check causes rejection.
+- Fence activation racing Phase-1: the test must establish the exact serial ordering — either (a) Phase-1 acquires L1, observes no fence, and commits before fence activation (then the fence invalidates the reservation per the §4.3d contract), or (b) Phase-1 acquires L1 after fence activation, observes the active fence, and rejects before acquiring L2/L3. There is no interleaving where Phase-1 holds L2/L3 while the fence activates, because the fence check precedes L2/L3 acquisition. Do not claim that RES-1a alone guarantees safe Phase-2 writes after the transaction ends; that is a later-slice obligation.
 
 ### 5.4 Failure modes
 - Stale metric → 503, no row.

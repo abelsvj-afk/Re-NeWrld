@@ -82,7 +82,7 @@ Slices marked **[migration-first]** require 014/015 applied before their tests c
 ### RES-1c — Expiry-claim worker
 **Scope:** Candidate selection (expired, no heartbeat), 60s observation, mtime grace, epoch CAS, `LOCK_EX|LOCK_NB` fenced claim, ABANDONED transition with audit columns, path-vanished/absent sub-protocols.
 **Acceptance:** S43 (full conservation proof across all transitions, including expiry).
-**Dependencies:** RES-1a. **Blocks:** none (runs independently once RES-1a exists).
+**Dependencies:** RES-1a, **RES-1b** (the expiry claim's `flock` handshake requires the writer-side protocol from RES-1b; the worker must not run until RES-1b is complete and verified). **Blocks:** none.
 
 ## QUOTA-1 — Quota admission + atomic handoff [migration-first]
 
@@ -235,7 +235,7 @@ Slices marked **[migration-first]** require 014/015 applied before their tests c
 
 ## Implementation order (recommended)
 
-1. MIG-0 → 2. FENCE-1 → 3. RES-1a → 4. RES-1b + RES-1c (parallel after 1a) → 5. QUOTA-1 → 6. UPLOAD-1 + REF-1 (parallel) → 7. DEL-1 → 8. SHARE-1 → 9. DEL-2 → 10. RECOV-1 → 11. API-1 → 12. OPS-0 (parallel track, any time before 13; COMPLETE 2026-10-18) → 13. BF-1 → 14. DRIFT-1 → 15. OPS-1.
+1. MIG-0 → 2. FENCE-1 → 3. RES-1a → 4. RES-1b → 5. RES-1c (serial: 1c requires 1b's writer-side flock) → 6. QUOTA-1 → 7. UPLOAD-1 + REF-1 (parallel) → 8. DEL-1 → 9. SHARE-1 → 10. DEL-2 → 11. RECOV-1 → 12. API-1 → 13. OPS-0 (parallel track, any time before 14; COMPLETE 2026-10-18) → 14. BF-1 → 15. DRIFT-1 → 16. OPS-1.
 
 Rationale: fence and reservations are the load-bearing primitives every mutating path depends on; deletion before sharing (protection must exist before cross-world references multiply); DEL-2 strictly after SHARE-1 (world-deletion's shared-asset transfer and snapshot-protected moves implement SHARE-1's contracts); recovery before backfill (restore runbook needs it); backfill last among code (needs volume + all writers frozen-correct).
 

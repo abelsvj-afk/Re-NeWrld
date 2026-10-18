@@ -34,25 +34,37 @@ Define a conservative, documented reserve for non-media usage. The media admissi
 ```
 media_capacity_bytes = volume_size_bytes
                      - narration_reserve_bytes
-                     - filesystem_overhead_bytes
+                     - total_headroom_bytes
 ```
 
 Where:
 - `volume_size_bytes`: 4 GiB (actual provisioned volume).
-- `narration_reserve_bytes`: `NARRATION_RESERVE_BYTES` config, default **1 GiB**. Rationale: narration audio files are small (ElevenLabs MP3s, tens of KB per scene); 1 GiB is conservative for the foreseeable scale. If narration approaches the reserve, an alert fires (see §2.4) and the reserve is raised by operator action, reducing media capacity accordingly.
-- `filesystem_overhead_bytes`: `STORAGE_OVERHEAD_RESERVE_PERCENT` of `media_capacity_bytes` (default 5%, per §5.5). Unchanged semantics.
+- `narration_reserve_bytes`: `NARRATION_RESERVE_BYTES` config, default **1 GiB**. Rationale: narration audio files are small (ElevenLabs MP3s, tens of KB per scene); 1 GiB is conservative for the foreseeable scale. Enforced as a hard admission boundary per §2.3 below.
+- `total_headroom_bytes`: **0.5 GiB**, composed of two parts (clarified per review):
+  - `filesystem_overhead_bytes`: 5% of `media_capacity_bytes` per §5.5 (`STORAGE_OVERHEAD_RESERVE_PERCENT`, default 5%). On a 2.5 GiB media capacity this is **0.125 GiB**. Unchanged semantics — accounts for filesystem metadata, journal, fragmentation.
+  - `operational_margin_bytes`: **0.375 GiB** fixed. Covers unmeasured OS-level consumption, snapshot working space, and measurement error beyond the 5% reserve. This is a fixed allowance, not a percentage.
+
+The two headroom components are distinct: the 5% reserve scales with media capacity; the operational margin is fixed. They are not competing definitions of the same headroom.
 
 **Proposed values (require product-owner confirmation):**
-- `NARRATION_RESERVE_BYTES` = 1 GiB.
-- `STORAGE_CAPACITY_BYTES` (media) = **2.5 GiB** (4.0 − 1.0 narration − ~0.5 overhead/headroom).
+- `NARRATION_RESERVE_BYTES` = 1 GiB (hard boundary).
+- `STORAGE_CAPACITY_BYTES` (media) = **2.5 GiB** (4.0 − 1.0 narration − 0.5 total headroom).
 
-The previous 1.5 GiB value was calibrated for a dedicated 2 GiB volume and is **superseded, not carried forward**.
+The previous 1.5 GiB value was calibrated for a dedicated 2 GiB volume and is **superseded, not carried forward**. The 1 GiB / 2.5 GiB allocation remains proposed until the actual usable filesystem capacity is verified on the provisioned volume.
 
-### 2.3 Enforcement
+### 2.3 Enforcement — hard reserve (corrected per review)
 
-The `effective_available` formula in §5.5 is unchanged, but `storage_capacity_bytes` is now the **media** capacity (2.5 GiB), not the raw volume size. The narration reserve is subtracted before enforcement, so media admission can never consume narration's headroom.
+The narration reserve is a **hard admission boundary**, not an advisory threshold.
 
-**Fail-closed:** If narration usage exceeds `NARRATION_RESERVE_BYTES`, media uploads continue (the reserve is planning headroom, not a hard partition), but a `NARRATION_RESERVE_EXCEEDED` alert fires and the operator must either raise the reserve (reducing media capacity) or clean up. The design does not silently allow unbounded narration growth to starve media.
+**Rule:** If `narration_bytes >= NARRATION_RESERVE_BYTES` at Phase-1 admission time, the reservation is **rejected** with 503 `NARRATION_CAPACITY_EXCEEDED` (retryable), ROLLBACK, no row inserted. Media uploads do not proceed until narration usage drops below the reserve or the product owner explicitly approves a revised allocation (which reduces media capacity accordingly).
+
+This guarantees media admission can never consume narration's protected headroom. The previous "alert but continue" behavior is withdrawn — a monitoring alert alone does not constitute a capacity guarantee on a shared filesystem.
+
+**Measurement:** `narration_bytes` is measured by the periodic capacity job via `du -sb /data/narrations/`, cached with the same freshness bound as the media metric (`STORAGE_METRIC_MAX_AGE_SEC`). If the narration measurement is stale or unavailable, Phase-1 fails closed (503 `STORAGE_METRIC_STALE`) — the same rule as the media metric.
+
+**Alerts (retained for operational visibility):**
+- Warning at `narration_bytes > 0.8 * NARRATION_RESERVE_BYTES`.
+- Critical at `narration_bytes >= NARRATION_RESERVE_BYTES` (coincides with admission rejection).
 
 ### 2.4 Monitoring
 
