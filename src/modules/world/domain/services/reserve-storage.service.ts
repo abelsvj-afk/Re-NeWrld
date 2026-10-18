@@ -59,6 +59,14 @@ export interface ReserveStorageDeps {
   narrationReserveBytes: number;
   /** Max age of the capacity metric before it is considered stale (ms). */
   metricMaxAgeMs: number;
+  /**
+   * Test-only hooks. Never set in production. Allows the fence-race
+   * integration tests to coordinate with the transaction while it holds L1.
+   */
+  testHooks?: {
+    /** Called (and awaited) immediately after L1 acquisition. */
+    onL1Acquired?: () => void | Promise<void>;
+  };
 }
 
 const LOCK_TIMEOUT = '5s';
@@ -86,6 +94,11 @@ export async function reserveStorage(
     // L1: global media advisory lock.
     await tx.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);
     await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_global'))`);
+
+    // Test hook: signal while holding L1 (fence-race coordination).
+    if (deps.testHooks?.onL1Acquired) {
+      await deps.testHooks.onL1Acquired();
+    }
 
     // Fence check immediately after L1, before L2/L3 (per §4.3c).
     if (await deps.isFenceActive(tx)) {

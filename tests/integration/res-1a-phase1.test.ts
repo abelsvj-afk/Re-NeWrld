@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { runMigrations } from '../../scripts/migrate.js';
-import { setPool, closePool, query, withTransaction } from '../../src/shared/database/db.js';
+import { setPool, closePool, query, withTransaction, pool } from '../../src/shared/database/db.js';
 import { PostgresStorageReservationRepository } from '../../src/modules/world/infrastructure/persistence/postgres-storage-reservation.repository.js';
 import {
   lockWorldRowForUpdate,
@@ -119,6 +119,7 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
   beforeEach(async () => {
     await query(`DELETE FROM storage_reservations`);
     await query(`DELETE FROM storage_capacity_metrics`);
+    await query(`DELETE FROM world_media_assets`);
     await query(`UPDATE system_maintenance SET active = false WHERE id = 1`);
     await seedMetric();
   });
@@ -141,7 +142,7 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
       `INSERT INTO world_media_assets
          (asset_id, world_id, filename, url, mimetype, size_bytes, file_confirmed_present)
        VALUES ($1, $2, $3, $4, $5, $6, true)`,
-      [crypto.randomUUID(), worldId.getValue(), 'a.png', '/media/a.png', 'image/png', QUOTA_BYTES - 100]
+      [crypto.randomUUID(), worldId.getValue(), `q-${crypto.randomUUID()}.png`, '/media/q.png', 'image/png', QUOTA_BYTES - 100]
     );
 
     await expect(reserveStorage(worldId, 200, makeDeps())).rejects.toMatchObject({
@@ -250,90 +251,128 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
     expect(await repository.sumActiveBytes(worldId)).toBe(0);
   });
 
-  it('fence-wins race: fence commits first, Phase-1 blocks on L1 then rejects', async () => {
-    // Two real concurrent transactions serialized by the L1 advisory lock.
-    // Fence activation acquires L1 first and commits; Phase-1 then observes
-    // the active fence and rejects before acquiring L2/L3.
+  /**
+   * Poll pg_locks until a backend is waiting on an advisory lock
+   * (or timeout). Deterministic: waits for real database state, not a timer.
+   */
+  async function waitForAdvisoryWaiter(timeoutMs = 10000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const r = await query(
+        `SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`
+      );
+      if (Number(r.rows[0].n) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error('Timed out waiting for an advisory-lock waiter in pg_locks');
+  }
+
+  /**
+   * Poll pg_locks until a backend is waiting on a row lock.
+   * Note: FOR UPDATE blockers appear as locktype='transactionid' (waiting
+   * for the locker's transaction), not as tuple locks on the table.
+   */
+  async function waitForRowLockWaiter(timeoutMs = 10000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const r = await query(
+        `SELECT count(*) AS n FROM pg_locks
+         WHERE locktype = 'transactionid' AND NOT granted`
+      );
+      if (Number(r.rows[0].n) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error('Timed out waiting for a row-lock waiter in pg_locks');
+  }
+
+  it('fence-wins race: fence holds L1, real reserveStorage() blocks then rejects', async () => {
+    // Real `reserveStorage()` on one connection; real fence activation on another.
+    // Both serialize through L1. We prove via pg_locks that Phase-1 is waiting
+    // on L1 before the fence commits — no timing-based coordination.
     const worldId = await createWorld();
 
-    // Barrier: fence transaction signals when it holds L1.
     let fenceHoldsL1!: () => void;
     const fenceHasL1 = new Promise<void>((resolve) => {
       fenceHoldsL1 = resolve;
-    });
-    // Barrier: Phase-1 signals when it starts waiting for L1.
-    let phase1Waiting!: () => void;
-    const phase1IsWaiting = new Promise<void>((resolve) => {
-      phase1Waiting = resolve;
     });
 
     const fenceTx = withTransaction(async (tx: pkg.PoolClient) => {
       await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_global'))`);
       fenceHoldsL1();
-      // Hold L1 while Phase-1 starts and blocks.
-      await phase1IsWaiting;
-      await tx.query(
-        `UPDATE system_maintenance SET active = true WHERE id = 1`
-      );
-      // COMMIT releases L1.
+      // Wait until Phase-1 is provably blocked on L1.
+      await waitForAdvisoryWaiter();
+      await tx.query(`UPDATE system_maintenance SET active = true WHERE id = 1`);
+      // COMMIT releases L1; Phase-1 then acquires it, sees the fence, rejects.
     });
 
     const phase1Tx = (async () => {
       await fenceHasL1;
-      // Small delay to ensure the fence tx holds L1 before we try.
-      await new Promise((r) => setTimeout(r, 100));
-      phase1Waiting();
-      return reserveStorage(worldId, 1000, makeDeps());
+      const deps = makeDeps();
+      let l2l3Acquired = false;
+      const origLock = deps.lockWorldRow;
+      deps.lockWorldRow = async (wid, tx) => {
+        l2l3Acquired = true;
+        return origLock(wid, tx);
+      };
+      try {
+        await reserveStorage(worldId, 1000, deps);
+        return { ok: true as const };
+      } catch (e) {
+        return { ok: false as const, error: e, l2l3Acquired };
+      }
     })();
 
-    const [, phase1Result] = await Promise.all([fenceTx, phase1Tx.catch((e) => e)]);
+    const [, phase1Result] = await Promise.all([fenceTx, phase1Tx]);
 
-    expect(phase1Result).toMatchObject({ code: 'FENCE_ACTIVE' });
+    expect(phase1Result.ok).toBe(false);
+    if (!phase1Result.ok) {
+      expect(phase1Result.error).toMatchObject({ code: 'FENCE_ACTIVE' });
+      expect(phase1Result.l2l3Acquired).toBe(false);
+    }
     expect(await repository.sumActiveBytes(worldId)).toBe(0);
-    // Cleanup.
     await withTransaction(deactivateFence);
   });
 
-  it('Phase-1-wins race: reservation commits first, fence activates after', async () => {
-    // Phase-1 acquires L1 first and commits; fence activation then proceeds
-    // and would invalidate per §4.3d (invalidation itself is out of scope).
+  it('Phase-1-wins race: real reserveStorage() commits before fence activation', async () => {
+    // Real `reserveStorage()` signals via the test hook while holding L1.
+    // Fence activation starts on a second connection and blocks on L1
+    // (proven via pg_locks). Phase-1 completes; the row commits first.
     const worldId = await createWorld();
 
-    let phase1HoldsL1!: () => void;
-    const phase1HasL1 = new Promise<void>((resolve) => {
-      phase1HoldsL1 = resolve;
+    let releasePhase1!: () => void;
+    const phase1MayProceed = new Promise<void>((resolve) => {
+      releasePhase1 = resolve;
     });
-    let fenceWaiting!: () => void;
-    const fenceIsWaiting = new Promise<void>((resolve) => {
-      fenceWaiting = resolve;
-    });
-
-    // Phase-1 holds L1 while the fence tries to activate.
-    const phase1Tx = withTransaction(async (tx: pkg.PoolClient) => {
-      await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_global'))`);
-      phase1HoldsL1();
-      await fenceIsWaiting;
-      // Simulate Phase-1 work: check fence (not active), then commit.
-      const fenceOn = await isFenceActive(tx);
-      expect(fenceOn).toBe(false);
-      // COMMIT releases L1.
-      return 'phase1-committed';
+    let hookSignaled!: () => void;
+    const hookFired = new Promise<void>((resolve) => {
+      hookSignaled = resolve;
     });
 
-    const fenceTx = (async () => {
-      await phase1HasL1;
-      await new Promise((r) => setTimeout(r, 100));
-      fenceWaiting();
-      return withTransaction(async (tx: pkg.PoolClient) => {
-        await activateFence(tx, 'race-test');
-        return 'fence-committed';
-      });
-    })();
+    const deps = makeDeps();
+    deps.testHooks = {
+      onL1Acquired: async () => {
+        hookSignaled();
+        await phase1MayProceed;
+      },
+    };
 
-    const [p1, f] = await Promise.all([phase1Tx, fenceTx]);
-    expect(p1).toBe('phase1-committed');
-    expect(f).toBe('fence-committed');
-    // Fence is now active.
+    const phase1Tx = reserveStorage(worldId, 1000, deps);
+
+    // Wait for Phase-1 to hold L1, then start fence activation (blocks on L1).
+    await hookFired;
+    const fenceTx = withTransaction(async (tx: pkg.PoolClient) => {
+      await activateFence(tx, 'race-test');
+    });
+    // Prove the fence is waiting on L1 (deterministic, via pg_locks).
+    await waitForAdvisoryWaiter();
+    // Release Phase-1 to complete its reservation and commit.
+    releasePhase1();
+
+    const [reservation] = await Promise.all([phase1Tx, fenceTx]);
+
+    expect(reservation.state).toBe('RESERVED');
+    const found = await repository.findById(reservation.reservationId);
+    expect(found?.state).toBe('RESERVED');
     const active = await query(`SELECT active FROM system_maintenance WHERE id = 1`);
     expect(active.rows[0].active).toBe(true);
 
@@ -346,23 +385,31 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
       withTransaction((tx) => lockWorldRowForUpdate(fakeId, tx))
     ).rejects.toThrow(/world not found/);
 
-    // Real world: lock succeeds and blocks a concurrent FOR UPDATE.
+    // Real world: verify FOR UPDATE blocks a concurrent locker.
+    // Deterministic via pg_locks: we observe the waiter, then release.
     const worldId = await createWorld();
-    let secondLockBlocked = false;
-    const firstTx = withTransaction(async (tx: pkg.PoolClient) => {
-      await lockWorldRowForUpdate(worldId, tx);
-      // Hold the row lock while a second transaction tries to lock it.
-      await new Promise((r) => setTimeout(r, 500));
-    });
-    const secondTx = (async () => {
-      await new Promise((r) => setTimeout(r, 100));
-      const start = Date.now();
+
+    // Start tx1: acquire the row lock and hold it (raw client for manual commit).
+    const client1 = await pool.connect();
+    await client1.query('BEGIN');
+    await lockWorldRowForUpdate(worldId, client1);
+
+    // Start tx2 in background: it will block on the row lock.
+    let tx2Done = false;
+    const tx2Promise = (async () => {
       await withTransaction((tx) => lockWorldRowForUpdate(worldId, tx));
-      // If we get here quickly, the lock didn't block (bad).
-      secondLockBlocked = Date.now() - start > 300;
+      tx2Done = true;
     })();
-    await Promise.all([firstTx, secondTx]);
-    expect(secondLockBlocked).toBe(true);
+
+    // Wait until tx2 is provably blocked on the worlds row lock.
+    await waitForRowLockWaiter();
+    expect(tx2Done).toBe(false);
+
+    // Release tx1; tx2 should then acquire and complete.
+    await client1.query('COMMIT');
+    client1.release();
+    await tx2Promise;
+    expect(tx2Done).toBe(true);
   });
 
   it('rolls back cleanly on DB failure (no partial row, locks released)', async () => {
