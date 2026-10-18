@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 6 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 7 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -17,7 +17,7 @@
 
 - The writer opens the path ONCE per upload with `O_CREAT | O_WRONLY | O_APPEND` and holds the file descriptor for the entire upload.
 - The path is created by the writer (not the claim worker — `O_CREAT` is forbidden in the claim path per A17).
-- On commit: the writer renames temp→final per the publication protocol (§1.6).
+- On commit: the writer links temp→final per the publication protocol (§1.6).
 - On voluntary rollback: the writer unlinks after the `ROLLED_BACK` transition commits, while holding `LOCK_SH`.
 
 **Temp-path identity invariant (A17):** For an active reservation, the path is NEVER unlinked, renamed, or replaced except by the owning writer's commit/rollback or the abandoned-temp cleanup job acting on an `ABANDONED` row.
@@ -46,7 +46,7 @@ A unique path prevents *different* reservation IDs from colliding. It does NOT p
 **Why a separate lockfile (not the data file):**
 - The data file uses per-chunk `LOCK_SH` (released between chunks to allow claims). Holding `LOCK_EX` on the data file for the whole upload would block legitimate expiry claims indefinitely.
 - The lockfile is never written to, never renamed, never served. Its sole purpose is ownership.
-- The lockfile is cleaned up with the temp file (on commit, rollback, or abandoned-temp cleanup).
+- The lockfile persists permanently (rev 4). It is never unlinked during commit, rollback, or abandoned-temp cleanup — only the kernel lock is released.
 
 **Invariant I6a:** At most one writer holds the ownership lock for a given reservation_id at any time. A writer that cannot acquire the ownership lock MUST NOT open, write to, or modify the temp data file.
 
@@ -94,7 +94,7 @@ UPDATE storage_reservations
 
 ### 1.5 Fenced Commit and Rollback
 
-**Critical correction (rev 2):** A filesystem rename cannot be rolled back by PostgreSQL. The commit sequence therefore does NOT include the rename in the database transaction. Instead, the database commits first (with the asset marked PENDING), then the rename executes, then the asset is marked ACTIVE. Crash recovery is driven by database state.
+**Critical correction (rev 2):** A filesystem rename cannot be rolled back by PostgreSQL. The commit sequence therefore does NOT include the rename in the database transaction. Instead, the database commits first (with the asset marked PENDING), then the link executes, then the asset is marked ACTIVE. Crash recovery is driven by database state.
 
 ### 1.6 Crash-Safe Publication Protocol (rev 2)
 
@@ -178,7 +178,7 @@ Two distinct locks with different lifetimes:
 **`LOCK_SH` on the data file (per-chunk + Phase A):**
 - Acquired per-chunk during writes; released immediately after each `write()`.
 - Acquired for Phase A (the DB transaction); released AFTER Phase A commits or rolls back.
-- NOT held during Phase B (rename) or Phase C (activation).
+- NOT held during Phase B (link+unlink) or Phase C (activation).
 - **Why safe to release before Phase B/C:** After Phase A commits, the reservation is `COMMITTED` (terminal). The expiry claim only acts on active reservations (`RESERVED`/`WRITING`). The abandoned-temp cleanup only acts on `ABANDONED` rows. No background process will touch a COMMITTED reservation's files. Readers filter by `publication_status='ACTIVE'`, so the PENDING asset is invisible. The only remaining concurrency risk is another writer, which is excluded by the ownership lock (still held).
 
 **Ownership lock on the lockfile (`LOCK_EX`):**
@@ -215,6 +215,30 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
 
 **Explicit prohibition:** Recovery MUST NOT mark an asset ACTIVE based solely on the existence of a file at `final_path`. The rev-4 shortcut ("if final exists → ACTIVE") is removed. Identity must be established by inode equality or digest match.
 
+### 1.6d Recovery Durability Ordering (rev 7)
+
+**Critical:** Recovery must follow the same durability ordering as the original writer (§1.6c). An inode match proves *identity*, not *durability*. The final link must be fsynced before the temp entry is removed, even in recovery.
+
+**Recovery Phase B (authoritative):**
+1. Acquire ownership lock (§1.6a).
+2. Determine the state (per the crash-recovery table above).
+3. If link needed: `link(temp_path, final_path)`.
+   - On EEXIST → verify identity (inode or digest) per step 8a.
+4. `fsync(final_dir_fd)` — **MUST complete before step 5.** If the link was already durable from a previous attempt, this fsync is still issued (idempotent, ensures durability).
+5. `unlink(temp_path)` — **MUST NOT execute before step 4 completes.** (If ENOENT → already unlinked → proceed.)
+6. `fsync(temp_dir_fd)` — always issued.
+7. Mark ACTIVE (Phase C).
+
+**The §6.8 crash-after-link case corrected:** When recovery finds that `link()` already succeeded (same inode) but `fsync(final_dir)` was not confirmed, recovery MUST issue `fsync(final_dir)` and wait for its successful return BEFORE unlinking temp. It must NOT unlink based on identity alone.
+
+**fsync failure behavior (both directory syncs):**
+- If `fsync(final_dir_fd)` fails → **do NOT proceed to unlink.** The link's durability is unconfirmed. Preserve the temp entry. Leave the asset as PENDING. Log at error with the errno, alert `FSYNC_FAILED`. The asset remains unavailable; retry on next recovery cycle or operator intervention. **A failed fsync must never be treated as successful publication.**
+- If `fsync(temp_dir_fd)` fails (after successful `fsync(final_dir)` and `unlink`) → the final link IS durable (step 4 succeeded). The temp unlink may not be durable, but this is benign: recovery on next cycle will see temp reappeared (if unlink was lost) with final already verified → unlink again. Log at warning, proceed to mark ACTIVE. The file is safely published; only the temp cleanup needs retry.
+- If `fsync` fails with EIO (I/O error) → treat as above based on which sync failed. Additionally alert `STORAGE_IO_ERROR` for operator attention (possible disk failure).
+- **Never silent:** Every fsync return value is checked. A failed fsync that is ignored is a correctness bug.
+
+**Why the distinction:** `fsync(final_dir)` guards against *losing the published file*. `fsync(temp_dir)` guards against *leaving a stale temp entry*. Losing the published file is a data-loss risk; leaving a temp entry is a cleanup retry. The failure handling reflects this asymmetry.
+
 ### 1.6b Content Digest Protocol (rev 5)
 
 **Purpose:** Establish file identity across process restarts when inode comparison is impossible (temp file gone).
@@ -236,26 +260,26 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
 
 ### 1.6a Recovery Ownership Protocol (rev 3)
 
-**The problem:** The startup scan says "any worker finding a PENDING asset can rename or activate." But two recovery workers — or a recovery worker and the still-alive original writer — could race: both renaming, one activating while the other is still modifying the file, or acting on stale filesystem observations.
+**The problem:** The startup scan says "any worker finding a PENDING asset can link or activate." But two recovery workers — or a recovery worker and the still-alive original writer — could race: both renaming, one activating while the other is still modifying the file, or acting on stale filesystem observations.
 
-**The rule:** A recovery worker MUST acquire the ownership lock (via the inode-verified protocol in §1.1b) BEFORE performing any filesystem operation on a PENDING asset. Database-only observations (reading the PENDING row) do not require the lock, but any `rename`, `stat` used for a decision, or `unlink` does.
+**The rule:** A recovery worker MUST acquire the ownership lock (via the inode-verified protocol in §1.1b) BEFORE performing any filesystem operation on a PENDING asset. Database-only observations (reading the PENDING row) do not require the lock, but any `link`, `stat` used for a decision, or `unlink` does.
 
 **Protocol:**
 1. Recovery worker scans for `publication_status='PENDING'` assets.
 2. For each PENDING asset, attempt to acquire the ownership lock for its `reservation_id` using the inode-verified protocol.
    - If `EWOULDBLOCK` → another worker (or the original writer) owns it → SKIP this asset this cycle. Do not touch its files. Do not update its row.
    - If acquired → this worker owns the recovery for this asset.
-3. While holding the ownership lock, perform the filesystem checks and operations (stat temp/final, rename if needed).
+3. While holding the ownership lock, perform the filesystem checks and operations (stat temp/final, link if needed).
 4. Update the asset row (`ACTIVE` or `PUBLICATION_FAILED`).
-5. Release the ownership lock (via the cleanup protocol if the lockfile should be removed, or just unlock if the reservation may still need it).
+5. Release the ownership lock via `flock(LOCK_UN)` and close. The lockfile persists (rev 4 permanent-lockfile rule).
 
 **Why this works:**
 - **Recovery vs. original writer:** The original writer holds the ownership lock through all three phases (A, B, C). If the writer is still alive and working, the recovery worker's acquire fails → skips. The writer completes normally. No interference.
 - **Recovery vs. crashed writer:** The kernel released the lock on crash. The recovery worker acquires it and proceeds. The original writer is dead; its file descriptors are closed.
-- **Recovery vs. recovery:** Two workers scanning simultaneously → exactly one acquires the lock → the other skips. No double-rename, no conflicting updates.
+- **Recovery vs. recovery:** Two workers scanning simultaneously → exactly one acquires the lock → the other skips. No double-link, no conflicting updates.
 - **Stale filesystem observations:** The lock guarantees no other party is modifying the files. The worker's `stat` results are valid for the duration of the lock hold.
 
-**Lockfile existence:** If the lockfile was already cleaned up (unlinked), the recovery worker creates it with `O_CREAT` during acquisition. This is safe: if no lockfile exists, no one can be holding the ownership lock (they would have created it). The new lockfile establishes a fresh lock domain for the recovery.
+**Lockfile existence (rev 7):** Under the permanent-lockfile rule, the lockfile always exists for a reservation ID (created on first acquisition, never unlinked in normal operations). If the path is unexpectedly absent (e.g., manual deletion or out-of-scope GC), the recovery worker creates it with `O_CREAT` during acquisition. This is safe: if no lockfile exists and the reservation is not active, no legitimate owner exists.
 
 **Crash boundaries and recovery:**
 
@@ -268,10 +292,10 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
 | After Phase C | Asset ACTIVE; reservation COMMITTED | File at final path | Normal state; no recovery needed |
 
 **What this guarantees:**
-- No file exists at a final path without a database row (the PENDING row is created before the rename).
+- No file exists at a final path without a database row (the PENDING row is created before the link).
 - No PENDING asset is served to readers (serving layer filters).
 - Every intermediate state is discoverable via the `publication_status` column.
-- The rename is idempotent (safe to retry).
+- The link+unlink sequence is idempotent (safe to retry).
 - No byte is uncounted (the reservation's `size_bytes` covers the temp file until COMMITTED; the asset row covers it after).
 
 **Voluntary rollback (unchanged):**
@@ -322,7 +346,7 @@ The heartbeat is a *liveness signal*, not a *write authorization*. Every chunk w
 
 3. **I3 (Heartbeat integrity):** Every heartbeat increments `epoch`. A 0-row heartbeat update causes immediate abort.
 
-4. **I4 (Commit phases):** Publication proceeds in three ordered phases: (A) Database transaction commits the asset row as PENDING and the reservation as COMMITTED atomically; (B) Filesystem rename moves temp→final (idempotent, atomic); (C) Database transaction marks the asset ACTIVE. A 0-row reservation UPDATE in Phase A causes full ROLLBACK of Phase A (including the asset INSERT). Phases B and C are idempotent and recoverable via the startup scan. No single transaction spans the DB and filesystem.
+4. **I4 (Commit phases):** Publication proceeds in three ordered phases: (A) Database transaction commits the asset row as PENDING and the reservation as COMMITTED atomically; (B) Filesystem link+unlink moves temp→final (idempotent; link never overwrites); (C) Database transaction marks the asset ACTIVE. A 0-row reservation UPDATE in Phase A causes full ROLLBACK of Phase A (including the asset INSERT). Phases B and C are idempotent and recoverable via the startup scan. No single transaction spans the DB and filesystem.
 
 5. **I5 (Lock-release ordering):** `LOCK_SH` is released only after the enclosing DB transaction has committed or rolled back, on all exit paths.
 
@@ -366,7 +390,7 @@ GC is explicitly out of scope for RES-1b implementation. The design notes it her
 
 7. **I7 (No level-1 during chunks):** Phase-2 chunk writes never acquire the level-1 advisory lock. Domain R protection (reservation + flock) is sufficient and necessary to avoid multi-minute lock holds.
 
-8. **I8 (Publication atomicity):** No file exists at a final (published) path without a corresponding asset database row. The asset row (as PENDING) is committed before the rename executes. Readers never see PENDING assets.
+8. **I8 (Publication atomicity):** No file exists at a final (published) path without a corresponding asset database row. The asset row (as PENDING) is committed before the link executes. Readers never see PENDING assets.
 
 ---
 
@@ -449,7 +473,8 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 
 ### 6.8 Crash-safe publication (rev 6 updated)
 - **Crash after Phase A COMMIT, before Phase B:** Kill the writer after the DB transaction commits but before the link. Assert: asset row exists with `PENDING`, reservation is `COMMITTED`, temp file exists. Restart → startup scan finds PENDING asset with temp file → executes link → fsync → unlink → fsync → marks ACTIVE. Assert: file at final path, asset ACTIVE, no orphan.
-- **Crash during Phase B (after link, before fsync):** Kill after `link()` returns but before `fsync(final_dir)`. Assert: recovery checks final_path. If link was durable → verify identity (inode or digest) → unlink temp → mark ACTIVE. If not durable → retry link. No data loss.
+- **Crash during Phase B (after link, before fsync):** Kill after `link()` returns but before `fsync(final_dir)`. Assert: recovery checks final_path. If link appears present → verify identity (inode or digest) → **MUST issue `fsync(final_dir)` and confirm success BEFORE unlinking temp** (rev 7, §1.6d). Only then unlink temp → mark ACTIVE. If link not durable (final doesn't exist) → retry link. No data loss. **Identity alone (inode match) does not authorize unlinking; durability must be confirmed via fsync.**
+- **Recovery fsync failure:** Simulate `fsync(final_dir)` failing (EIO) during recovery. Assert: recovery does NOT unlink temp. Asset remains PENDING. Alert `FSYNC_FAILED` fires. Temp entry preserved for retry. A failed fsync is never treated as successful publication.
 - **Crash during Phase B (after fsync, before unlink):** Kill after `fsync(final_dir)` but before `unlink(temp)`. Assert: temp and final are same inode → unlink temp → mark ACTIVE.
 - **Crash after Phase B, before Phase C:** File at final path (temp unlinked), asset PENDING with digest. Assert: recovery verifies identity via digest (temp gone, cannot use inode) → marks ACTIVE. Assert: no duplicate file.
 - **Crash after Phase B, identity unverifiable:** File at final path, asset PENDING, but digest is NULL or mismatches. Assert: recovery does NOT mark ACTIVE. Marks `PUBLICATION_IDENTITY_UNVERIFIED`, alerts. File untouched.
@@ -465,7 +490,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 ### 6.10 Concurrent recovery (new, rev 3)
 - **Setup:** Create a PENDING asset (simulate crash after Phase A). Start two recovery workers simultaneously.
 - **Assert:** Exactly one worker acquires the ownership lock; the other skips the asset (no filesystem operations, no row updates).
-- **Assert:** The asset is renamed (if needed) and marked ACTIVE exactly once. No double-rename, no conflicting updates.
+- **Assert:** The asset is linked (if needed) and marked ACTIVE exactly once. No double-link, no conflicting updates.
 - **Recovery vs. live writer:** Start a writer (holding ownership lock, in Phase B). Start a recovery worker. Assert: recovery worker fails to acquire the lock → skips the asset. Writer completes normally. No interference.
 
 ### 6.11 Permanent lockfile verification (rev 4)
@@ -515,6 +540,8 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Authoritative durability order (rev 6) — link → fsync(final_dir) → unlink → fsync(temp_dir); no exceptions; Phase B and §1.6c agree.
 - [x] Nested mount detection (rev 6) — startup scans /proc/mounts; per-publication st_dev check on actual destination.
 - [x] Stale tests updated (rev 6) — §6.8 uses link/unlink with digest verification; §6.9 asserts lockfile permanence.
+- [x] Recovery durability ordering (rev 7, §1.6d) — recovery must fsync(final_dir) before unlink(temp); fsync failure behavior defined (final_dir failure → preserve temp, stay PENDING; temp_dir failure → proceed, retry cleanup).
+- [x] Stale language removed (rev 7) — all rename→link/unlink; lockfile cleanup→permanent; §1.6a recovery uses link terminology.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
