@@ -1,9 +1,11 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 2 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
+
+**Rev 2 changes:** (1) Crash-safe publication protocol — the rename is NOT part of the DB transaction; DB commits first with asset as PENDING, then rename, then mark ACTIVE, with DB-driven recovery. (2) Single-writer ownership via a dedicated lockfile with `LOCK_EX|LOCK_NB`.
 
 ---
 
@@ -14,12 +16,39 @@
 **Deterministic path:** `/data/media/.tmp/{reservation_id}.part`
 
 - The writer opens the path ONCE per upload with `O_CREAT | O_WRONLY | O_APPEND` and holds the file descriptor for the entire upload.
-- One writer per reservation → one writer per path. No two writers can address the same temp file.
 - The path is created by the writer (not the claim worker — `O_CREAT` is forbidden in the claim path per A17).
-- On commit: the writer renames temp→final while holding `LOCK_SH`.
+- On commit: the writer renames temp→final per the publication protocol (§1.6).
 - On voluntary rollback: the writer unlinks after the `ROLLED_BACK` transition commits, while holding `LOCK_SH`.
 
 **Temp-path identity invariant (A17):** For an active reservation, the path is NEVER unlinked, renamed, or replaced except by the owning writer's commit/rollback or the abandoned-temp cleanup job acting on an `ABANDONED` row.
+
+### 1.1a Single-Writer Ownership (rev 2)
+
+A unique path prevents *different* reservation IDs from colliding. It does NOT prevent two workers handling the *same* reservation ID from opening the same file concurrently. `O_APPEND` does not establish exclusive ownership.
+
+**Ownership mechanism:** A dedicated lockfile at `/data/media/.tmp/{reservation_id}.lock`.
+
+**Protocol:**
+1. Before opening the temp data file, the writer opens (or creates) the lockfile with `O_CREAT | O_RDWR`.
+2. The writer acquires `flock(lockfd, LOCK_EX | LOCK_NB)` — exclusive, non-blocking.
+3. If the lock acquisition fails with `EWOULDBLOCK` → another writer owns this reservation → abort immediately with `WRITER_CONFLICT` (HTTP 409, not retryable by the same client without a new reservation). Do NOT open the data file. Do NOT write.
+4. The writer holds the ownership lock for the ENTIRE upload (unlike the per-chunk `LOCK_SH` on the data file, which is released between chunks).
+5. On normal completion: release the ownership lock AFTER the publication protocol completes (§1.6), then close.
+6. On abort: release the ownership lock after cleanup, then close.
+7. On process crash: the kernel releases the lock automatically. No stale ownership persists.
+
+**Restarted worker rules:**
+- A restarted worker MUST re-validate the reservation state (`SELECT state, released_at`) BEFORE attempting to acquire the ownership lock.
+- If the reservation is not active → do NOT acquire the lock, do NOT open the data file. Return an error.
+- If the reservation is active but the temp file was cleaned up (e.g., by the abandoned-temp job after a crash) → the worker may re-acquire ownership and re-create the temp file, resuming from byte 0. The `size_bytes` accounting remains conservative.
+- A worker MUST NOT write to a temp file for a reservation that is not active, even if it holds a stale file descriptor.
+
+**Why a separate lockfile (not the data file):**
+- The data file uses per-chunk `LOCK_SH` (released between chunks to allow claims). Holding `LOCK_EX` on the data file for the whole upload would block legitimate expiry claims indefinitely.
+- The lockfile is never written to, never renamed, never served. Its sole purpose is ownership.
+- The lockfile is cleaned up with the temp file (on commit, rollback, or abandoned-temp cleanup).
+
+**Invariant I6a:** At most one writer holds the ownership lock for a given reservation_id at any time. A writer that cannot acquire the ownership lock MUST NOT open, write to, or modify the temp data file.
 
 ### 1.2 Heartbeats
 
@@ -65,25 +94,65 @@ UPDATE storage_reservations
 
 ### 1.5 Fenced Commit and Rollback
 
-**Commit sequence** (while holding `LOCK_SH`):
-1. `fsync` the temp file + directory.
+**Critical correction (rev 2):** A filesystem rename cannot be rolled back by PostgreSQL. The commit sequence therefore does NOT include the rename in the database transaction. Instead, the database commits first (with the asset marked PENDING), then the rename executes, then the asset is marked ACTIVE. Crash recovery is driven by database state.
+
+### 1.6 Crash-Safe Publication Protocol (rev 2)
+
+**The problem:** `rename()` is not transactional. If we rename temp→final and then the DB transaction rolls back, the file sits at the final path with no asset row — an untracked published file. If we INSERT the asset and commit before the rename, there's a window where the DB references a file not yet at its final path.
+
+**The protocol (ordered):**
+
+**Phase A — Database commit (transactional):**
+1. `fsync` the temp file and its directory.
 2. BEGIN transaction.
-3. Acquire L1, L2, L3 per the §4.3c lock order (file `LOCK_SH` → 1 → 3 → 6).
-4. Rename temp→final path.
-5. INSERT the asset row.
-6. `UPDATE storage_reservations SET state='COMMITTED', released_at=now() WHERE reservation_id=? AND released_at IS NULL AND state IN ('RESERVED','WRITING')`.
-7. Verify exactly 1 row affected. If 0 → ROLLBACK the entire transaction (including asset INSERT), abort.
-8. COMMIT.
-9. `flock(fd, LOCK_UN)` — AFTER commit completes.
-10. Close fd.
+3. Acquire locks per §4.3c: file `LOCK_SH` → L1 → L2 → L3.
+4. INSERT the asset row with `publication_status = 'PENDING'` (new column; see schema note below).
+5. `UPDATE storage_reservations SET state='COMMITTED', released_at=now() WHERE reservation_id=? AND released_at IS NULL AND state IN ('RESERVED','WRITING')`.
+6. Verify exactly 1 row affected. If 0 → ROLLBACK entire transaction (including asset INSERT), release locks, abort. The temp file remains; the reservation is terminal.
+7. COMMIT.
 
-**Lock-release ordering (normative, A18):** `LOCK_SH` is released AFTER the database transaction's COMMIT or ROLLBACK completes, on EVERY exit path:
-- Normal commit: COMMIT → UNLOCK → close.
-- 0-row abort: ROLLBACK → UNLOCK → close → abort.
-- SQL error: ROLLBACK (in finally) → UNLOCK → close → propagate.
-- Process death: kernel releases lock; DB rolls back on session end.
+**Phase B — Filesystem publication (non-transactional, idempotent):**
+8. `rename(temp_path, final_path)`.
+   - If the rename fails with ENOENT (temp already gone) → check if final_path exists. If yes → another attempt already renamed it (idempotent retry) → proceed to step 9. If no → log at error, mark asset as `PUBLICATION_FAILED`, alert. The DB has a PENDING asset with no file — recoverable via re-upload.
+9. `fsync` the destination directory.
 
-Releasing `LOCK_SH` before the transaction ends is a correctness bug.
+**Phase C — Activation (transactional):**
+10. BEGIN; `UPDATE world_media_assets SET publication_status='ACTIVE' WHERE asset_id=? AND publication_status='PENDING'`; COMMIT.
+11. Release `LOCK_SH`. Release ownership lock. Close fds.
+
+**Lock-release ordering (A18):** `LOCK_SH` on the data file is held through Phase A (the DB transaction) and released only after Phase A commits or rolls back. It is NOT held during Phase B (the rename) — the rename is idempotent and the PENDING status protects readers. The ownership lock is held through all three phases.
+
+**Schema requirement:** `world_media_assets` needs a `publication_status` column (`PENDING`, `ACTIVE`, `PUBLICATION_FAILED`), default `PENDING`. The serving layer MUST NOT serve assets with `publication_status != 'ACTIVE'`.
+
+**Crash recovery (startup scan):**
+For each asset with `publication_status='PENDING'`:
+- If file exists at `final_path` → the rename completed → `UPDATE ... SET publication_status='ACTIVE'`. (Crash between Phase B and Phase C.)
+- Else if file exists at `temp_path` → the rename did not complete → execute Phase B + C now. (Crash after Phase A commit, before Phase B.)
+- Else (neither path exists) → the temp file was lost → `UPDATE ... SET publication_status='PUBLICATION_FAILED'`, alert. The reservation is COMMITTED but the bytes are gone. Operator intervention or re-upload required.
+
+**Crash boundaries and recovery:**
+
+| Crash point | DB state | FS state | Recovery |
+|-------------|----------|----------|----------|
+| During Phase A (before COMMIT) | Transaction rolls back; no asset row; reservation still active | Temp file exists | Reservation remains active; writer (if alive) can retry; expiry claim handles if dead |
+| After Phase A COMMIT, before Phase B | Asset PENDING; reservation COMMITTED | Temp file exists | Startup scan: temp exists → execute Phase B + C |
+| During Phase B (rename) | Asset PENDING; reservation COMMITTED | Either temp or final (rename is atomic) | Startup scan: check both paths → complete or mark failed |
+| After Phase B, before Phase C | Asset PENDING; reservation COMMITTED | File at final path | Startup scan: final exists → mark ACTIVE |
+| After Phase C | Asset ACTIVE; reservation COMMITTED | File at final path | Normal state; no recovery needed |
+
+**What this guarantees:**
+- No file exists at a final path without a database row (the PENDING row is created before the rename).
+- No PENDING asset is served to readers (serving layer filters).
+- Every intermediate state is discoverable via the `publication_status` column.
+- The rename is idempotent (safe to retry).
+- No byte is uncounted (the reservation's `size_bytes` covers the temp file until COMMITTED; the asset row covers it after).
+
+**Voluntary rollback (unchanged):**
+1. While holding `LOCK_SH` and the ownership lock: BEGIN.
+2. `UPDATE storage_reservations SET state='ROLLED_BACK', released_at=now() WHERE reservation_id=? AND released_at IS NULL`.
+3. COMMIT.
+4. Unlink the temp file (best-effort; if it fails, the abandoned-temp job will clean it up).
+5. Release locks, close fds.
 
 ---
 
@@ -132,7 +201,11 @@ The heartbeat is a *liveness signal*, not a *write authorization*. Every chunk w
 
 6. **I6 (Temp-path exclusivity):** One writer per deterministic path. No two writers address the same temp file.
 
+6a. **I6a (Single-writer ownership):** At most one writer holds the ownership lock (`{reservation_id}.lock`, `LOCK_EX|LOCK_NB`) for a given reservation at any time. A writer that cannot acquire the ownership lock MUST NOT open, write to, or modify the temp data file. The lock is held for the entire upload and released by the kernel on crash.
+
 7. **I7 (No level-1 during chunks):** Phase-2 chunk writes never acquire the level-1 advisory lock. Domain R protection (reservation + flock) is sufficient and necessary to avoid multi-minute lock holds.
+
+8. **I8 (Publication atomicity):** No file exists at a final (published) path without a corresponding asset database row. The asset row (as PENDING) is committed before the rename executes. Readers never see PENDING assets.
 
 ---
 
@@ -213,6 +286,19 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - Assert: zero bytes are written post-finalization.
 - This test proves the heartbeat alone does not authorize writes.
 
+### 6.8 Crash-safe publication (new, rev 2)
+- **Crash after Phase A COMMIT, before Phase B:** Kill the writer after the DB transaction commits but before the rename. Assert: asset row exists with `PENDING`, reservation is `COMMITTED`, temp file exists. Restart → startup scan finds PENDING asset with temp file → completes rename → marks ACTIVE. Assert: file at final path, asset ACTIVE, no orphan.
+- **Crash during Phase B (rename):** Kill mid-rename (or simulate by manually placing file at final path with PENDING asset). Assert: startup scan detects file at final path → marks ACTIVE without re-renaming.
+- **Crash after Phase B, before Phase C:** File at final path, asset PENDING. Assert: startup scan marks ACTIVE. Assert: no duplicate file, no re-rename.
+- **Temp lost:** PENDING asset with neither temp nor final file exists. Assert: marked `PUBLICATION_FAILED`, alert fires, no silent data loss.
+- **Reader isolation:** During the PENDING window (after Phase A, before Phase C), assert that the serving layer does not return the asset (filtered by `publication_status`).
+
+### 6.9 Single-writer ownership (new, rev 2)
+- **Race to acquire:** Two writers attempt to open the same reservation_id concurrently. Assert: exactly one acquires the ownership lock (`LOCK_EX|LOCK_NB`); the other gets `EWOULDBLOCK` → aborts with `WRITER_CONFLICT` without opening the data file or writing any bytes.
+- **Crash releases ownership:** Writer acquires ownership lock, then crashes (kill -9). Assert: kernel releases the lock. A new writer can acquire ownership for the same reservation (after validating the reservation is still active).
+- **Stale worker:** Writer holds ownership lock; reservation is claimed (ABANDONED) by the expiry worker. A restarted worker validates state → sees ABANDONED → does NOT acquire the lock, does NOT write. Assert: no bytes written to the abandoned temp file.
+- **Lockfile cleanup:** After successful commit, assert the `.lock` file is removed along with the temp file. After abandoned-temp cleanup, assert the `.lock` file is also removed.
+
 ---
 
 ## 7. Out of Scope (RES-1c, QUOTA-1)
@@ -233,4 +319,6 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] B8 in-flight chunk bound acknowledged.
 - [x] S45, S51, S52, S53 acceptance criteria mapped to tests.
 - [x] Fencing-authority race constraint addressed (§2).
+- [x] Crash-safe publication protocol defined (rev 2, §1.6) — rename not in DB transaction; PENDING/ACTIVE with DB-driven recovery.
+- [x] Single-writer ownership mechanism defined (rev 2, §1.1a) — dedicated lockfile, kernel release on crash, restarted-worker rules.
 - [x] No implementation written; design-only.
