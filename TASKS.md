@@ -591,6 +591,25 @@ Governed by **Project Growth v1.1.0** and [`docs/governance.md`](governance.md).
 
 ---
 
+### ADR-017 Implementation Slices (Design Gate OPEN 2026-10-18)
+Traceability: `docs/decisions/ADR-017-asset-lifecycle-and-publication-integrity.md` (rev 26, APPROVED),
+`docs/decisions/ADR-017-migration-plan.md`, `docs/decisions/ADR-017-implementation-breakdown.md` (both PROPOSAL, planning corrections verified).
+Full 15-slice dependency-ordered breakdown lives in the implementation-breakdown doc; only the completed/active slice is tracked here.
+
+- **Task MIG-0: Author & verify migrations 014/015 (ADR-017 durable-ops + registry DDL)** ✅ COMPLETE 2026-10-18
+  - **Phase**: ADR-017 slice MIG-0 (first implementation slice per dependency graph)
+  - **Prerequisites**: ADR-017 rev 26 approved; migration plan + breakdown product-owner approved; System Completeness Gate §9 merged (conditional pass)
+  - **Ownership**: `db/migrations/`
+  - **File Scope**: `db/migrations/014_media_durable_ops.sql`, `db/migrations/015_media_registry.sql`, `tests/integration/migration-014-015.test.ts`
+  - **Objective**: Create the 10 ADR-017 tables, 10 indexes, `check_roles_unique()` trigger, 2 UNIQUE constraints, and the `system_maintenance` singleton seed — all idempotent per repo convention — and prove them against real PostgreSQL.
+  - **Traceability**: ADR-017 §§4.1, 4.3d, 4.7, 4.9, 5.5; migration plan §§1–4
+  - **Acceptance Criteria**: (a) fresh-DB `runMigrations()` creates all 10 tables / 10 indexes / trigger / seed row, versions 14+15 recorded; (b) second `runMigrations()` is a clean no-op; (c) verbatim DDL replay of each file in an isolated scratch DB leaves the schema byte-identical; (d) S46-step-17 CHECK probes (6); (e) roles trigger/CHECK probes (6); (f) S57 broken-variant rollback; (g) single-active-run + one-unrevoked-auth index behavior.
+  - **Required Tests**: `tests/integration/migration-014-015.test.ts` — 7 tests, run against real PostgreSQL 16 (local install via TEST_DATABASE_URL; Testcontainers path preserved for CI).
+  - **Definition of Done**: All 7 tests PASS with verbatim output recorded; DDL pglast-clean; no existing tables touched. **Evidence (2026-10-18)**: 7/7 passed on PostgreSQL 16.15; pre-existing `migration.test.ts` still 4/4. One test-authoring defect found and fixed in-run (wrong `pg_trigger` column `tgisdisabled` → `tgenabled <> 'D'`); no DDL defects found.
+  - **Next slice**: OPS-0 (volume provisioning runbook §2.1) — backfill MUST NOT run before the persistent volume exists.
+
+---
+
 ## 3. Post-MVP Implementation Backlog (Deferred / Future Extensions)
 - **Task L1: Implement Pluggable Background Job Queue (`IntfJobQueue`)**: Abstracted via `src/shared/ports/job-queue.interface.ts` (BullMQ / Redis per ADR-005) for asynchronous batch simulations. (*Deferred to Post-MVP*).
 - **Task M1: Implement Advanced Agent Simulation & Multiverse Branching**: Future living world multi-timeline outcome pooling and Overseer override engine. (*Deferred to Post-MVP*).
