@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 14 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 15 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -281,10 +281,29 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
 
 **Cleanup (write-ahead marker protocol) (rev 14):**
 1. Acquire ownership lock, verify inode identity (per above).
-2. **Write the retry marker BEFORE the filesystem operation:**
-   `UPDATE world_media_assets SET temp_cleanup_fsync_pending = TRUE, temp_cleanup_attempts = 0, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ? AND publication_status = 'ACTIVE'`.
+2. **Write the retry marker BEFORE the filesystem operation (rev 15 — counter preservation):**
+   ```sql
+   UPDATE world_media_assets 
+   SET temp_cleanup_fsync_pending = TRUE,
+       temp_cleanup_attempts = CASE 
+           WHEN temp_cleanup_fsync_pending = FALSE THEN 0 
+           ELSE temp_cleanup_attempts 
+       END,
+       temp_cleanup_last_attempt_at = now()
+   WHERE reservation_id = ? AND publication_status = 'ACTIVE'
+   ```
+   - If the marker was previously FALSE (new cleanup obligation) → attempts initialized to 0.
+   - If the marker was already TRUE (rediscovering an already-pending cleanup, e.g., temp file reappeared) → attempts PRESERVED. The existing failure history is not erased.
    - If this UPDATE fails (DB error) → abort cleanup, release lock, retry next cycle. Do NOT proceed to unlink without the marker.
    - The marker must be durably committed before the unlink executes.
+
+**When attempts increment (rev 15):** The `temp_cleanup_attempts` counter increments ONLY when `fsync(temp_dir_fd)` returns an error. It does NOT increment on:
+- Successful fsync (resets to 0).
+- Rediscovery of an already-pending cleanup (counter preserved, not incremented).
+- Pass-2 skip due to single-owner rule (not processed, not counted).
+- Lock acquisition failure (not attempted, not counted).
+
+**Consecutive failure definition:** Failures are consecutive if no successful fsync intervenes. A successful fsync (followed by marker clear) resets the counter to 0. The 5-failure alert and 15-failure escalation count consecutive fsync errors, not total cycles or rediscoveries.
 3. `unlink(temp_path)`. If ENOENT → already gone → proceed to step 4 (fsync still required to ensure durability).
 4. `fsync(temp_dir_fd)`.
    - If succeeds → clear the marker: `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_attempts = 0 WHERE reservation_id = ?`.
@@ -318,8 +337,12 @@ ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMP
 3. If `temp_cleanup_attempts >= 5` → alert `TEMP_CLEANUP_FAILED` (once per 5-failure window).
 
 **On cleanup cycle (startup and periodic):**
-1. Perform the file-listing discovery (§1.6e above) for temp entries. For each candidate, the cleanup protocol (above) writes the marker BEFORE unlinking.
-2. Additionally query: `SELECT reservation_id, temp_cleanup_attempts FROM world_media_assets WHERE temp_cleanup_fsync_pending = TRUE AND publication_status = 'ACTIVE'`.
+
+**Single-owner rule (rev 15):** Each reservation is processed at most once per cycle. The worker maintains an in-memory `processed: Set<reservation_id>`. Pass 1 (file listing) adds each handled reservation to the set. Pass 2 (DB query) skips any reservation already in the set. This prevents double-processing when a Pass-1 fsync failure leaves the marker set, which Pass 2 would otherwise retry immediately in the same cycle (double-counting failures or prematurely clearing).
+
+1. Initialize `processed = {}` (empty set).
+2. **Pass 1 — file-listing discovery:** For each temp file candidate, if `reservation_id` in `processed` → skip. Otherwise perform cleanup protocol (marker write → unlink → fsync). Add `reservation_id` to `processed` regardless of outcome.
+3. **Pass 2 — DB pending markers:** Query: `SELECT reservation_id, temp_cleanup_attempts FROM world_media_assets WHERE temp_cleanup_fsync_pending = TRUE AND publication_status = 'ACTIVE'`. For each row, if `reservation_id` in `processed` → skip (already handled in Pass 1). Otherwise perform fsync retry. Add to `processed`.
    - These are markers from interrupted cleanups (crash after marker write, or fsync failures).
 3. For each pending reservation:
    - Acquire ownership lock (non-blocking). If fails → skip.
@@ -648,6 +671,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Stale temp cleanup for ACTIVE assets (rev 12, §1.6e) — bounded retry discovers temp entries via reservation_id, verifies inode identity, safely unlinks with fsync; PENDING/ACTIVE paths never overlap.
 - [x] Persistent fsync-retry state (rev 13) — DB columns track pending temp_dir fsyncs; retry occurs via directory fsync even when temp absent; survives restarts.
 - [x] Write-ahead marker (rev 14) — DB marker written BEFORE unlink(); cleared only after fsync succeeds; crash windows all covered; DB failure handling defined; alert resolution rule explicit.
+- [x] Retry accounting (rev 15) — single-owner per cycle prevents double-processing; conditional counter reset preserves history; attempts increment only on fsync failure.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -738,3 +762,13 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** Marker remains set. Next cycle retries fsync (succeeds again, idempotent) → attempts clear again. Eventually succeeds. No lost retry state, no premature clearing.
 - **Alert resolution:** Setup: 5 fsync failures → alert fires. Then fsync succeeds on 6th attempt.
 - **Assert:** Marker cleared, attempts reset to 0. Alert clears automatically (per §1.6e alert resolution rule). The alert does not require manual acknowledgment to clear — successful fsync is the resolution condition.
+
+### 6.21 Retry accounting (new, rev 15)
+- **Duplicate processing in one cycle:** Setup: ACTIVE asset with temp entry; marker not yet set. Cleanup cycle runs Pass 1: processes the temp file, `unlink()` succeeds, `fsync()` fails → marker set (attempts=1). Pass 2 queries DB and finds the same reservation with pending=TRUE.
+- **Assert:** Pass 2 skips the reservation (already in `processed` set). The fsync is NOT retried in the same cycle. Attempts remains 1 (not incremented to 2). No premature alert. The retry occurs on the NEXT cycle, not the same one.
+- **Counter preservation on rediscovery:** Setup: reservation with `pending=TRUE`, `attempts=3` (from prior failures). Temp file reappears (unlink not durable). Cleanup cycle discovers via file listing.
+- **Assert:** Marker write uses conditional logic → attempts remains 3 (not reset to 0). The existing failure history is preserved. After the retry fsync fails → attempts becomes 4. After 5th failure → alert fires correctly (not prematurely due to reset).
+- **Counter reset on new obligation:** Setup: reservation with no marker (`pending=FALSE`, `attempts=0` from a prior completed cleanup). New temp file appears (new upload with same reservation_id — should not happen, but test the logic).
+- **Assert:** Marker write sees `pending=FALSE` → initializes attempts to 0. This is a new obligation, not a continuation.
+- **Attempts increment only on fsync failure:** Setup: pending marker with attempts=2. Cycle runs but lock acquisition fails (another process holds it).
+- **Assert:** Attempts remains 2 (not incremented). Lock failure is not an fsync failure. Next cycle retries.
