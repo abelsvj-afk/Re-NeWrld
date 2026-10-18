@@ -437,12 +437,20 @@ describe('RES-1b Delivery Worker (B8)', () => {
 
     // Track sends.
     const sent: string[] = [];
+    const { createWorkerMetrics } = await import(
+      '../../src/shared/metrics/worker-metrics.js'
+    );
+    const dm = createWorkerMetrics();
     const deps = {
       withTransaction,
       workerId: 'test-worker-1',
       log: () => {},
       send: async (e: { delivery_event_id: string }) => {
         sent.push(e.delivery_event_id);
+      },
+      metrics: {
+        sentTotal: { inc: () => dm.deliverySentTotal.inc() },
+        failedTotal: { inc: () => dm.deliveryFailedTotal.inc() },
       },
     };
 
@@ -457,6 +465,9 @@ describe('RES-1b Delivery Worker (B8)', () => {
       [event.delivery_event_id],
     );
     expect(after.rows[0].status).toBe('sent');
+    // Delivery metrics: sent incremented on confirmed delivery.
+    expect(dm.deliverySentTotal.get()).toBe(1);
+    expect(dm.deliveryFailedTotal.get()).toBe(0);
   });
 
   it('retry backoff: failed send increments attempts and sets next_attempt_at', async () => {
@@ -483,6 +494,7 @@ describe('RES-1b Delivery Worker (B8)', () => {
       send: async () => {
         throw new Error('Simulated webhook failure');
       },
+      metrics: (await import('../../src/modules/world/domain/services/delivery-worker.service.js')).noopDeliveryMetrics(),
     };
 
     await runDeliveryOnce(deps);
@@ -517,8 +529,11 @@ describe('RES-1b Delivery Worker (B8)', () => {
       [incident.incident_id, reservationId],
     )).rows[0];
 
-    const deps1 = { withTransaction, workerId: 'worker-A', log: () => {}, send: async () => {} };
-    const deps2 = { withTransaction, workerId: 'worker-B', log: () => {}, send: async () => {} };
+    const { noopDeliveryMetrics } = await import(
+      '../../src/modules/world/domain/services/delivery-worker.service.js'
+    );
+    const deps1 = { withTransaction, workerId: 'worker-A', log: () => {}, send: async () => {}, metrics: noopDeliveryMetrics() };
+    const deps2 = { withTransaction, workerId: 'worker-B', log: () => {}, send: async () => {}, metrics: noopDeliveryMetrics() };
 
     // Worker A claims.
     const claimA = await withTransaction(async (tx) => claimDeliveryEvent(deps1, tx));
@@ -549,6 +564,97 @@ describe('RES-1b Delivery Worker (B8)', () => {
     expect(confirmedB).toBe(true);
   });
 });
+
+  it('delivery metrics: failed increments only on terminal failure, not retries', async () => {
+    const { runDeliveryOnce, noopDeliveryMetrics } = await import(
+      '../../src/modules/world/domain/services/delivery-worker.service.js'
+    );
+    const { createWorkerMetrics } = await import(
+      '../../src/shared/metrics/worker-metrics.js'
+    );
+
+    const reservationId = await createReservation();
+    const incident = (await pool.query(
+      `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
+       VALUES ($1, 'unlink', 'open', 5) RETURNING incident_id`,
+      [reservationId],
+    )).rows[0];
+    const event = (await pool.query(
+      `INSERT INTO temp_cleanup_delivery_outbox (incident_id, reservation_id, failure_type, fire_count, severity, status, attempts)
+       VALUES ($1, $2, 'unlink', 5, 'warning', 'pending', 9) RETURNING delivery_event_id`,
+      [incident.incident_id, reservationId],
+    )).rows[0];
+
+    const dm = createWorkerMetrics();
+    const deps = {
+      withTransaction,
+      workerId: 'test-metrics',
+      log: () => {},
+      send: async () => { throw new Error('webhook down'); },
+      metrics: {
+        sentTotal: { inc: () => dm.deliverySentTotal.inc() },
+        failedTotal: { inc: () => dm.deliveryFailedTotal.inc() },
+      },
+    };
+
+    // attempts=9, this failure → attempts=10 → terminal 'failed'.
+    const didWork = await runDeliveryOnce(deps);
+    expect(didWork).toBe(true);
+    expect(dm.deliveryFailedTotal.get()).toBe(1);
+    expect(dm.deliverySentTotal.get()).toBe(0);
+
+    const after = await pool.query(
+      `SELECT status FROM temp_cleanup_delivery_outbox WHERE delivery_event_id=$1`,
+      [event.delivery_event_id],
+    );
+    expect(after.rows[0].status).toBe('failed');
+  });
+
+  it('delivery metrics: retry does not increment failed', async () => {
+    const { runDeliveryOnce } = await import(
+      '../../src/modules/world/domain/services/delivery-worker.service.js'
+    );
+    const { createWorkerMetrics } = await import(
+      '../../src/shared/metrics/worker-metrics.js'
+    );
+
+    const reservationId = await createReservation();
+    const incident = (await pool.query(
+      `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
+       VALUES ($1, 'fsync', 'open', 5) RETURNING incident_id`,
+      [reservationId],
+    )).rows[0];
+    const event = (await pool.query(
+      `INSERT INTO temp_cleanup_delivery_outbox (incident_id, reservation_id, failure_type, fire_count, severity, status, attempts)
+       VALUES ($1, $2, 'fsync', 5, 'warning', 'pending', 0) RETURNING delivery_event_id`,
+      [incident.incident_id, reservationId],
+    )).rows[0];
+
+    const dm = createWorkerMetrics();
+    const deps = {
+      withTransaction,
+      workerId: 'test-metrics-retry',
+      log: () => {},
+      send: async () => { throw new Error('temporary'); },
+      metrics: {
+        sentTotal: { inc: () => dm.deliverySentTotal.inc() },
+        failedTotal: { inc: () => dm.deliveryFailedTotal.inc() },
+      },
+    };
+
+    // attempts=0, this failure → attempts=1 → still pending (retry).
+    const didWork = await runDeliveryOnce(deps);
+    expect(didWork).toBe(true);
+    expect(dm.deliveryFailedTotal.get()).toBe(0);
+    expect(dm.deliverySentTotal.get()).toBe(0);
+
+    const after = await pool.query(
+      `SELECT status, attempts FROM temp_cleanup_delivery_outbox WHERE delivery_event_id=$1`,
+      [event.delivery_event_id],
+    );
+    expect(after.rows[0].status).toBe('pending');
+    expect(Number(after.rows[0].attempts)).toBe(1);
+  });
 
 describe('RES-1b Webhook Adapter (B8)', () => {
   it('encodeDev: correct for various device numbers', async () => {

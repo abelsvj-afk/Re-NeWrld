@@ -23,6 +23,20 @@ export interface DeliveryWorkerDeps {
   send: (event: OutboxEvent) => Promise<void>;
   workerId: string;
   log: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => void;
+  // Delivery metrics (required). `sent` increments on confirmed delivery;
+  // `failed` increments only on terminal failure (not retries).
+  metrics: {
+    sentTotal: { inc: () => void };
+    failedTotal: { inc: () => void };
+  };
+}
+
+/** No-op metrics for tests that don't assert on counts. */
+export function noopDeliveryMetrics() {
+  return {
+    sentTotal: { inc: () => {} },
+    failedTotal: { inc: () => {} },
+  };
 }
 
 export interface OutboxEvent {
@@ -206,6 +220,7 @@ export async function runDeliveryOnce(deps: DeliveryWorkerDeps): Promise<boolean
           deliveryEventId: event.delivery_event_id,
           incidentId: event.incident_id,
         });
+        deps.metrics.sentTotal.inc();
       }
     } else {
       const outcome = await handleDeliveryFailure(
@@ -224,6 +239,7 @@ export async function runDeliveryOnce(deps: DeliveryWorkerDeps): Promise<boolean
           incidentId: event.incident_id,
           attempts: MAX_ATTEMPTS,
         });
+        deps.metrics.failedTotal.inc();
       }
     }
   });

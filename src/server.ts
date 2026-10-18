@@ -133,6 +133,11 @@ function startDeliveryWorker(app: {
             'Alert delivered via webhook',
           );
         },
+        // Delivery metrics wired to the shared singleton.
+        metrics: {
+          sentTotal: { inc: () => getWorkerMetrics().deliverySentTotal.inc() },
+          failedTotal: { inc: () => getWorkerMetrics().deliveryFailedTotal.inc() },
+        },
       };
 
       // Process up to 10 events per tick.
