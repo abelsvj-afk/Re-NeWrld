@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 26 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 27 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -428,8 +428,6 @@ CREATE TABLE temp_cleanup_incidents (
     last_fired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_fired_count INT NOT NULL,  -- counter value at last fire (5, 10, 15...)
     acknowledged_at TIMESTAMPTZ,    -- operator ack (suppresses notifications, does NOT resolve)
-    delivery_confirmed_at TIMESTAMPTZ,  -- alert system confirms notification sent
-    delivery_attempts INT NOT NULL DEFAULT 0  -- tracks delivery retries
     -- No UNIQUE on (reservation_id, failure_type, status): multiple resolved
     -- incidents must coexist for audit. Uniqueness enforced below.
 );
@@ -534,7 +532,24 @@ CREATE INDEX ON temp_cleanup_delivery_outbox (status, next_attempt_at)
    ```
    - If 0 rows → claim superseded; abort (the new claimant will handle retry scheduling).
    - `next_attempt_at` enforces the backoff. Initial events have `next_attempt_at=now()` (immediately eligible).
-5. **Exhausted:** After 10 attempts: `SET status='failed'` (fenced by token). Log at critical (`ALERT_DELIVERY_FAILED` with `delivery_event_id`, `incident_id`). The event remains for manual retry; it is never silently dropped.
+5. **Exhausted (10th failure — fenced transaction):** When `attempts` would increment to 10, execute as a single fenced transaction:
+   ```sql
+   BEGIN;
+   UPDATE temp_cleanup_delivery_outbox 
+   SET status='failed', 
+       attempts=10, 
+       last_attempt_at=now(), 
+       last_error=?,
+       claimed_by=NULL, claimed_at=NULL, claim_token=NULL
+   WHERE delivery_event_id=? AND claim_token=<token> AND status='pending';
+   -- If 0 rows: claim superseded, abort (do not transition).
+   COMMIT;
+   ```
+   - Attempts 1–9: event remains `status='pending'` with `next_attempt_at` set per backoff schedule. Eligible for automatic retry.
+   - Attempt 10: event transitions directly to `status='failed'` in the same UPDATE (no intermediate pending state). The `next_attempt_at` is irrelevant (no automatic retry).
+   - After commit: log at critical (`ALERT_DELIVERY_FAILED` with `delivery_event_id`, `incident_id`, `failure_type`, `attempts=10`).
+   - The `failed` event remains in the outbox indefinitely for manual intervention. An operator may: (a) inspect `last_error`, (b) reset to `pending` with `attempts=0` and `next_attempt_at=now()` for manual retry, or (c) leave as failed (audit trail). It is never auto-deleted or silently dropped.
+   - Manual retry reuses the same `delivery_event_id` (receiver deduplication still applies if the original send actually succeeded).
 
 **Claim fencing rationale:** Without the token, worker B (reclaiming a stale claim) and worker A (still processing) could both update the event. Worker A's late success could overwrite worker B's retry scheduling, or vice versa. The token ensures only the current claimant modifies state. The receiver's `delivery_event_id` deduplication remains the backstop against duplicate external notifications.
 
@@ -875,6 +890,8 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Update path and delivery contract (rev 24) — covers open+escalated; last_fired_count uses actual value; delivery_confirmed_at with at-least-once + idempotent receiver.
 - [x] Outbox pattern (rev 25) — separates incident_id from delivery_event_id; receiver deduplicates by event; concurrent workers use SKIP LOCKED; stale alternative removed.
 - [x] Backoff and fencing (rev 26) — next_attempt_at enforces retry delays; claim_token prevents stale workers from overwriting; receiver dedup remains backstop.
+- [x] Legacy cleanup (rev 27) — removed delivery_confirmed_at/delivery_attempts from incident schema; fixed stale test to use outbox.
+- [x] 10th-failure transaction (rev 27) — single fenced UPDATE transitions to 'failed'; attempts 1-9 remain pending with backoff; manual retry path defined.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -1028,7 +1045,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Crash after success, before resolution:** Setup: `unlink_attempts=5`, incident open. Cleanup: `unlink()` succeeds. Simulate crash BEFORE the transaction commits (counter reset + incident resolution).
 - **Assert:** After restart, DB shows `unlink_attempts=5` (not reset, txn rolled back), incident still `status='open'`. Recovery retries: `unlink()` succeeds again (idempotent, file already gone → ENOENT → treated as success) → transaction commits: counter reset, incident resolved. No stale open incident.
 - **Crash after incident open, before alert delivery:** Setup: counter reaches 5, incident INSERT commits, then crash before alert system sends notification.
-- **Assert:** After restart, incident exists with `status='open'`. Startup reconciliation finds it, checks `delivery_confirmed_at` (NULL) → re-emits alert. The incident was not lost. Alert deduplicated by `incident_id` (alert system tracks sent IDs).
+- **Assert:** After restart, incident exists with `status='open'` and outbox event exists with `status='pending'`. Delivery worker claims the pending event and sends. The incident was not lost. Receiver deduplicates by `delivery_event_id` (not `incident_id`).
 - **Stale incident reconciliation:** Setup: manually set incident to `status='open'` with counter at 3 (simulating a crash where counter reset but incident didn't).
 - **Assert:** Startup scan finds open incident with counter < 5 → resolves it: `status='resolved'`, `resolved_at` set. Logs `STALE_INCIDENT_RESOLVED` at warning. The resolved incident cannot remain active.
 - **Recurrence UUID uniqueness:** Setup: incident U1 resolved. New failures reach 5.
