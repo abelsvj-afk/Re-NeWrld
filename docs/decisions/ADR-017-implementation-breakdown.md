@@ -50,31 +50,39 @@ Slices marked **[migration-first]** require 014/015 applied before their tests c
 **Dependencies:** migration plan approval. **Blocks:** every other slice.
 **Split note:** if large, split into MIG-0a (014) / MIG-0b (015).
 
-## OPS-0 — Fly volume provisioning (§2.1) [operator procedure, parallel track]
+## OPS-0 — Fly volume provisioning (§2.1) [operator procedure, parallel track] — COMPLETE 2026-10-18
 
-**Scope:** Execute the ADR §2.1 eleven-step staged volume migration as an operator runbook: inventory → provision `media_data` → staging machine (`MIGRATION_STAGING=true`, mount at `/data/media_new`) → transfer → freeze → final inventory → verify → cutover (stop orig, reconfigure staging, restart) → verify → 9f fate decision → backfill prerequisite satisfied.
-**ADR sections:** §2.1 (full procedure), §9.2 (topology constraint: single machine while on volume).
-**Acceptance criteria:**
-- S27: cutover rollback demonstrated (original machine restartable until 9f decision recorded).
-- SHA-256 inventory match at steps 7–8; health `/health` 200 with `media_storage` not degraded at 9e.
-- `fly.toml` documents volume name/size/mount; single-machine constraint recorded in deployment docs.
+**Scope (as executed):** Single-volume consolidation per Addendum 001 (supersedes the separate-`media_data` procedure below). Extended `narration_data` 1 GB → 4 GB, remounted at `/data`, verified via `/health`, snapshot scheduled.
+**ADR sections:** §2.1 (superseded by Addendum 001), §9.2 (topology constraint: single machine while on volume — preserved).
+**Acceptance criteria (met):**
+- `/health` 200 with `media_storage` state `ok` (device `/dev/vdc`, writable).
+- Test upload persists on volume and serves HTTP 200.
+- `fly.toml` documents the single-volume mount; single-machine constraint preserved.
+- Volume snapshot scheduled.
+
+**Original procedure (superseded, retained for reference):** Execute the ADR §2.1 eleven-step staged volume migration as an operator runbook: inventory → provision `media_data` → staging machine (`MIGRATION_STAGING=true`, mount at `/data/media_new`) → transfer → freeze → final inventory → verify → cutover (stop orig, reconfigure staging, restart) → verify → 9f fate decision → backfill prerequisite satisfied.
 **Dependencies:** owner decisions (§7.2 of migration plan: size, region, retention window). **Blocks:** BF-1 (backfill must not run on ephemeral storage).
-**Note:** application support needed — `MIGRATION_STAGING=true` startup behavior (don't bind HTTP / bind 127.0.0.1 only). Implement as part of this slice or UPLOAD-1; decide at review.
 
 ## RES-1 — Storage reservation protocol [migration-first]
 
-**Scope:** `storage_reservations` repository + Phase-1 (check-and-reserve under level-1 + quota lock) + Phase-2 (deterministic temp path, heartbeats with epoch increment, fenced chunk writes with `flock` handshake, safe-open protocol, lock-release ordering) + expiry-claim worker (candidate selection, 60s observation, mtime grace, epoch CAS, `LOCK_EX|LOCK_NB` fenced claim, path-vanished/absent sub-protocols) + state transitions (COMMITTED/ROLLED_BACK/ABANDONED/CLEANED).
-**ADR sections:** §5.5 (entire reservation protocol), §4.3c (lock positions 1–2), §4.3d (B8 invalidation interaction).
-**Acceptance criteria (scenarios):**
-- S43: accounting conservation — no double-count, no gap across all transitions.
-- S38: concurrent uploads respect capacity reservation.
-- S45: ENOSPC during write → cleanup or ABANDONED reclassification.
-- S51: deployment `flock` self-test passes.
-- S52: fencing failure cases (lock released before commit detected; inode identity).
-- S53: Domain-R exclusion — Phase-2 writes without level-1, no cross-file interference.
-- S5 (partial): outstanding reservations visible to concurrent Phase-1s.
+**Scope:** `storage_reservations` repository + Phase-1 check-and-reserve + Phase-2 writer obligations + expiry-claim worker + state transitions. **Split into three sub-slices (see below); the Phase-1 contract and RES-1a/QUOTA-1 boundary are authoritatively defined in `ADR-017-reconciliation-phase1-boundary.md`, which supersedes the §5.3/§5.5 descriptions for implementation.**
+**ADR sections:** §5.3, §5.5 (reservation protocol; see reconciliation doc for unified contract), §4.3c (lock positions 1–3), §4.3d (fence and B8 invalidation).
 **Dependencies:** MIG-0. **Blocks:** QUOTA-1, UPLOAD-1.
-**Split note:** large — split into RES-1a (Phase-1 + repository), RES-1b (Phase-2 writer obligations), RES-1c (expiry-claim worker).
+
+### RES-1a — Repository + Phase-1 check-and-reserve
+**Scope:** `storage_reservations` repository (CRUD, state transitions, active-bytes queries) + the Phase-1 transaction per the reconciliation doc §2 (L1→L2→L3 locks, fence check, metric freshness, quota check with outstanding reservations, capacity check, INSERT, COMMIT, error/rollback semantics). **Does not** include Phase-2 writes, heartbeats, expiry, or the registry handoff.
+**Acceptance:** S5-partial (quota contention), S38 (capacity contention, no oversubscription), S43-partial (atomic reservation, exactly-once counting, no leaked rows on failure). See reconciliation doc §5 for the full test plan.
+**Blocks:** QUOTA-1, RES-1b.
+
+### RES-1b — Phase-2 writer obligations
+**Scope:** Deterministic temp path (`/data/media/.tmp/{reservation_id}.part`), heartbeats with epoch increment, fenced chunk writes with `flock` handshake, safe-open protocol, lock-release ordering on commit/rollback. **Does not** include expiry.
+**Acceptance:** S45 (ENOSPC handling), S51 (`flock` self-test), S52 (fencing failures), S53 (Domain-R exclusion).
+**Dependencies:** RES-1a. **Blocks:** QUOTA-1 (handoff), UPLOAD-1.
+
+### RES-1c — Expiry-claim worker
+**Scope:** Candidate selection (expired, no heartbeat), 60s observation, mtime grace, epoch CAS, `LOCK_EX|LOCK_NB` fenced claim, ABANDONED transition with audit columns, path-vanished/absent sub-protocols.
+**Acceptance:** S43 (full conservation proof across all transitions, including expiry).
+**Dependencies:** RES-1a. **Blocks:** none (runs independently once RES-1a exists).
 
 ## QUOTA-1 — Quota admission + atomic handoff [migration-first]
 
@@ -227,7 +235,7 @@ Slices marked **[migration-first]** require 014/015 applied before their tests c
 
 ## Implementation order (recommended)
 
-1. MIG-0 → 2. FENCE-1 → 3. RES-1 → 4. QUOTA-1 → 5. UPLOAD-1 + REF-1 (parallel) → 6. DEL-1 → 7. SHARE-1 → 8. DEL-2 → 9. RECOV-1 → 10. API-1 → 11. OPS-0 (parallel track, any time before 12) → 12. BF-1 → 13. DRIFT-1 → 14. OPS-1.
+1. MIG-0 → 2. FENCE-1 → 3. RES-1a → 4. RES-1b + RES-1c (parallel after 1a) → 5. QUOTA-1 → 6. UPLOAD-1 + REF-1 (parallel) → 7. DEL-1 → 8. SHARE-1 → 9. DEL-2 → 10. RECOV-1 → 11. API-1 → 12. OPS-0 (parallel track, any time before 13; COMPLETE 2026-10-18) → 13. BF-1 → 14. DRIFT-1 → 15. OPS-1.
 
 Rationale: fence and reservations are the load-bearing primitives every mutating path depends on; deletion before sharing (protection must exist before cross-world references multiply); DEL-2 strictly after SHARE-1 (world-deletion's shared-asset transfer and snapshot-protected moves implement SHARE-1's contracts); recovery before backfill (restore runbook needs it); backfill last among code (needs volume + all writers frozen-correct).
 

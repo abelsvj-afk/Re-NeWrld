@@ -308,9 +308,9 @@ ADR §2 establishes that `/data/media` is **not** on a persistent Fly volume tod
 ### 7.2 Owner decisions — RESOLVED 2026-10-18 (product-owner approval)
 
 1. **Per-world quota value:** **50 MB** (`MEDIA_WORLD_QUOTA_MB=50`). Keep the documented MVP default; configurable; review against actual usage before raising. (Per-world quota and the capacity constant are enforced independently.)
-2. **Volume sizing:** **`media_data`, 2 GB, in the app's existing Fly.io region (AMS).** Confirm region compatibility before provisioning.
+2. **Volume sizing:** ~~**`media_data`, 2 GB, in the app's existing Fly.io region (AMS).**~~ **SUPERSEDED by Addendum 001 (2026-10-18):** Fly allows only one volume per machine. Consolidated to the existing `narration_data` volume extended to **4 GB**, mounted at `/data`, with `/data/narrations` and `/data/media` as subdirectories. Confirm region compatibility before provisioning.
 3. **File size limit:** **10 MB/file** — retains the existing UI expectation.
-4. **`STORAGE_CAPACITY_BYTES`:** **1.5 GiB provisionally** on the 2 GiB volume (~25% reserved for filesystem overhead + operational headroom). Confirm byte units and actual usable capacity before setting.
+4. **`STORAGE_CAPACITY_BYTES`:** ~~**1.5 GiB provisionally** on the 2 GiB volume (~25% reserved for filesystem overhead + operational headroom).~~ **SUPERSEDED by Addendum 001 (2026-10-18):** Proposed **2.5 GiB** for media on the shared 4 GB volume (4.0 − 1.0 GiB narration reserve − ~0.5 GiB overhead/headroom). Requires product-owner confirmation. Confirm byte units and actual usable capacity before setting.
 5. **Original-machine retention window:** **7 days after verified cutover.** Define "verified cutover" and the destruction deadline in the runbook (§2.1 step 9f).
 
 ---
