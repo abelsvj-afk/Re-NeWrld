@@ -21,8 +21,8 @@
 MIG-0 (migrations 014/015 + DDL conformance tests)
  ├─ RES-1 (reservation protocol) ─┬─ QUOTA-1 (quota admission + handoff)
  │                                └─ UPLOAD-1 (upload path rework) ─┐
- ├─ DEL-1 (deletion T1/T2) ───────┬─ DEL-2 (world deletion T1–T5)    │
- ├─ REF-1 (reference validation) ─┼─ SHARE-1 (shared assets+snapshot refs + serving)
+ ├─ DEL-1 (deletion T1/T2) ───────┼─ SHARE-1 (shared assets+snapshot refs + serving)
+ ├─ REF-1 (reference validation) ─┘         └─ DEL-2 (world deletion T1–T5, after SHARE-1)
  ├─ FENCE-1 (maintenance fence) ──┴─ RECOV-1 (recovery authorization)
  ├─ OPS-0 (volume provisioning — operator procedure, parallel track)
  └─ BF-1 (backfill runner) ── DRIFT-1 (drift resolution)
@@ -39,8 +39,9 @@ Slices marked **[migration-first]** require 014/015 applied before their tests c
 **Scope:** Author `db/migrations/014_media_durable_ops.sql` and `015_media_registry.sql` exactly per `migration-plan-ADR-017.md` §1–3; add `tests/integration/migration-014-015.test.ts` (fresh-DB run, idempotency re-run, DDL conformance probes).
 **ADR sections:** §4.1 (DDL), §4.3d (system_maintenance, recovery_authorizations), §4.7 (backfill tables), §4.9 (world_deletion_jobs), §5.5 (storage_reservations).
 **Acceptance criteria:**
-- All 10 tables + 11 indexes + trigger + function + constraints exist after fresh `runMigrations()`; `system_maintenance` singleton row present.
-- Second `runMigrations()` run: zero errors, schema unchanged (idempotency).
+- All 10 tables + 10 indexes + trigger + function + constraints exist after fresh `runMigrations()`; `system_maintenance` singleton row present. *(Count reconciled: 10 explicit `CREATE INDEX` statements in the ADR — `world_media_assets` ×3 (§4.1 lines 147–149), `asset_snapshot_references` ×2 (lines 216–217), `one_unrevoked_recovery_auth` (line 855), `unattributed_media_files` ×1 (line 1124), `backfill_inventory_files` ×1 (line 1198), `backfill_runs` single-active-run partial unique (line 1386, prose-specified), `storage_reservations` ×1 (line 1905). The 2 `UNIQUE` constraints on `world_media_assets(filename, url)` create implicit backing indexes and are counted as constraints, not in the 10.)*
+- Second `runMigrations()` run: zero errors, schema unchanged — verifies the runner's `schema_migrations` skip behavior (runner idempotency).
+- DDL replay safety (separate test, isolated scratch DB): each migration file's SQL executed twice verbatim → schema correct and unchanged — verifies the `IF NOT EXISTS` / defensive guards actually work (a missing guard fails here even though the runner-skip test passes).
 - S57: deliberately broken migration variant rolls back fully in a scratch DB (test-only).
 - S46 step 17 (rev 26): six CHECK-conformance probes pass (NULL-subtype rejected; valid rows accepted; non-drift-with-fields rejected; bad subtype rejected; NULL arrays rejected).
 - Rev-20 roles tests: six trigger/CHECK probes pass (duplicates → `check_violation`; bad value → CHECK; `{}` accepted; update-duplicate rejected; reorder accepted; NULL rejected).
@@ -122,7 +123,7 @@ Slices marked **[migration-first]** require 014/015 applied before their tests c
 - S17: crash after unlink, before counter update → recovery enumerates.
 - S29: crash around T4 — unattributed references preserved (operator fields untouched).
 - S33: lock re-acquisition across the multi-transaction pass.
-**Dependencies:** MIG-0, DEL-1.
+**Dependencies:** MIG-0, DEL-1, SHARE-1. *(rev: DEL-2's T1 shared-asset transfer and snapshot-protected→unattributed moves implement SHARE-1's contracts — shared-asset lifecycle and snapshot-reference behavior must be implemented and verified first. Scheduling DEL-2 in parallel was a task-ordering error, not a design change.)*
 
 ## REF-1 — Reference validation contract [migration-first]
 
@@ -226,9 +227,9 @@ Slices marked **[migration-first]** require 014/015 applied before their tests c
 
 ## Implementation order (recommended)
 
-1. MIG-0 → 2. FENCE-1 → 3. RES-1 → 4. QUOTA-1 → 5. UPLOAD-1 + REF-1 (parallel) → 6. DEL-1 → 7. SHARE-1 + DEL-2 (parallel) → 8. RECOV-1 → 9. API-1 → 10. OPS-0 (parallel track, any time before 11) → 11. BF-1 → 12. DRIFT-1 → 13. OPS-1.
+1. MIG-0 → 2. FENCE-1 → 3. RES-1 → 4. QUOTA-1 → 5. UPLOAD-1 + REF-1 (parallel) → 6. DEL-1 → 7. SHARE-1 → 8. DEL-2 → 9. RECOV-1 → 10. API-1 → 11. OPS-0 (parallel track, any time before 12) → 12. BF-1 → 13. DRIFT-1 → 14. OPS-1.
 
-Rationale: fence and reservations are the load-bearing primitives every mutating path depends on; deletion before sharing (protection must exist before cross-world references multiply); recovery before backfill (restore runbook needs it); backfill last among code (needs volume + all writers frozen-correct).
+Rationale: fence and reservations are the load-bearing primitives every mutating path depends on; deletion before sharing (protection must exist before cross-world references multiply); DEL-2 strictly after SHARE-1 (world-deletion's shared-asset transfer and snapshot-protected moves implement SHARE-1's contracts); recovery before backfill (restore runbook needs it); backfill last among code (needs volume + all writers frozen-correct).
 
 ## Per-slice verification standard
 
