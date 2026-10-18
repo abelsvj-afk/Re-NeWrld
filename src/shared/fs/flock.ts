@@ -96,21 +96,29 @@ async function verifyLockHeld(pid: number, targetPath: string): Promise<boolean>
     return false;
   }
 
-  // Step 3: Confirm a FLOCK entry exists for this PID+inode in /proc/locks.
-  // We match by inode only here (the fd check already verified dev+ino).
+  // Step 3: Confirm a FLOCK entry exists for this PID on the exact (dev, ino).
+  // /proc/locks shows device as "major:minor" in hex. We encode it to dev_t
+  // using Linux new_encode_dev and compare against Node's stat.dev.
+  // This closes the ambiguity where PID holds a flock on a different file
+  // with the same inode number on another filesystem.
   try {
     const locksContent = await readFile('/proc/locks', 'utf-8');
     for (const line of locksContent.split('\n')) {
       const parts = line.trim().split(/\s+/);
       if (parts.length < 6) continue;
-      // Format: "1: FLOCK  ADVISORY  WRITE 1234 00:00:12345 0 EOF"
+      // Format: "1: FLOCK  ADVISORY  WRITE 1234 00:51:893 0 EOF"
       if (parts[1] !== 'FLOCK') continue;
       const lockPid = parseInt(parts[4], 10);
-      const m = parts[5].match(/:(\d+)$/);
-      if (!m) continue;
-      const lockIno = parseInt(m[1], 10);
-      if (lockPid === pid && lockIno === targetIno) {
-        return true; // Confirmed: PID holds a FLOCK on our file.
+      if (lockPid !== pid) continue;
+      const dm = parts[5].match(/^([0-9a-f]+):([0-9a-f]+):(\d+)$/i);
+      if (!dm) continue;
+      const lockMajor = parseInt(dm[1], 16);
+      const lockMinor = parseInt(dm[2], 16);
+      const lockIno = parseInt(dm[3], 10);
+      // Encode (major, minor) to dev_t via Linux new_encode_dev.
+      const lockDev = encodeDev(lockMajor, lockMinor);
+      if (lockDev === targetDev && lockIno === targetIno) {
+        return true; // Confirmed: PID holds a FLOCK on the exact (dev, ino).
       }
     }
   } catch (err) {
@@ -118,6 +126,16 @@ async function verifyLockHeld(pid: number, targetPath: string): Promise<boolean>
   }
 
   return false;
+}
+
+/**
+ * Encodes (major, minor) to a Linux dev_t using new_encode_dev.
+ * Formula: (minor & 0xff) | (major << 8) | ((minor & ~0xff) << 12)
+ * This matches what the kernel reports via stat().st_dev for the
+ * device numbers shown in /proc/locks.
+ */
+function encodeDev(major: number, minor: number): number {
+  return (minor & 0xff) | (major << 8) | ((minor & ~0xff) << 12);
 }
 
 /**
