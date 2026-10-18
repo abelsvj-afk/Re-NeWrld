@@ -65,7 +65,7 @@ The fence check (§2.1 step 2) runs before the remaining checks. The checks belo
 
 - `storage_reservations` repository (CRUD, state transitions, `active_reservations_bytes` queries).
 - The Phase-1 transaction exactly as specified in §2 above (all locks, fence check, quota input computation, capacity input computation, INSERT, COMMIT, error/rollback behavior).
-- Reservation-specific error codes: `QUOTA_EXCEEDED` (507), `STORAGE_FULL` (507), `STORAGE_METRIC_STALE` (503), `FENCE_ACTIVE` (503).
+- Reservation-specific error codes: `QUOTA_EXCEEDED` (507), `STORAGE_FULL` (507), `STORAGE_METRIC_STALE` (503), `FENCE_ACTIVE` (503), `NARRATION_CAPACITY_EXCEEDED` (503).
 
 RES-1a **computes** the quota and capacity inputs needed for its admission decision, but does not own the reusable quota-accounting functions.
 
@@ -106,8 +106,11 @@ These are separate slices with their own acceptance criteria. RES-1a must not si
 - Reservation larger than remaining quota or capacity → rejected, no row.
 
 ### 5.3 Fence
-- Fence active at admission → 503 `FENCE_ACTIVE`, no row. The fence check occurs immediately after L1 acquisition and before L2/L3 (per §2.1); the test must verify this ordering by asserting that a fence activated after L1 acquisition but before the transaction's quota check causes rejection.
-- Fence activation racing Phase-1: the test must establish the exact serial ordering — either (a) Phase-1 acquires L1, observes no fence, and commits before fence activation (then the fence invalidates the reservation per the §4.3d contract), or (b) Phase-1 acquires L1 after fence activation, observes the active fence, and rejects before acquiring L2/L3. There is no interleaving where Phase-1 holds L2/L3 while the fence activates, because the fence check precedes L2/L3 acquisition. Do not claim that RES-1a alone guarantees safe Phase-2 writes after the transaction ends; that is a later-slice obligation.
+- Fence active at admission → 503 `FENCE_ACTIVE`, no row. The fence check occurs immediately after L1 acquisition and before L2/L3 (per §2.1).
+- Fence race: because both Phase-1 and fence activation serialize through the L1 advisory lock, only two orderings are possible. The test must prove both serialized outcomes using explicit coordination (barriers/latches), not an impossible mid-lock interleaving:
+  - **Fence wins the race:** Fence activation acquires L1 first and commits. Phase-1 subsequently acquires L1, observes the active fence, and rejects with 503 `FENCE_ACTIVE` before acquiring L2/L3. Assert: no reservation row, no L2/L3 locks were ever held (verify via lock-observation or timing).
+  - **Phase-1 wins the race:** Phase-1 acquires L1 first, observes no active fence, proceeds through admission, and commits the reservation. Fence activation subsequently acquires L1 and follows the ADR §4.3d reservation-invalidation contract. Assert: reservation row exists with `state='RESERVED'`; fence activation then marks it per the invalidation rules.
+- Do not claim that RES-1a alone guarantees safe Phase-2 writes after the transaction ends; that is a later-slice obligation (RES-1b).
 
 ### 5.4 Failure modes
 - Stale metric → 503, no row.
