@@ -9,6 +9,7 @@ import {
   checkStorageHealth,
   probeWritable,
   readMountTable,
+  toTopLevelStatus,
 } from './shared/storage/storage-health.js';
 import { AuthRepositoryPort } from './modules/auth/domain/ports/auth.repository.port.js';
 import { WorldRepositoryPort } from './modules/world/domain/ports/world.repository.port.js';
@@ -234,7 +235,9 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       mediaStorageWritable,
     );
     return {
-      status: mediaStorage.state === 'degraded' ? 'degraded' : 'ok',
+      // Explicit mapping: 'unknown' is reported as 'unknown', never masked
+      // as 'ok'. HTTP stays 200; the body carries the uncertainty.
+      status: toTopLevelStatus(mediaStorage.state),
       timestamp: new Date().toISOString(),
       media_storage: mediaStorage,
     };

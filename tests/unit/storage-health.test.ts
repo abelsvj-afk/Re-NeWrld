@@ -9,6 +9,7 @@ import {
   checkStorageHealth,
   probeWritable,
   readMountTable,
+  toTopLevelStatus,
 } from '../../src/shared/storage/storage-health.js';
 
 describe('decodeEscapes', () => {
@@ -181,6 +182,37 @@ describe('probeWritable', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('never truncates a pre-existing file, even at the legacy probe name', () => {
+    // Regression: the old implementation used 'w' on `.write-probe-<pid>`,
+    // which would truncate a colliding file. The probe must use exclusive
+    // creation and never touch files it did not create.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-'));
+    const sentinel = path.join(dir, `.write-probe-${process.pid}`);
+    fs.writeFileSync(sentinel, 'do-not-touch');
+    try {
+      for (let i = 0; i < 5; i++) {
+        expect(probeWritable(dir)).toBe(true);
+      }
+      expect(fs.readFileSync(sentinel, 'utf8')).toBe('do-not-touch');
+      expect(fs.readdirSync(dir)).toEqual([path.basename(sentinel)]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('toTopLevelStatus', () => {
+  it('passes states through explicitly', () => {
+    expect(toTopLevelStatus('ok')).toBe('ok');
+    expect(toTopLevelStatus('degraded')).toBe('degraded');
+  });
+
+  it('reports unknown as unknown, never masked as ok', () => {
+    // Regression: the old ternary mapped everything non-degraded to 'ok',
+    // misleading consumers when the mount table was unreadable.
+    expect(toTopLevelStatus('unknown')).toBe('unknown');
   });
 });
 

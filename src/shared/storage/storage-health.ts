@@ -117,6 +117,15 @@ export function checkStorageHealth(
   return { state: 'ok', mountpoint, device: entry.device, writable };
 }
 
+/**
+ * Map a storage state to the top-level /health status.
+ * Explicit: 'unknown' is reported as 'unknown', never masked as 'ok'.
+ * HTTP stays 200; the body communicates the uncertainty.
+ */
+export function toTopLevelStatus(state: StorageState): 'ok' | 'degraded' | 'unknown' {
+  return state;
+}
+
 /** Read the mount table; returns null when unreadable. */
 export function readMountTable(): string | null {
   try {
@@ -130,26 +139,43 @@ export function readMountTable(): string | null {
  * Startup write probe: create -> fsync -> read -> delete a temp file.
  * Returns false (never throws) when the directory is not writable.
  * Call once at boot and cache the result; never call per-request.
+ *
+ * Safety: the probe file is created exclusively ('wx') with a
+ * collision-resistant name, so it can never truncate a pre-existing file
+ * (including one from another initialization in the same process). Cleanup
+ * only removes the file this invocation successfully created.
  */
 export function probeWritable(dir: string): boolean {
-  const probe = path.join(dir, `.write-probe-${process.pid}`);
-  try {
-    const fd = fs.openSync(probe, 'w');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const probe = path.join(
+      dir,
+      `.write-probe-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    );
+    let created = false;
     try {
-      fs.writeSync(fd, 'ok');
-      fs.fsyncSync(fd);
+      const fd = fs.openSync(probe, 'wx');
+      created = true;
+      try {
+        fs.writeSync(fd, 'ok');
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.readFileSync(probe);
+      return true;
+    } catch (err) {
+      // Name collision on exclusive create: retry with a fresh name.
+      if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') continue;
+      return false;
     } finally {
-      fs.closeSync(fd);
+      if (created) {
+        try {
+          fs.unlinkSync(probe);
+        } catch {
+          // Best effort cleanup; the probe result is what matters.
+        }
+      }
     }
-    fs.readFileSync(probe);
-    fs.unlinkSync(probe);
-    return true;
-  } catch {
-    try {
-      fs.unlinkSync(probe);
-    } catch {
-      // Best effort cleanup; the probe result is what matters.
-    }
-    return false;
   }
+  return false;
 }
