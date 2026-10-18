@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 12 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 13 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -280,9 +280,42 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
 5. If different inodes → **do NOT unlink**. Log at error, alert `TEMP_INODE_MISMATCH` with both inodes, reservation_id, and asset_id. This indicates a bug (two different files) or manual interference. Operator must investigate.
 
 **Cleanup:**
-1. `unlink(temp_path)`. If ENOENT → already gone → skip (idempotent).
+1. `unlink(temp_path)`. If ENOENT → already gone → skip to step 4 (check for pending fsync below).
 2. `fsync(temp_dir_fd)`.
+   - If succeeds → clear any pending flag (step 4).
+   - If fails → record persistent retry state (see below). Do NOT release the ownership lock yet.
 3. Release ownership lock.
+
+**Persistent fsync-retry state (rev 13):**
+The problem: if `unlink()` succeeds but `fsync(temp_dir_fd)` fails, and the temp entry does not reappear, the next cycle's file-listing discovery finds nothing. The retry state must persist in the database, not depend on the temp file's presence.
+
+**Schema:**
+```sql
+ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_fsync_pending BOOLEAN DEFAULT FALSE;
+ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_attempts INT DEFAULT 0;
+ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMPTZ;
+```
+
+**On fsync failure:**
+1. `UPDATE world_media_assets SET temp_cleanup_fsync_pending = TRUE, temp_cleanup_attempts = temp_cleanup_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ? AND publication_status = 'ACTIVE'`.
+2. Log at warning with reservation_id, attempt count, errno.
+3. If `temp_cleanup_attempts >= 5` → alert `TEMP_CLEANUP_FAILED` (once per 5-failure window).
+
+**On cleanup cycle (startup and periodic):**
+1. Perform the file-listing discovery (§1.6e above) for temp entries.
+2. Additionally query: `SELECT reservation_id, temp_cleanup_attempts FROM world_media_assets WHERE temp_cleanup_fsync_pending = TRUE AND publication_status = 'ACTIVE'`.
+3. For each pending reservation:
+   - Open the temp directory (not a specific file — the file may be absent).
+   - `fsync(temp_dir_fd)`.
+   - If succeeds → `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_attempts = 0 WHERE reservation_id = ?`. Log at info (recovered).
+   - If fails → `UPDATE ... SET temp_cleanup_attempts = temp_cleanup_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ?`. If attempts >= 5 → alert `TEMP_CLEANUP_FAILED`.
+4. The fsync on the directory is valid even when no specific temp file exists — it ensures all prior directory operations (including the unlink) are durable.
+
+**Why this works:**
+- The retry state is in the database, surviving process restarts and crashes.
+- The retry does not require the temp file to exist — it fsyncs the directory, which is the actual durability mechanism.
+- The attempt counter provides bounded alerting without infinite loops.
+- If the temp entry reappears, the file-listing discovery handles it (unlink again). If not, the DB-driven retry ensures the fsync is eventually confirmed or alerted.
 
 **Failure handling (bounded retries):**
 - If `unlink()` fails (other than ENOENT) → log at warning, retry next cycle. After 5 consecutive failures → alert `TEMP_CLEANUP_FAILED` with reservation_id and errno. Continue retrying (the alert ensures operator awareness; the retry ensures eventual cleanup if the issue resolves).
@@ -586,6 +619,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Full sweep (rev 10) — §6.13 retry test and §6.8 after-link test include fsync(temp_dir_fd) with failure behavior; zero remaining unlink→ACTIVE shortcuts.
 - [x] Fsync failure policy consistent (rev 11) — final_dir failure → PENDING; temp_dir failure (final durable) → ACTIVE + retry cleanup. No blanket statements.
 - [x] Stale temp cleanup for ACTIVE assets (rev 12, §1.6e) — bounded retry discovers temp entries via reservation_id, verifies inode identity, safely unlinks with fsync; PENDING/ACTIVE paths never overlap.
+- [x] Persistent fsync-retry state (rev 13) — DB columns track pending temp_dir fsyncs; retry occurs via directory fsync even when temp absent; survives restarts.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -650,3 +684,15 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **PENDING exclusion:** Setup: PENDING asset with temp file. Run §1.6e cleanup.
 - **Assert:** Skipped (not ACTIVE). The PENDING recovery path (§1.6a) handles it, not §1.6e. No interference between the two mechanisms.
 - **Periodic execution:** Assert the cleanup runs on startup (after PENDING recovery) and every 15 minutes via the maintenance job. A stale temp entry created between runs is cleaned within 15 minutes.
+
+### 6.19 Persistent fsync-retry state (new, rev 13)
+- **Setup:** ACTIVE asset with stale temp entry. Cleanup runs: `unlink()` succeeds, `fsync(temp_dir)` fails (simulate EIO). Temp entry does NOT reappear (remains absent).
+- **Assert:** DB shows `temp_cleanup_fsync_pending = TRUE`, `temp_cleanup_attempts = 1`, `last_attempt_at` set. Asset remains ACTIVE.
+- **Next cycle (temp still absent):** Run cleanup again. The file-listing discovery finds nothing (temp absent).
+- **Assert:** DB query finds `temp_cleanup_fsync_pending = TRUE`. Cleanup retries `fsync(temp_dir_fd)` (on the directory, not the file). If succeeds → flag cleared, attempts reset to 0. The retry occurred despite temp absence.
+- **Persistent failures:** Simulate 5 consecutive fsync failures with temp absent throughout.
+- **Assert:** Attempts increment to 5. Alert `TEMP_CLEANUP_FAILED` fires. The retry state survived across cycles without the temp file.
+- **Restart survival:** After 2 failed attempts, simulate process restart (clear in-memory state). Run cleanup.
+- **Assert:** DB still shows `pending = TRUE`, `attempts = 2`. Retry continues from attempt 3, not from 0. State survived the restart.
+- **Recovery:** After alert, simulate fsync succeeding on attempt 6.
+- **Assert:** Flag cleared, attempts reset. Alert clears. No manual intervention needed for transient failures.
