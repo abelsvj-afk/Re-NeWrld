@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 29 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 30 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -527,21 +527,8 @@ CREATE INDEX ON temp_cleanup_delivery_outbox (status, next_attempt_at)
 2. **Send:** Transmit to the alert system with `delivery_event_id` as the deduplication key.
 3. **Confirm (fenced):** On success: `UPDATE ... SET status='sent', sent_at=now(), claimed_by=NULL, claim_token=NULL WHERE delivery_event_id=? AND claim_token=<token>`.
    - If 0 rows updated → the claim was superseded (another worker reclaimed). Do NOT treat as delivered; the new claimant owns the event.
-4. **Retry (fenced):** On failure: 
-   ```sql
-   UPDATE ... SET attempts=attempts+1, last_attempt_at=now(), last_error=?,
-       claimed_by=NULL, claimed_at=NULL, claim_token=NULL,
-       next_attempt_at = now() + (CASE 
-           WHEN attempts=0 THEN interval '1 minute'
-           WHEN attempts=1 THEN interval '5 minutes'
-           WHEN attempts=2 THEN interval '15 minutes'
-           WHEN attempts=3 THEN interval '30 minutes'
-           ELSE interval '1 hour' END)
-   WHERE delivery_event_id=? AND claim_token=<token>;
-   ```
-   - If 0 rows → claim superseded; abort (the new claimant will handle retry scheduling).
-   - `next_attempt_at` enforces the backoff. Initial events have `next_attempt_at=now()` (immediately eligible).
-5. **Exhausted (10th failure — conditional fenced transaction):** The transition to `failed` is conditional on the prior attempt count being exactly 9. This makes the increment-and-threshold decision atomic — no caller can skip to failed early.
+4. **On send failure — single authoritative path (rev 30):** There is exactly ONE failure-handling transaction, defined in step 5 below. The generic retry SQL from earlier revisions is superseded and must not be used. On any send failure, execute the conditional transaction in step 5, which atomically chooses between retry (prior attempts 0-8) and exhaustion (prior attempts 9).
+5. **Failure handling — conditional fenced transaction (rev 30, authoritative):** The transition to `failed` is conditional on the prior attempt count being exactly 9. This makes the increment-and-threshold decision atomic — no caller can skip to failed early, and no generic retry can increment past 9 without transitioning.
    ```sql
    BEGIN;
    -- Case A: attempts 0-8 → increment, stay pending with backoff
@@ -924,6 +911,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] 10th-failure transaction (rev 27) — single fenced UPDATE transitions to 'failed'; attempts 1-9 remain pending with backoff; manual retry path defined.
 - [x] SQL validity and atomic threshold (rev 28) — trailing comma fixed; 10th-failure conditional on attempts=9 with fencing; reconciliation uses outbox.
 - [x] Reconciliation event states (rev 29) — explicit handling for pending/sent/failed/missing events; never assumes unique constraint implies pending.
+- [x] Single failure path (rev 30) — generic retry SQL removed; step-5 conditional transaction is the sole handler; attempts=9 cannot leave event pending at 10.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -1123,3 +1111,10 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** Reconciliation finds no event → INSERTs new event (`fire_count=5`, `status='pending'`, `next_attempt_at=now()`). Delivery worker picks it up normally.
 - **Pending event:** Setup: incident open, outbox has `pending` event. Simulate restart.
 - **Assert:** Reconciliation finds pending event → takes no action. Worker claim/retry protocol handles it (including stale claim reclaim).
+
+### 6.32 Single failure-path regression (new, rev 30)
+- **Failure at attempts=9:** Setup: outbox event with `attempts=9`, `status='pending'`, claimed by worker. Send fails. Execute the step-5 conditional transaction.
+- **Assert:** Case B matches (`attempts=9`): event transitions to `status='failed'`, `attempts=10`. Case A does NOT match (0 rows). The event is NOT left pending at 10 attempts. Exactly one path executed.
+- **Failure at attempts=8:** Setup: event with `attempts=8`. Send fails.
+- **Assert:** Case A matches (`attempts < 9`): `attempts` increments to 9, `next_attempt_at` set per backoff, remains `pending`. Case B does NOT match. The event is eligible for one more retry.
+- **No generic retry path:** Verify the document contains no other UPDATE that increments `attempts` without the `attempts < 9` / `attempts = 9` conditions. The step-5 transaction is the sole failure handler.
