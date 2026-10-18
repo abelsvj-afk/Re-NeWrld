@@ -252,67 +252,88 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
   });
 
   /**
-   * Poll pg_locks until a backend is waiting on an advisory lock
-   * (or timeout). Deterministic: waits for real database state, not a timer.
+   * Poll pg_locks until the specified backend is waiting on the L1 advisory
+   * lock (media_global). Filters by PID and lock key — not just any waiter.
+   * Deterministic: waits for real database state, not a timer.
    */
-  async function waitForAdvisoryWaiter(timeoutMs = 10000): Promise<void> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const r = await query(
-        `SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`
-      );
-      if (Number(r.rows[0].n) > 0) return;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    throw new Error('Timed out waiting for an advisory-lock waiter in pg_locks');
-  }
-
-  /**
-   * Poll pg_locks until a backend is waiting on a row lock.
-   * Note: FOR UPDATE blockers appear as locktype='transactionid' (waiting
-   * for the locker's transaction), not as tuple locks on the table.
-   */
-  async function waitForRowLockWaiter(timeoutMs = 10000): Promise<void> {
+  async function waitForL1Waiter(pid: number, timeoutMs = 10000): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const r = await query(
         `SELECT count(*) AS n FROM pg_locks
-         WHERE locktype = 'transactionid' AND NOT granted`
+         WHERE locktype = 'advisory'
+           AND pid = $1
+           AND NOT granted
+           AND classid = 4294967295
+           AND objid = ((hashtext('media_global')::bigint + 4294967296) % 4294967296)::oid
+           AND objsubid = 1`,
+        [pid]
       );
       if (Number(r.rows[0].n) > 0) return;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    throw new Error('Timed out waiting for a row-lock waiter in pg_locks');
+    throw new Error(`Timed out waiting for PID ${pid} to wait on the L1 advisory lock`);
+  }
+
+  /**
+   * Poll pg_locks until the specified backend is waiting on a transaction ID
+   * (i.e., blocked on another transaction's row lock). Filters by PID.
+   */
+  async function waitForTxWaiter(pid: number, timeoutMs = 10000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const r = await query(
+        `SELECT count(*) AS n FROM pg_locks
+         WHERE locktype = 'transactionid' AND NOT granted AND pid = $1`,
+        [pid]
+      );
+      if (Number(r.rows[0].n) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`Timed out waiting for PID ${pid} to wait on a transaction ID`);
   }
 
   it('fence-wins race: fence holds L1, real reserveStorage() blocks then rejects', async () => {
-    // Real `reserveStorage()` on one connection; real fence activation on another.
-    // Both serialize through L1. We prove via pg_locks that Phase-1 is waiting
-    // on L1 before the fence commits — no timing-based coordination.
+    // Fully deterministic: the fence signals when it holds L1; Phase-1 then
+    // starts and its PID is captured via the hook; we prove THAT backend waits
+    // on the specific L1 lock key before the fence commits. No timing.
     const worldId = await createWorld();
 
+    let phase1Pid = 0;
     let fenceHoldsL1!: () => void;
     const fenceHasL1 = new Promise<void>((resolve) => {
       fenceHoldsL1 = resolve;
+    });
+    let pidCaptured!: () => void;
+    const pidIsCaptured = new Promise<void>((resolve) => {
+      pidCaptured = resolve;
     });
 
     const fenceTx = withTransaction(async (tx: pkg.PoolClient) => {
       await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_global'))`);
       fenceHoldsL1();
-      // Wait until Phase-1 is provably blocked on L1.
-      await waitForAdvisoryWaiter();
+      // Wait for Phase-1 to capture its PID, then prove it's blocked on L1.
+      await pidIsCaptured;
+      await waitForL1Waiter(phase1Pid);
       await tx.query(`UPDATE system_maintenance SET active = true WHERE id = 1`);
-      // COMMIT releases L1; Phase-1 then acquires it, sees the fence, rejects.
+      // COMMIT releases L1; Phase-1 acquires it, sees the fence, rejects.
     });
 
     const phase1Tx = (async () => {
-      await fenceHasL1;
+      await fenceHasL1; // Deterministic: fence holds L1 before we attempt it.
       const deps = makeDeps();
       let l2l3Acquired = false;
       const origLock = deps.lockWorldRow;
       deps.lockWorldRow = async (wid, tx) => {
         l2l3Acquired = true;
         return origLock(wid, tx);
+      };
+      deps.testHooks = {
+        onBeforeL1Attempt: async (pid: number) => {
+          phase1Pid = pid;
+          pidCaptured();
+          // Return immediately; the L1 acquisition attempt blocks next.
+        },
       };
       try {
         await reserveStorage(worldId, 1000, deps);
@@ -335,8 +356,8 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
 
   it('Phase-1-wins race: real reserveStorage() commits before fence activation', async () => {
     // Real `reserveStorage()` signals via the test hook while holding L1.
-    // Fence activation starts on a second connection and blocks on L1
-    // (proven via pg_locks). Phase-1 completes; the row commits first.
+    // Fence activation starts on a second connection; we capture its PID and
+    // prove THAT backend waits on the specific L1 key before releasing Phase-1.
     const worldId = await createWorld();
 
     let releasePhase1!: () => void;
@@ -350,7 +371,7 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
 
     const deps = makeDeps();
     deps.testHooks = {
-      onL1Acquired: async () => {
+      onL1Acquired: async (_pid: number) => {
         hookSignaled();
         await phase1MayProceed;
       },
@@ -358,13 +379,22 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
 
     const phase1Tx = reserveStorage(worldId, 1000, deps);
 
-    // Wait for Phase-1 to hold L1, then start fence activation (blocks on L1).
+    // Wait for Phase-1 to hold L1, then start fence activation.
     await hookFired;
+    let fencePid = 0;
     const fenceTx = withTransaction(async (tx: pkg.PoolClient) => {
+      const r = await tx.query(`SELECT pg_backend_pid() AS pid`);
+      fencePid = Number(r.rows[0].pid);
       await activateFence(tx, 'race-test');
     });
-    // Prove the fence is waiting on L1 (deterministic, via pg_locks).
-    await waitForAdvisoryWaiter();
+    // Wait for the fence backend to start, then prove it's waiting on L1.
+    // Poll until fencePid is set, then wait for the specific waiter.
+    const start = Date.now();
+    while (fencePid === 0 && Date.now() - start < 5000) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(fencePid).not.toBe(0);
+    await waitForL1Waiter(fencePid);
     // Release Phase-1 to complete its reservation and commit.
     releasePhase1();
 
@@ -386,26 +416,33 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
     ).rejects.toThrow(/world not found/);
 
     // Real world: verify FOR UPDATE blocks a concurrent locker.
-    // Deterministic via pg_locks: we observe the waiter, then release.
+    // We capture tx2's PID and prove THAT backend waits on a transaction ID.
     const worldId = await createWorld();
 
-    // Start tx1: acquire the row lock and hold it (raw client for manual commit).
     const client1 = await pool.connect();
     await client1.query('BEGIN');
     await lockWorldRowForUpdate(worldId, client1);
 
-    // Start tx2 in background: it will block on the row lock.
+    let tx2Pid = 0;
     let tx2Done = false;
     const tx2Promise = (async () => {
-      await withTransaction((tx) => lockWorldRowForUpdate(worldId, tx));
+      await withTransaction(async (tx: pkg.PoolClient) => {
+        const r = await tx.query(`SELECT pg_backend_pid() AS pid`);
+        tx2Pid = Number(r.rows[0].pid);
+        await lockWorldRowForUpdate(worldId, tx);
+      });
       tx2Done = true;
     })();
 
-    // Wait until tx2 is provably blocked on the worlds row lock.
-    await waitForRowLockWaiter();
+    // Wait for tx2's PID to be captured, then prove it's waiting.
+    const start = Date.now();
+    while (tx2Pid === 0 && Date.now() - start < 5000) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(tx2Pid).not.toBe(0);
+    await waitForTxWaiter(tx2Pid);
     expect(tx2Done).toBe(false);
 
-    // Release tx1; tx2 should then acquire and complete.
     await client1.query('COMMIT');
     client1.release();
     await tx2Promise;

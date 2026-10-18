@@ -64,8 +64,10 @@ export interface ReserveStorageDeps {
    * integration tests to coordinate with the transaction while it holds L1.
    */
   testHooks?: {
-    /** Called (and awaited) immediately after L1 acquisition. */
-    onL1Acquired?: () => void | Promise<void>;
+    /** Called (and awaited) immediately before attempting L1 acquisition. Receives the backend PID. */
+    onBeforeL1Attempt?: (pid: number) => void | Promise<void>;
+    /** Called (and awaited) immediately after L1 acquisition. Receives the backend PID. */
+    onL1Acquired?: (pid: number) => void | Promise<void>;
   };
 }
 
@@ -93,11 +95,19 @@ export async function reserveStorage(
   return withTransaction(async (tx) => {
     // L1: global media advisory lock.
     await tx.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);
+    const pidResult = await tx.query(`SELECT pg_backend_pid() AS pid`);
+    const backendPid = Number(pidResult.rows[0].pid);
+
+    // Test hook: signal before attempting L1 (fence-wins coordination).
+    if (deps.testHooks?.onBeforeL1Attempt) {
+      await deps.testHooks.onBeforeL1Attempt(backendPid);
+    }
+
     await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_global'))`);
 
-    // Test hook: signal while holding L1 (fence-race coordination).
+    // Test hook: signal while holding L1 (Phase-1-wins coordination).
     if (deps.testHooks?.onL1Acquired) {
-      await deps.testHooks.onL1Acquired();
+      await deps.testHooks.onL1Acquired(backendPid);
     }
 
     // Fence check immediately after L1, before L2/L3 (per §4.3c).
