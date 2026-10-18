@@ -305,13 +305,13 @@ ADR §2 establishes that `/data/media` is **not** on a persistent Fly volume tod
 - **Backfill (Phase C) MUST NOT run before the §2.1 volume procedure completes.** Classifying ephemeral files would build a registry over bytes that the next deploy deletes — worse than no registry, because enforcement would then 404 files it believes are permanent.
 - If the owner defers the volume: DDL ships, backfill waits, enforcement stays disabled (`"media_lifecycle": "backfill_incomplete"`), uploads keep working as today (ephemeral). This is a supported degraded state, not a failure — but it must be an explicit decision, recorded.
 
-### 7.2 Open decisions (owner must confirm before migration planning is finalized)
+### 7.2 Owner decisions — RESOLVED 2026-10-18 (product-owner approval)
 
-1. **Per-world quota value:** `MEDIA_WORLD_QUOTA_MB` default 50 (§5.2) was **never owner-confirmed** (open since 2026-10-16). The DDL does not hardcode it (config value), but quota enforcement behavior (507 `QUOTA_EXCEEDED`) depends on it. **Decision needed:** confirm 50 MB or set another value before enforcement goes live. (Not blocking for the DDL migration itself.)
-2. **Volume sizing:** §2.1 proposes `media_data` 1–2 GB. Confirm size and region with the app's region.
-3. **File size limit:** 10 MB/file (§5.2) — matches the existing UI hint; confirm it stays.
-4. **`STORAGE_CAPACITY_BYTES`:** operator-set usable capacity, must be ≤ volume size (§5.5). Confirm value at volume provisioning time.
-5. **Original-machine retention window** (§2.1 step 9f): destroy immediately after verified cutover vs retain N days. Record the decision and deadline in the runbook.
+1. **Per-world quota value:** **50 MB** (`MEDIA_WORLD_QUOTA_MB=50`). Keep the documented MVP default; configurable; review against actual usage before raising. (Per-world quota and the capacity constant are enforced independently.)
+2. **Volume sizing:** **`media_data`, 2 GB, in the app's existing Fly.io region (AMS).** Confirm region compatibility before provisioning.
+3. **File size limit:** **10 MB/file** — retains the existing UI expectation.
+4. **`STORAGE_CAPACITY_BYTES`:** **1.5 GiB provisionally** on the 2 GiB volume (~25% reserved for filesystem overhead + operational headroom). Confirm byte units and actual usable capacity before setting.
+5. **Original-machine retention window:** **7 days after verified cutover.** Define "verified cutover" and the destruction deadline in the runbook (§2.1 step 9f).
 
 ---
 
@@ -332,7 +332,7 @@ ADR §2 establishes that `/data/media` is **not** on a persistent Fly volume tod
 - [ ] Integration tests per §4.2 pass against real PostgreSQL (or are explicitly marked UNVERIFIED with the reason).
 - [ ] S57 atomicity demonstrated (broken-variant rollback test).
 - [ ] S46-step-17 and roles-trigger conformance probes pass.
-- [ ] Owner decisions in §7.2 recorded.
+- [x] Owner decisions in §7.2 recorded (2026-10-18: 50 MB quota, 2 GB AMS volume, 10 MB/file, 1.5 GiB capacity, 7-day retention).
 - [ ] `CHANGELOG.md` entry under `[Unreleased]` via `scripts/changelog-entry.sh` (per `AGENTS.md` §2).
 - [ ] `PROJECT_STATE.md` updated (per `AGENTS.md` §2 and `AI_AGENT_RULES.md` §10).
 - [ ] Full review before merge (Level 3 change).
