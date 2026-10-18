@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 10 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 11 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -158,7 +158,7 @@ The `link()` + `unlink()` sequence has exactly one valid order. No exceptions, n
 |-------------|---------------|-------------------|
 | After `link()` returns, before `fsync(final_dir)` | Link may or may not be durable | Recovery: check if final exists. If yes → verify identity (inode/digest) → `fsync(final_dir_fd)` MUST succeed → unlink temp → `fsync(temp_dir_fd)` → mark ACTIVE. If fsync fails → stay PENDING, alert. If no final → retry link. |
 | After `fsync(final_dir)`, before `unlink(temp)` | Link is durable; temp still exists | Recovery: temp and final are same inode → re-issue `fsync(final_dir)` (confirm) → unlink temp → `fsync(temp_dir)` → mark ACTIVE. |
-| After `unlink(temp)` returns, before `fsync(temp_dir)` | Unlink may or may not be durable | Recovery: verify final identity → `fsync(final_dir_fd)` MUST succeed (confirm durability) → if temp reappears, unlink again → `fsync(temp_dir_fd)` → mark ACTIVE. If either fsync fails → stay PENDING, alert. |
+| After `unlink(temp)` returns, before `fsync(temp_dir)` | Unlink may or may not be durable | Recovery: verify final identity → `fsync(final_dir_fd)` MUST succeed (confirm durability) → if temp reappears, unlink again → `fsync(temp_dir_fd)` → mark ACTIVE. If `fsync(final_dir)` fails → stay PENDING, alert. If `fsync(temp_dir)` fails (final durable) → mark ACTIVE, log warning, retry cleanup per §1.6d. |
 | After `fsync(temp_dir)` | Both operations durable | Normal state: file at final only. Mark ACTIVE. |
 
 **EXDEV handling:** If `link()` fails with `EXDEV` (different filesystems — should be prevented by startup check, but defense in depth):
@@ -546,13 +546,14 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Recovery durability consistency (rev 8) — every recovery path routes through §1.6d; fsync(final_dir) required before unlink or ACTIVE even when temp is gone; syncing never substitutes for identity.
 - [x] Crash tables and tests consistent (rev 9) — §1.6c, §6.8, §6.14, §6.16 all require: identity → fsync(final_dir) → unlink → fsync(temp_dir) → ACTIVE. No shortcuts.
 - [x] Full sweep (rev 10) — §6.13 retry test and §6.8 after-link test include fsync(temp_dir_fd) with failure behavior; zero remaining unlink→ACTIVE shortcuts.
+- [x] Fsync failure policy consistent (rev 11) — final_dir failure → PENDING; temp_dir failure (final durable) → ACTIVE + retry cleanup. No blanket statements.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
 - **Pre-existing destination (different bytes):** Setup: final_path already contains a file with different bytes (simulating a collision or stale file). Writer attempts Phase B `link(temp, final)`.
 - **Assert:** `link()` fails with `EEXIST`. The writer does NOT overwrite. The verification step (8a) detects the inode mismatch and the absence of a matching asset row → marks `PUBLICATION_FAILED`, alerts `PUBLICATION_COLLISION`. The existing file is byte-identical before and after (verify via checksum).
 - **Retry with correct file:** Setup: writer crashes after `link()` succeeds but before `unlink(temp)`. On recovery, temp and final are the same inode. Recovery worker re-runs Phase B.
-- **Assert:** `link()` fails with `EEXIST`, but verification (8a) sees `(dev_f, ino_f) == (dev_t, ino_t)` → treats as idempotent success → `fsync(final_dir_fd)` MUST succeed → unlinks temp → `fsync(temp_dir_fd)` MUST succeed → marks ACTIVE. No duplicate, no error. If either fsync fails → stay PENDING, alert per §1.6d.
+- **Assert:** `link()` fails with `EEXIST`, but verification (8a) sees `(dev_f, ino_f) == (dev_t, ino_t)` → treats as idempotent success → `fsync(final_dir_fd)` MUST succeed → unlinks temp → `fsync(temp_dir_fd)` → marks ACTIVE. No duplicate, no error. If `fsync(final_dir)` fails → stay PENDING, alert. If `fsync(temp_dir)` fails (final durable) → mark ACTIVE, log warning, retry cleanup per §1.6d.
 - **Retry after full completion:** Setup: Phase B and C both completed (file at final, asset ACTIVE), but the writer crashes before releasing locks. Recovery worker scans and finds the asset is ACTIVE (not PENDING).
 - **Assert:** Recovery skips (not PENDING). No re-link, no re-activation. Idempotent.
 - **Collision with active asset:** Setup: an ACTIVE asset exists at final_path for reservation R1. A buggy writer for R2 attempts to publish to the same final_path.
@@ -580,7 +581,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Crash after link, before fsync:** Kill after `link()` returns but before `fsync(final_dir)`. 
 - **Assert:** Recovery checks final_path. If link appears present → verify identity → `fsync(final_dir_fd)` MUST succeed → unlink temp → `fsync(temp_dir_fd)` → mark ACTIVE. If fsync fails → stay PENDING. If not durable (final doesn't exist) → retry link. No data loss, no overwrite.
 - **Crash after unlink, before fsync:** Kill after `unlink(temp)` returns but before `fsync(temp_dir)`.
-- **Assert:** If temp reappears (unlink not durable), recovery verifies identity (same inode or digest) → `fsync(final_dir_fd)` MUST succeed (confirm final durability) → unlinks temp again → `fsync(temp_dir_fd)` MUST succeed → marks ACTIVE. If either fsync fails → stay PENDING, alert. Idempotent.
+- **Assert:** If temp reappears (unlink not durable), recovery verifies identity (same inode or digest) → `fsync(final_dir_fd)` MUST succeed (confirm final durability) → unlinks temp again → `fsync(temp_dir_fd)` → marks ACTIVE. If `fsync(final_dir)` fails → stay PENDING, alert. If `fsync(temp_dir)` fails (final durable) → mark ACTIVE, log warning, retry cleanup per §1.6d. Idempotent.
 - **EXDEV at runtime:** Simulate `link()` returning EXDEV (despite startup check passing — e.g., remount).
 - **Assert:** Log at critical, mark `PUBLICATION_FAILED`, alert `FILESYSTEM_SPLIT`. Do NOT fall back to copy. The file remains at temp; reservation is COMMITTED; operator must intervene.
 - **Directory sync ordering:** Instrument to verify `fsync(final_dir)` is called after `link()` and before `unlink(temp)`, and `fsync(temp_dir)` is called after `unlink(temp)`. Assert the ordering is preserved on all paths.
