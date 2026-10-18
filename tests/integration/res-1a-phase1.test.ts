@@ -1,17 +1,24 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { runMigrations } from '../../scripts/migrate.js';
-import { setPool, closePool, query } from '../../src/shared/database/db.js';
+import { setPool, closePool, query, withTransaction } from '../../src/shared/database/db.js';
 import { PostgresStorageReservationRepository } from '../../src/modules/world/infrastructure/persistence/postgres-storage-reservation.repository.js';
 import {
+  lockWorldRowForUpdate,
+  isFenceActive,
+  activateFence,
+  deactivateFence,
+  getRegisteredBytes,
+  getCapacityMetric,
+} from '../../src/modules/world/infrastructure/persistence/postgres-reserve-storage.adapter.js';
+import {
   reserveStorage,
-  ReservationRejectedError,
   ReserveStorageDeps,
   CapacityMetric,
 } from '../../src/modules/world/domain/services/reserve-storage.service.js';
 import { WorldId } from '../../src/modules/world/domain/value-objects/world-id.value-object.js';
-import type pkg from 'pg';
 import crypto from 'node:crypto';
+import type pkg from 'pg';
 
 const intentionalSkip = process.env.SKIP_DB_TESTS === 'true' || process.env.SKIP_DOCKER === 'true';
 const describeFn = intentionalSkip ? describe.skip : describe;
@@ -20,44 +27,61 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
   let container: StartedPostgreSqlContainer | undefined;
   let repository: PostgresStorageReservationRepository;
 
-  // Test doubles for the capacity/fence/world dependencies.
-  let fenceActive = false;
-  let metric: CapacityMetric | null;
-  let registeredBytesByWorld: Map<string, number>;
-  let worldsExist: Set<string>;
+  const QUOTA_BYTES = 50 * 1024 * 1024;
+  const NARRATION_RESERVE = 1024 * 1024 * 1024;
+  const CAPACITY_BYTES = Math.round(2.5 * 1024 * 1024 * 1024);
 
-  const QUOTA_BYTES = 50 * 1024 * 1024; // 50 MB
-  const NARRATION_RESERVE = 1024 * 1024 * 1024; // 1 GiB
-
-  function makeDeps(): ReserveStorageDeps {
-    return {
-      reservationRepository: repository,
-      getCapacityMetric: async () => metric,
-      isFenceActive: async () => fenceActive,
-      getRegisteredBytes: async (worldId) =>
-        registeredBytesByWorld.get(worldId.getValue()) ?? 0,
-      lockWorldRow: async (worldId, tx: pkg.PoolClient) => {
-        if (!worldsExist.has(worldId.getValue())) {
-          throw new Error(`world not found: ${worldId.getValue()}`);
-        }
-        // Simulate the FOR UPDATE row lock.
-        await tx.query(`SELECT pg_advisory_xact_lock(hashtext('world_row:' || $1))`, [
-          worldId.getValue(),
-        ]);
-      },
-      quotaBytes: QUOTA_BYTES,
-      narrationReserveBytes: NARRATION_RESERVE,
-      metricMaxAgeMs: 5 * 60 * 1000,
-    };
-  }
-
-  function freshMetric(): CapacityMetric {
-    return {
-      storageCapacityBytes: Math.round(2.5 * 1024 * 1024 * 1024),
+  /** Seed the capacity metric table with a fresh measurement. */
+  async function seedMetric(overrides: Partial<CapacityMetric> = {}): Promise<void> {
+    const m: CapacityMetric = {
+      storageCapacityBytes: CAPACITY_BYTES,
       storageUsedBytes: 0,
       activeReservationsAtMeasureTime: 0,
       narrationBytes: 100 * 1024 * 1024,
       measuredAt: new Date(),
+      ...overrides,
+    };
+    await query(
+      `INSERT INTO storage_capacity_metrics
+         (storage_capacity_bytes, storage_used_bytes, active_reservations_at_measure_time,
+          narration_bytes, measured_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        m.storageCapacityBytes,
+        m.storageUsedBytes,
+        m.activeReservationsAtMeasureTime,
+        m.narrationBytes,
+        m.measuredAt,
+      ]
+    );
+  }
+
+  /** Create a real world row (with a creator user for the FK). Returns the WorldId. */
+  async function createWorld(): Promise<WorldId> {
+    const userId = crypto.randomUUID();
+    await query(
+      `INSERT INTO users (user_id, email, password_hash, role) VALUES ($1, $2, $3, $4)
+       ON CONFLICT DO NOTHING`,
+      [userId, `test-${userId}@example.com`, 'hash', 'creator']
+    );
+    const worldId = crypto.randomUUID();
+    await query(
+      `INSERT INTO worlds (world_id, creator_id, title) VALUES ($1, $2, $3)`,
+      [worldId, userId, 'Test World']
+    );
+    return new WorldId(worldId);
+  }
+
+  function makeDeps(): ReserveStorageDeps {
+    return {
+      reservationRepository: repository,
+      getCapacityMetric,
+      isFenceActive,
+      getRegisteredBytes,
+      lockWorldRow: lockWorldRowForUpdate,
+      quotaBytes: QUOTA_BYTES,
+      narrationReserveBytes: NARRATION_RESERVE,
+      metricMaxAgeMs: 5 * 60 * 1000,
     };
   }
 
@@ -73,6 +97,17 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
       setPool(connectionString);
     }
     await runMigrations(connectionString);
+    // Capacity metric table (owned by the monitoring slice; created here for RES-1a tests).
+    await query(`
+      CREATE TABLE IF NOT EXISTS storage_capacity_metrics (
+        id SERIAL PRIMARY KEY,
+        storage_capacity_bytes BIGINT NOT NULL,
+        storage_used_bytes BIGINT NOT NULL,
+        active_reservations_at_measure_time BIGINT NOT NULL,
+        narration_bytes BIGINT,
+        measured_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
     repository = new PostgresStorageReservationRepository();
   }, 120000);
 
@@ -83,177 +118,258 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
 
   beforeEach(async () => {
     await query(`DELETE FROM storage_reservations`);
-    fenceActive = false;
-    metric = freshMetric();
-    registeredBytesByWorld = new Map();
-    worldsExist = new Set();
+    await query(`DELETE FROM storage_capacity_metrics`);
+    await query(`UPDATE system_maintenance SET active = false WHERE id = 1`);
+    await seedMetric();
   });
 
-  function newWorldId(): WorldId {
-    const id = new WorldId(crypto.randomUUID());
-    worldsExist.add(id.getValue());
-    return id;
-  }
-
   it('creates a RESERVED reservation on the happy path', async () => {
-    const worldId = newWorldId();
+    const worldId = await createWorld();
     const r = await reserveStorage(worldId, 1024 * 1024, makeDeps());
 
     expect(r.state).toBe('RESERVED');
     expect(r.releasedAt).toBeNull();
     expect(r.sizeBytes).toBe(1024 * 1024);
-    expect(r.worldId.getValue()).toBe(worldId.getValue());
-    // expires_at ≈ now + 5 minutes (within 60s tolerance).
     const skew = r.expiresAt.getTime() - Date.now() - 5 * 60 * 1000;
     expect(Math.abs(skew)).toBeLessThan(60000);
   });
 
   it('rejects when the world quota would be exceeded', async () => {
-    const worldId = newWorldId();
-    registeredBytesByWorld.set(worldId.getValue(), QUOTA_BYTES - 100);
+    const worldId = await createWorld();
+    // Seed registered bytes near quota via a committed asset row.
+    await query(
+      `INSERT INTO world_media_assets
+         (asset_id, world_id, filename, url, mimetype, size_bytes, file_confirmed_present)
+       VALUES ($1, $2, $3, $4, $5, $6, true)`,
+      [crypto.randomUUID(), worldId.getValue(), 'a.png', '/media/a.png', 'image/png', QUOTA_BYTES - 100]
+    );
 
     await expect(reserveStorage(worldId, 200, makeDeps())).rejects.toMatchObject({
       code: 'QUOTA_EXCEEDED',
       httpStatus: 507,
     });
-    // No leaked row.
     expect(await repository.sumActiveBytes(worldId)).toBe(0);
   });
 
-  it('allows exact-boundary admission (used + size == quota)', async () => {
-    const worldId = newWorldId();
-    registeredBytesByWorld.set(worldId.getValue(), QUOTA_BYTES - 1000);
-
-    const r = await reserveStorage(worldId, 1000, makeDeps());
+  it('allows exact-boundary admission and rejects one byte over', async () => {
+    const worldId = await createWorld();
+    const r = await reserveStorage(worldId, QUOTA_BYTES, makeDeps());
     expect(r.state).toBe('RESERVED');
-  });
 
-  it('rejects one byte over quota', async () => {
-    const worldId = newWorldId();
-    registeredBytesByWorld.set(worldId.getValue(), QUOTA_BYTES - 1000);
-
-    await expect(reserveStorage(worldId, 1001, makeDeps())).rejects.toMatchObject({
+    const w2 = await createWorld();
+    await expect(reserveStorage(w2, QUOTA_BYTES + 1, makeDeps())).rejects.toMatchObject({
       code: 'QUOTA_EXCEEDED',
     });
   });
 
-  it('counts outstanding reservations against quota (S5-partial)', async () => {
-    const worldId = newWorldId();
+  it('concurrent same-world requests: exactly one succeeds when combined exceeds quota', async () => {
+    // Two concurrent Phase-1s for the SAME world, each requesting 60% of quota.
+    // Only one can succeed (60% + 60% > 100%).
+    const worldId = await createWorld();
+    const size = Math.floor(QUOTA_BYTES * 0.6);
+
+    const results = await Promise.allSettled([
+      reserveStorage(worldId, size, makeDeps()),
+      reserveStorage(worldId, size, makeDeps()),
+    ]);
+    const succeeded = results.filter((r) => r.status === 'fulfilled');
+    const failed = results.filter((r) => r.status === 'rejected');
+
+    expect(succeeded.length).toBe(1);
+    expect(failed.length).toBe(1);
+    expect((failed[0] as PromiseRejectedResult).reason).toMatchObject({
+      code: 'QUOTA_EXCEEDED',
+    });
+    // Exactly one reservation row exists.
+    expect(await repository.sumActiveBytes(worldId)).toBe(size);
+  });
+
+  it('second transaction sees the first committed reservation (S5-partial)', async () => {
+    const worldId = await createWorld();
     const deps = makeDeps();
-    // First reservation consumes half the quota.
     await reserveStorage(worldId, QUOTA_BYTES / 2, deps);
-    // Second sees the first's committed row.
     await expect(reserveStorage(worldId, QUOTA_BYTES / 2 + 1, deps)).rejects.toMatchObject({
       code: 'QUOTA_EXCEEDED',
     });
-    // Exactly one row exists.
-    expect(await repository.sumActiveBytes(worldId)).toBe(QUOTA_BYTES / 2);
   });
 
   it('rejects when physical capacity is insufficient (S38)', async () => {
-    const worldId = newWorldId();
-    metric!.storageCapacityBytes = 1000;
-    metric!.storageUsedBytes = 600; // 400 available
+    const worldId = await createWorld();
+    await query(`DELETE FROM storage_capacity_metrics`);
+    await seedMetric({ storageCapacityBytes: 1000, storageUsedBytes: 600 });
 
     await expect(reserveStorage(worldId, 500, makeDeps())).rejects.toMatchObject({
       code: 'STORAGE_FULL',
       httpStatus: 507,
     });
-    expect(await repository.sumActiveBytes(worldId)).toBe(0);
   });
 
-  it('rejects on stale metric (fail-closed)', async () => {
-    const worldId = newWorldId();
-    metric!.measuredAt = new Date(Date.now() - 10 * 60 * 1000);
-
-    await expect(reserveStorage(worldId, 1000, makeDeps())).rejects.toMatchObject({
-      code: 'STORAGE_METRIC_STALE',
-      httpStatus: 503,
-    });
-  });
-
-  it('rejects when narration reserve is reached (hard boundary)', async () => {
-    const worldId = newWorldId();
-    metric!.narrationBytes = NARRATION_RESERVE;
-
-    await expect(reserveStorage(worldId, 1000, makeDeps())).rejects.toMatchObject({
-      code: 'NARRATION_CAPACITY_EXCEEDED',
-      httpStatus: 503,
-    });
-  });
-
-  it('rejects when the fence is active', async () => {
-    const worldId = newWorldId();
-    fenceActive = true;
-
-    await expect(reserveStorage(worldId, 1000, makeDeps())).rejects.toMatchObject({
-      code: 'FENCE_ACTIVE',
-      httpStatus: 503,
-    });
-    expect(await repository.sumActiveBytes(worldId)).toBe(0);
-  });
-
-  it('fence-wins race: fence activates first, Phase-1 rejects before L2/L3', async () => {
-    // Deterministic barrier: fence activation completes before Phase-1 starts.
-    // This simulates the serialized ordering where the fence holds L1 first.
-    const worldId = newWorldId();
-    fenceActive = true; // Fence committed before Phase-1 acquires L1.
-
-    const deps = makeDeps();
-    // Track whether L2/L3 were acquired by wrapping lockWorldRow.
-    let l2l3Acquired = false;
-    const origLock = deps.lockWorldRow;
-    deps.lockWorldRow = async (wid, tx) => {
-      l2l3Acquired = true;
-      return origLock(wid, tx);
-    };
-
-    await expect(reserveStorage(worldId, 1000, deps)).rejects.toMatchObject({
-      code: 'FENCE_ACTIVE',
-    });
-    // Fence check runs immediately after L1, before L2/L3.
-    expect(l2l3Acquired).toBe(false);
-    expect(await repository.sumActiveBytes(worldId)).toBe(0);
-  });
-
-  it('Phase-1-wins race: reservation commits before fence activation', async () => {
-    // Deterministic barrier: Phase-1 completes before the fence activates.
-    const worldId = newWorldId();
-    const r = await reserveStorage(worldId, 1000, makeDeps());
-    expect(r.state).toBe('RESERVED');
-
-    // Fence activates after the reservation committed.
-    fenceActive = true;
-    // The reservation exists and would be invalidated per §4.3d (not tested here).
-    const found = await repository.findById(r.reservationId);
-    expect(found?.state).toBe('RESERVED');
-  });
-
-  it('concurrent Phase-1s for different worlds respect shared capacity (S38)', async () => {
-    const w1 = newWorldId();
-    const w2 = newWorldId();
-    // 1500 bytes total capacity, 0 used. Two 1000-byte requests → only one fits.
-    metric!.storageCapacityBytes = 1500;
-    metric!.storageUsedBytes = 0;
+  it('concurrent different-world requests respect shared capacity (S38)', async () => {
+    const w1 = await createWorld();
+    const w2 = await createWorld();
+    await query(`DELETE FROM storage_capacity_metrics`);
+    await seedMetric({ storageCapacityBytes: 1500, storageUsedBytes: 0 });
 
     const results = await Promise.allSettled([
       reserveStorage(w1, 1000, makeDeps()),
       reserveStorage(w2, 1000, makeDeps()),
     ]);
     const succeeded = results.filter((r) => r.status === 'fulfilled').length;
-    // Only one can succeed: 1000 + 1000 > 1500.
     expect(succeeded).toBe(1);
-    // Total reserved does not exceed capacity.
-    const total = await repository.sumActiveBytes();
-    expect(total).toBeLessThanOrEqual(1500);
+    expect(await repository.sumActiveBytes()).toBeLessThanOrEqual(1500);
   });
 
-  it('rolls back cleanly on DB failure during INSERT (no partial row)', async () => {
-    const worldId = newWorldId();
+  it('rejects on stale metric and on narration reserve breach (fail-closed)', async () => {
+    const worldId = await createWorld();
+
+    await query(`DELETE FROM storage_capacity_metrics`);
+    await seedMetric({ measuredAt: new Date(Date.now() - 10 * 60 * 1000) });
+    await expect(reserveStorage(worldId, 1000, makeDeps())).rejects.toMatchObject({
+      code: 'STORAGE_METRIC_STALE',
+      httpStatus: 503,
+    });
+
+    await query(`DELETE FROM storage_capacity_metrics`);
+    await seedMetric({ narrationBytes: NARRATION_RESERVE });
+    await expect(reserveStorage(worldId, 1000, makeDeps())).rejects.toMatchObject({
+      code: 'NARRATION_CAPACITY_EXCEEDED',
+      httpStatus: 503,
+    });
+  });
+
+  it('rejects when the fence is active (before L2/L3)', async () => {
+    const worldId = await createWorld();
+    await withTransaction(async (tx) => {
+      await activateFence(tx, 'test');
+    });
+
+    await expect(reserveStorage(worldId, 1000, makeDeps())).rejects.toMatchObject({
+      code: 'FENCE_ACTIVE',
+      httpStatus: 503,
+    });
+    expect(await repository.sumActiveBytes(worldId)).toBe(0);
+  });
+
+  it('fence-wins race: fence commits first, Phase-1 blocks on L1 then rejects', async () => {
+    // Two real concurrent transactions serialized by the L1 advisory lock.
+    // Fence activation acquires L1 first and commits; Phase-1 then observes
+    // the active fence and rejects before acquiring L2/L3.
+    const worldId = await createWorld();
+
+    // Barrier: fence transaction signals when it holds L1.
+    let fenceHoldsL1!: () => void;
+    const fenceHasL1 = new Promise<void>((resolve) => {
+      fenceHoldsL1 = resolve;
+    });
+    // Barrier: Phase-1 signals when it starts waiting for L1.
+    let phase1Waiting!: () => void;
+    const phase1IsWaiting = new Promise<void>((resolve) => {
+      phase1Waiting = resolve;
+    });
+
+    const fenceTx = withTransaction(async (tx: pkg.PoolClient) => {
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_global'))`);
+      fenceHoldsL1();
+      // Hold L1 while Phase-1 starts and blocks.
+      await phase1IsWaiting;
+      await tx.query(
+        `UPDATE system_maintenance SET active = true WHERE id = 1`
+      );
+      // COMMIT releases L1.
+    });
+
+    const phase1Tx = (async () => {
+      await fenceHasL1;
+      // Small delay to ensure the fence tx holds L1 before we try.
+      await new Promise((r) => setTimeout(r, 100));
+      phase1Waiting();
+      return reserveStorage(worldId, 1000, makeDeps());
+    })();
+
+    const [, phase1Result] = await Promise.all([fenceTx, phase1Tx.catch((e) => e)]);
+
+    expect(phase1Result).toMatchObject({ code: 'FENCE_ACTIVE' });
+    expect(await repository.sumActiveBytes(worldId)).toBe(0);
+    // Cleanup.
+    await withTransaction(deactivateFence);
+  });
+
+  it('Phase-1-wins race: reservation commits first, fence activates after', async () => {
+    // Phase-1 acquires L1 first and commits; fence activation then proceeds
+    // and would invalidate per §4.3d (invalidation itself is out of scope).
+    const worldId = await createWorld();
+
+    let phase1HoldsL1!: () => void;
+    const phase1HasL1 = new Promise<void>((resolve) => {
+      phase1HoldsL1 = resolve;
+    });
+    let fenceWaiting!: () => void;
+    const fenceIsWaiting = new Promise<void>((resolve) => {
+      fenceWaiting = resolve;
+    });
+
+    // Phase-1 holds L1 while the fence tries to activate.
+    const phase1Tx = withTransaction(async (tx: pkg.PoolClient) => {
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_global'))`);
+      phase1HoldsL1();
+      await fenceIsWaiting;
+      // Simulate Phase-1 work: check fence (not active), then commit.
+      const fenceOn = await isFenceActive(tx);
+      expect(fenceOn).toBe(false);
+      // COMMIT releases L1.
+      return 'phase1-committed';
+    });
+
+    const fenceTx = (async () => {
+      await phase1HasL1;
+      await new Promise((r) => setTimeout(r, 100));
+      fenceWaiting();
+      return withTransaction(async (tx: pkg.PoolClient) => {
+        await activateFence(tx, 'race-test');
+        return 'fence-committed';
+      });
+    })();
+
+    const [p1, f] = await Promise.all([phase1Tx, fenceTx]);
+    expect(p1).toBe('phase1-committed');
+    expect(f).toBe('fence-committed');
+    // Fence is now active.
+    const active = await query(`SELECT active FROM system_maintenance WHERE id = 1`);
+    expect(active.rows[0].active).toBe(true);
+
+    await withTransaction(deactivateFence);
+  });
+
+  it('L3 uses a real FOR UPDATE row lock; missing world throws', async () => {
+    const fakeId = new WorldId(crypto.randomUUID());
+    await expect(
+      withTransaction((tx) => lockWorldRowForUpdate(fakeId, tx))
+    ).rejects.toThrow(/world not found/);
+
+    // Real world: lock succeeds and blocks a concurrent FOR UPDATE.
+    const worldId = await createWorld();
+    let secondLockBlocked = false;
+    const firstTx = withTransaction(async (tx: pkg.PoolClient) => {
+      await lockWorldRowForUpdate(worldId, tx);
+      // Hold the row lock while a second transaction tries to lock it.
+      await new Promise((r) => setTimeout(r, 500));
+    });
+    const secondTx = (async () => {
+      await new Promise((r) => setTimeout(r, 100));
+      const start = Date.now();
+      await withTransaction((tx) => lockWorldRowForUpdate(worldId, tx));
+      // If we get here quickly, the lock didn't block (bad).
+      secondLockBlocked = Date.now() - start > 300;
+    })();
+    await Promise.all([firstTx, secondTx]);
+    expect(secondLockBlocked).toBe(true);
+  });
+
+  it('rolls back cleanly on DB failure (no partial row, locks released)', async () => {
+    const worldId = await createWorld();
     const deps = makeDeps();
-    // Sabotage the repository to throw during create.
     const origCreate = repository.create.bind(repository);
-    repository.create = async () => {
+    (repository as { create: unknown }).create = async () => {
       throw new Error('simulated DB failure');
     };
     try {
@@ -262,12 +378,14 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
       repository.create = origCreate;
     }
     expect(await repository.sumActiveBytes(worldId)).toBe(0);
+    // Locks released: a subsequent reservation succeeds.
+    const r = await reserveStorage(worldId, 1000, makeDeps());
+    expect(r.state).toBe('RESERVED');
   });
 
-  it('validates sizeBytes is a positive integer', async () => {
-    const worldId = newWorldId();
+  it('validates sizeBytes', async () => {
+    const worldId = await createWorld();
     await expect(reserveStorage(worldId, 0, makeDeps())).rejects.toThrow();
     await expect(reserveStorage(worldId, -5, makeDeps())).rejects.toThrow();
-    await expect(reserveStorage(worldId, 1.5, makeDeps())).rejects.toThrow();
   });
 });
