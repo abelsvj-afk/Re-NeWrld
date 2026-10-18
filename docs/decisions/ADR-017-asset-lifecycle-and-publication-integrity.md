@@ -1,8 +1,8 @@
 # ADR Draft: Asset Lifecycle & Publication Integrity
 
 **Status:** DRAFT — architect assessment for product-owner review. Not approved. No implementation.
-**Date:** 2026-10-17
-**Revision:** 2026-10-17 (rev 18) — Targeted corrective revision per the rev-17 full adversarial audit (14 findings B1–B14). See revision history for the phase-by-phase corrections. 56 acceptance scenarios (S1–S56). Design Gate REMAINS CLOSED. No implementation authorized.
+**Date:** 2026-10-18
+**Revision:** 2026-10-18 (rev 19) — Corrective revision per the rev-18 full-document review (8 findings B1–B8). B3 FIRST: recovery-authorization protocol separating normal-writer exclusion from authorized recovery mutations (fence stays active and fail-closed; repair runs under authorization, never under a lifted fence). Then: B1 (valid PostgreSQL `roles` enforcement: domain CHECK + trigger), B2 (reservations in quota admission + atomic handoff), B4 (executable run-scoped backfill reconciliation), B5 (nullable `world_id` for orphan snapshot refs), B6 (422 `ASSET_WRONG_WORLD` fully superseded), B7 (§4.3d example uses the wrapper), B8 (fence activation atomically invalidates in-flight Phase-2 reservations). 60 acceptance scenarios (S1–S60). Design Gate REMAINS CLOSED. No implementation authorized.
 **Author:** Muse (architect role)
 **Context:** WP-02 — Asset lifecycle and publication integrity
 **Supersedes:** The "live images" decision in `hidden_audit/spec-script-assets-tabs.md` §2.7 (revised per owner decision 2026-10-16)
@@ -117,10 +117,14 @@ CREATE TABLE world_media_assets (
   -- retained snapshots. `roles` is a UI/API convenience — the URL reference
   -- scan is the SOLE authority for deletion safety (§4.3b).
   roles         TEXT[] NOT NULL DEFAULT '{}'
-                CHECK (roles <@ ARRAY['cover','illustration']
-                       AND cardinality(roles) = (
-                             SELECT count(DISTINCT r) FROM unnest(roles) AS r
-                           )),
+                CHECK (roles <@ ARRAY['cover','illustration']),
+  -- Uniqueness within the array is enforced by a trigger, not CHECK (rev 19 — B1):
+  -- PostgreSQL forbids subqueries in CHECK constraints, so the rev-9 formulation
+  -- `cardinality(roles) = (SELECT count(DISTINCT r) FROM unnest(roles) AS r)`
+  -- cannot be applied as DDL — the CREATE TABLE would fail. The value domain
+  -- (`<@`, an immutable built-in operator) stays in CHECK; intra-array uniqueness
+  -- (which requires unnest + aggregation) moves to a BEFORE trigger. Both fire
+  -- atomically in the inserting/updating transaction.
   -- Lifecycle state: active → pending_deletion → (row deleted)
   -- pending_deletion means: proven unreferenced, file removal in progress or failed
   lifecycle     TEXT NOT NULL DEFAULT 'active'
@@ -134,10 +138,41 @@ CREATE TABLE world_media_assets (
   -- among referencing worlds (rev 14, §4.7c B4a). Empty array = not shared.
   shared_with_worlds UUID[] NOT NULL DEFAULT '{}',
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Which backfill run created this row (rev 19 — B4). NULL for all normal-path
+  -- rows (uploads, attributions). Set ONLY by backfill classification inserts.
+  -- Lets the completion gate prove set equality against the run's inventory.
+  backfill_run_id UUID REFERENCES backfill_runs(run_id)
 );
 CREATE INDEX ON world_media_assets (world_id);
 CREATE INDEX ON world_media_assets (world_id, lifecycle);
+CREATE INDEX ON world_media_assets (backfill_run_id) WHERE backfill_run_id IS NOT NULL;
+
+-- Intra-array uniqueness for `roles` (rev 19 — B1). Fires BEFORE the row is
+-- written, in the same transaction — a duplicate aborts the INSERT/UPDATE,
+-- never a partially written row.
+CREATE OR REPLACE FUNCTION check_roles_unique() RETURNS trigger AS $$
+BEGIN
+  IF (SELECT count(*) FROM unnest(NEW.roles) AS r)
+     <> (SELECT count(DISTINCT r) FROM unnest(NEW.roles) AS r) THEN
+    RAISE EXCEPTION 'world_media_assets.roles contains duplicates: %', NEW.roles
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_world_media_assets_roles_unique
+  BEFORE INSERT OR UPDATE OF roles ON world_media_assets
+  FOR EACH ROW EXECUTE FUNCTION check_roles_unique();
+
+-- Migration failure behavior (rev 19 — B1, see S57): all DDL above runs inside
+-- the migration transaction. If any statement fails (syntax, existing
+-- violating rows on a backfill, permission), PostgreSQL rolls back the ENTIRE
+-- migration — the schema is unchanged, no partial trigger without its table.
+-- The migrate step exits non-zero, the Fly release fails, health reports
+-- `degraded`, and a critical alert fires with the migration name and error.
+-- The operator fixes the cause and re-runs; there is no "half-migrated" state.
 
 **Snapshot-reference tracking (rev 16 — B4.2):** Draft references are mutable (metadata edits); snapshot references are immutable (snapshots never change, only get created or garbage-collected per the retention rule). Mixing the two lifecycles in one array would create write contention on the asset row at publish time and conflate "currently referenced" with "historically retained." They are therefore tracked separately.
 
@@ -153,7 +188,14 @@ CREATE TABLE asset_snapshot_references (
                              -- snapshot rows outlive world rows (retention, §5.4) and the
                              -- cleanup contract below deletes ref rows in the same
                              -- transaction as the snapshot row.
-  world_id    UUID NOT NULL,  -- the world that owns the snapshot (denormalized for the scanner)
+  world_id    UUID,  -- the world that owns the snapshot (denormalized for the scanner).
+                   -- NULLABLE (rev 19 — B5): orphan snapshots (world_id NULL in
+                   -- canon_snapshots, or world row gone) still get protection rows.
+                   -- Protection is filename-keyed and never depends on world_id;
+                   -- NULL means "no owner to attribute," not "no protection."
+                   -- A NOT NULL constraint here would make the §4.2 orphan-snapshot
+                   -- promise unimplementable: backfill could not insert the
+                   -- (filename, snapshot_id, NULL) triple the scanner requires.
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (filename, snapshot_id)
 );
@@ -325,11 +367,11 @@ This applies to: scene metadata update, world metadata update, and the publish f
    d. Require no active world-deletion job for this world (§4.9). If a job row exists → abort with **409** `{code: "WORLD_DELETION_IN_PROGRESS"}`. (Any job row means deletion is in progress — `complete` is never persisted; the row's absence is the terminal condition.)
    e. Cross-world references (rev 15 — supersedes the rev-10 prohibition): if `asset.world_id != target_world_id`, the reference is permitted as a SHARED reference. The transaction atomically ensures `target_world_id` is in the asset's `shared_with_worlds` array (append if absent and not the owner), under the same asset-row lock (position 6) — the array can never disagree with draft reality. The rev-10 blanket prohibition ("the product excludes a shared asset library," 422 `ASSET_WRONG_WORLD`) is superseded because its rationale is obsolete: it existed because deletion scans were world-scoped and a cross-world reference would escape the owning world's deletion protection. Every deletion scan now checks `shared_with_worlds` and `asset_snapshot_references` (§4.3b, §4.7c), so a cross-world reference cannot escape protection. The `ASSET_WRONG_WORLD` code is retained for the endpoint-authorization context (403 — operating on a foreign asset via a world-scoped management path, e.g. `DELETE /worlds/:id/media/:assetId` where the row belongs to another world); it is no longer returned by reference validation.
 
-   **Note on 403 vs 422 for `ASSET_WRONG_WORLD`:** the same error *code* is returned with different *statuses* in two contexts, deliberately:
-   - **403** on asset endpoints (`GET/DELETE /worlds/:id/media/:assetId` where the row's `world_id` ≠ the path's `:id`): this is an **authorization** failure — "you are operating in world B's path but this asset belongs to world A; you cannot touch it." (See §4.1 error table.)
-   - **422** on reference validation (this contract, step 3e): this is a **validation** failure — "the value you supplied (this URL) is invalid for this operation because it names a foreign asset." The request itself is well-formed and authorized; the *value* is wrong.
+   **Note on 403 vs 422 for `ASSET_WRONG_WORLD` (rev 19 — B6):** the same error *code* exists in two contexts, but reference validation NEVER returns it — the rev-10 422 behavior is fully superseded, not merely narrowed:
+   - **403** on asset endpoints (`GET/DELETE /worlds/:id/media/:assetId` where the row's `world_id` ≠ the path's `:id`): this is an **authorization** failure — "you are operating in world B's path but this asset belongs to world A; you cannot touch it." (See §4.1 error table.) This is the ONLY context in which `ASSET_WRONG_WORLD` is returned.
+   - **Reference validation (this contract, step 3e):** a cross-world URL is a permitted shared reference — it is VALIDATED (steps 3a–3d) and the `shared_with_worlds` array is updated, never rejected. Any documentation, code comment, or test asserting a 422 `ASSET_WRONG_WORLD` from reference validation describes superseded behavior and is wrong; S18 asserts the success path.
    
-   The distinction matters for clients: 403 means "stop, check your permissions/identity"; 422 means "fix the value and retry." Monitoring can separate "cross-world access attempts" (403, potential abuse signal) from "authoring mistakes" (422, UX signal).
+   The distinction matters for clients: 403 means "stop, check your permissions/identity"; a validation failure on a URL means "fix the value and retry" (with `ASSET_UNKNOWN`/`ASSET_DELETED`/`ASSET_FILE_MISSING` as appropriate — never `ASSET_WRONG_WORLD`). Monitoring can separate "cross-world access attempts" (403, potential abuse signal) from "authoring mistakes" (422, UX signal).
 4. If any URL fails validation: `ROLLBACK`. **No partial reference updates.** The operation is all-or-nothing.
 5. Write the reference change(s). `COMMIT` while locks are still held.
 
@@ -686,7 +728,7 @@ Behavior matrix:
 - Startup recovery (§9.4, §5.5): checks before any state repair. If fenced, recovery reports `degraded` and retries — it does not repair under a fence it cannot see.
 - World-deletion recovery worker (§4.9): checks at pass start and before each per-file transaction (inside the level-1-holding section).
 - Snapshot GC job (§5.4): checks before deleting snapshots and their `asset_snapshot_references` rows. (DORMANT in MVP per §5.4 — listed here for contract completeness; no pruning job exists.)
-- Operator `repair` command (§9.4): checks before any mutation; the operator must lift the fence explicitly first (repair does not bypass it).
+- Operator `repair` command (§9.4): requires the fence to be inactive, OR a valid recovery authorization held by this session (rev 19 — B3). Repair never silently bypasses the fence: under an active fence without authorization it refuses to start; under authorization it is confined to the recovery allowlist.
 
 A background writer that skips the check is a bug under the new-writer checklist — whose item (3) now reads: "check the maintenance flag via `is_maintenance_active()` under level 1 before mutating."
 
@@ -703,15 +745,31 @@ A background writer that skips the check is a bug under the new-writer checklist
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtext('media_global'));  -- level 1: serialize against all writers
 UPDATE system_maintenance SET active = true, reason = ?, started_at = now(), started_by = ? WHERE id = 1;
+-- Invalidate in-flight Phase-2 uploads ATOMICALLY with fence activation (rev 19 — B8):
+-- Phase-2 chunk writes hold no level-1 and their heartbeats do not check the fence,
+-- so the fence alone cannot stop an already-running upload. Invalidating the
+-- reservation is what stops it: the writer's next heartbeat UPDATE affects 0 rows
+-- and its next chunk re-validation reads a non-active reservation → both abort.
+UPDATE storage_reservations
+   SET state = 'ROLLED_BACK', released_at = now()
+ WHERE state IN ('RESERVED','WRITING');
+-- Orphaned temp files from invalidated reservations are cleaned by the periodic
+-- job via the normal ROLLED_BACK path (§5.5) — no special cleanup needed.
 COMMIT;
 ```
-Every writer's mutation transaction does:
+**Why invalidation, not drain-wait (rev 19 — B8):** a drain would wait for in-flight uploads to finish or time out — unbounded if a writer is stuck, and a stuck writer could hold the fence hostage. Invalidation is immediate and fail-closed: the upload aborts and the client retries after the fence lifts (503 `MAINTENANCE_MODE`, retryable). The cost (aborted in-flight uploads on fence activation) is accepted because fence activation is rare and operator-initiated.
+
+**In-flight chunk bound (the B8 proof):** after the activation transaction commits, NO new chunk write can begin. Proof: every chunk iteration re-validates the reservation under `LOCK_SH` before `write()` (rev 16 — B1.2 writer obligations). Any iteration starting after activation reads `state = 'ROLLED_BACK'` (or the heartbeat's 0-row update) and aborts BEFORE `write()`. The only bytes that can land post-activation are from a chunk whose `write()` syscall was already in flight when activation committed — bounded by a single chunk, after which the loop re-validates and aborts. Post-activation uploads cannot *keep writing*; at most one in-flight chunk completes.
+Every writer's mutation transaction does (rev 19 — B7: the example MUST use the wrapper — a direct `SELECT active FROM system_maintenance` here would contradict the single-check-path rule that S55 enforces):
 ```sql
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtext('media_global'));  -- level 1: first
-SELECT active FROM system_maintenance WHERE id = 1;       -- check INSIDE the locked section
--- If active = true → ROLLBACK, return 503 {code: "MAINTENANCE_MODE", retryable: true}
--- If active = false → proceed with the mutation
+-- Check INSIDE the locked section, via the ONLY permitted path:
+-- is_maintenance_active() — never a direct SELECT (single-check-path rule).
+IF is_maintenance_active() THEN
+  ROLLBACK;  -- 503 {code: "MAINTENANCE_MODE", retryable: true}
+END IF;
+-- proceed with the mutation
 ... mutation ...
 COMMIT;
 ```
@@ -726,6 +784,50 @@ COMMIT;
 4. No active `UNMANAGED_FILE_DETECTED` or `FILE_UNEXPECTEDLY_ABSENT` alerts.
 5. No `backfill_runs` row with `state='in_progress'` (backfill and maintenance are mutually exclusive).
 6. Operator explicitly executes: `UPDATE system_maintenance SET active = false WHERE id = 1` (in a level-1-holding transaction, symmetric with activation).
+
+**Recovery authorization protocol (rev 19 — B3):** The fence rules create a circular dependency if read naively: `repair` must not bypass an active fence (§9.4), but the fence cannot be released until `repair` resolves the findings (criterion 2 above), and the §9.2 restore runbook needs both. The resolution is NOT to weaken the fence and NOT to lift it early — it is a separate, explicitly authorized **recovery-only protocol**. Normal writers and recovery writers are different principals with different permissions.
+
+**What the fence still guarantees (unchanged):** `is_maintenance_active() = true` blocks ALL normal writers — application endpoints, background jobs (periodic capacity job, backfill worker, startup recovery, world-deletion recovery, expiry-claim worker), uploads, deletes, metadata writes. The fence is fail-closed and binary. Nothing below changes that.
+
+**Recovery authorization (durable, auditable, exclusive):**
+```sql
+CREATE TABLE recovery_authorizations (
+  authorization_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  scope            TEXT NOT NULL CHECK (scope IN ('repair','restore-reconcile')),
+  authorized_by    TEXT NOT NULL,  -- operator identity (auditable)
+  authorized_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reason           TEXT NOT NULL,
+  expires_at       TIMESTAMPTZ NOT NULL DEFAULT now() + interval '4 hours',
+  revoked_at       TIMESTAMPTZ     -- set on revocation; NULL = not revoked
+);
+-- At most one LIVE authorization, by exclusion. Expired or revoked rows are history.
+CREATE UNIQUE INDEX one_active_recovery_auth
+  ON recovery_authorizations ((1))
+  WHERE revoked_at IS NULL AND expires_at > now();
+```
+
+**Establishment protocol (in order — every step required):**
+1. **Fence active:** `is_maintenance_active()` must return true. A recovery authorization cannot be created while the fence is inactive — rejected outright (nothing to recover from; use normal paths).
+2. **Operator authorization:** the operator inserts the row from an admin session (auditable: who, when, why, scope). The partial unique index rejects a second live authorization — recovery is exclusive by construction, not by convention.
+3. **Writer-exclusion verification (the proof, not a flag):** before any recovery mutation, the operator verifies ALL of:
+   a. **Level-1 quiescence:** `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = hashtext('media_global')` returns 0 — no in-flight Domain-L mutation.
+   b. **No active reservations:** `SELECT count(*) FROM storage_reservations WHERE state IN ('RESERVED','WRITING')` returns 0. This holds after fence activation because activation atomically invalidates all active reservations (rev 19 — B8); and no new reservation can be created while the fence is active (Phase-1 checks the fence under level-1 before inserting).
+   c. **No application sessions:** role-filtered `pg_stat_activity` shows no application-role sessions (rev 15 — B5.2 procedure).
+   
+   If any check fails → do NOT proceed; investigate. The authorization row alone authorizes nothing.
+4. **Recovery session:** the operator's recovery session runs on an admin connection (never the application pool). EVERY mutating transaction in the session: acquires level-1 first (canonical order — the recovery session is a Domain-L mutator for its syscalls), then asserts exactly one live authorization exists (`SELECT authorization_id FROM recovery_authorizations WHERE revoked_at IS NULL AND expires_at > now()` — must return exactly one row; zero rows → ROLLBACK: the authorization expired or was revoked). The `authorization_id` is logged with every mutation (audit trail).
+5. **Permitted operations (allowlist — closed set):** `diagnose` needs no authorization (read-only). Under authorization, the session may ONLY perform: quarantine moves of zero-reference orphans; abandoned-temp cleanup for `ABANDONED`/`ROLLED_BACK` reservation rows; `file_confirmed_present = false` updates with data-loss alerts; `pending_deletion` finalization after a fresh conclusive zero-reference scan; `roles` recompute from draft metadata; `unattributed_media_files` row creation for referenced orphans. It may NOT: serve user traffic, accept uploads, perform user-initiated deletes, write draft metadata, publish, run backfill, or lift the fence. An operation outside the allowlist is a spec violation even under authorization.
+6. **Failure behavior:** every allowlisted operation is idempotent and restartable (quarantine moves are path-conditional; row updates are state-conditional; scans are re-runnable). If repair fails or the authorization expires mid-procedure: the in-flight transaction rolls back, the fence STAYS active, health stays `degraded`. The operator investigates and establishes a NEW authorization to retry. Normal writes NEVER reopen as a side effect of repair failure.
+7. **Revocation and release:** after repair reports zero error-level findings, the operator revokes the authorization (`UPDATE recovery_authorizations SET revoked_at = now() WHERE authorization_id = ?`), then verifies the release criteria below (criterion 2 now references this protocol), then lifts the fence. The fence is never lifted while a live authorization exists.
+
+**Why this is not "a second flag" (the B3 proof obligation):** the authorization row alone authorizes nothing — steps 3 (exclusion proof), 4 (per-transaction assertion + allowlist), and 7 (revocation before release) are what make it safe. A bare flag without the verification would be exactly the hole B3 warns about. Proof that no conflicting writer can mutate the same state under this protocol:
+- *Normal writers:* blocked by the unchanged fail-closed fence — they cannot start, period.
+- *In-flight Domain-L writers:* excluded by 3(a) — none holds level-1 when recovery begins, and none can acquire it afterwards (their fence check under level-1 fails).
+- *In-flight Domain-R writers:* excluded by 3(b) — no active reservation exists after fence activation (B8 invalidation is atomic with activation), and Phase-1 cannot create one under fence. Additionally, recovery's file mutations never address a path that could have a live reservation row: temp cleanup only touches `ABANDONED`/`ROLLED_BACK` rows; quarantine moves only touch files with NO reservation row (a live writer's file always has one in `RESERVED`/`WRITING`).
+- *World-deletion recovery:* NOT in the allowlist and never runs under fence (background-writer rule unchanged — it waits for fence release). Its level-0 session lock is orthogonal and untouched by this protocol.
+- *A second recovery session:* impossible — the partial unique index permits exactly one live authorization, and every recovery transaction re-asserts it under level-1. Two operators cannot hold it concurrently.
+
+**Release criterion 2 (revised, rev 19 — B3):** criterion 2 now reads: "If `diagnose` found warnings → `repair` has been run **under a valid recovery authorization** (or during normal operation with the fence inactive, for non-fence repairs) and reports zero error-level findings." The circular dependency is resolved: repair no longer needs the fence lifted; it runs under recovery authorization while the fence stays active.
 
 **Deletion enforcement resumption:** While `active=true`, ALL `DELETE` endpoints (asset delete, world delete) return 503 `{code: "MAINTENANCE_MODE"}`. Deletion enforcement resumes ONLY after the flag is cleared per the criteria above. There is no partial resumption — the fence is binary.
 
@@ -762,7 +864,7 @@ COMMIT;
 
 **Paths 11–13 are explicitly NOT filesystem mutations** — they are included to prevent misreading. If a future change adds filesystem writes to backfill, attribution, or publish, it must be added to this table with a level-1 binding.
 
-**New-writer checklist (normative):** Any new code path that mutates the filesystem MUST: (1) be added to this table (filesystem-mutating paths) or the §4.3c table (row-only paths) (rev 17 — A11), (2) hold the protection for its domain during the syscall — Domain L: acquire level-1 in the performing transaction during the syscall; Domain R (Phase-2 temp writes ONLY): hold a durably active reservation and execute every chunk inside the `flock` handshake; operator procedures: use the maintenance fence, (3) check the maintenance flag via `is_maintenance_active()` (never a direct SELECT) under level-1 before mutating — Phase-2 writers check in Phase 1 and abort on 0-row heartbeats (rev 16 — B5.1), (4) have a corresponding scenario in §6. A writer that does not meet all four is a bug.
+**New-writer checklist (normative):** Any new code path that mutates the filesystem MUST: (1) be added to this table (filesystem-mutating paths) or the §4.3c table (row-only paths) (rev 17 — A11), (2) hold the protection for its domain during the syscall — Domain L: acquire level-1 in the performing transaction during the syscall; Domain R (Phase-2 temp writes ONLY): hold a durably active reservation and execute every chunk inside the `flock` handshake; operator procedures: use the maintenance fence, (3) check the maintenance flag via `is_maintenance_active()` (never a direct SELECT) under level-1 before mutating — Phase-2 writers check in Phase 1, abort on 0-row heartbeats, and are invalidated atomically if the fence activates mid-upload (rev 16 — B5.1; rev 19 — B8), (4) have a corresponding scenario in §6. A writer that does not meet all four is a bug.
 
 ### 4.4 Failure atomicity (upload path)
 
@@ -840,8 +942,12 @@ CREATE TABLE unattributed_media_files (
   -- terminal state before lifecycle enforcement is enabled.
   classification_status TEXT NOT NULL DEFAULT 'pending_review'
                          CHECK (classification_status IN ('pending_review','reviewed','classified')),
-  notes              TEXT
+  notes              TEXT,
+  -- Which backfill run created this row (rev 19 — B4). NULL for rows created
+  -- outside backfill (should not occur in practice; backfill owns this table).
+  backfill_run_id UUID REFERENCES backfill_runs(run_id)
 );
+CREATE INDEX ON unattributed_media_files (backfill_run_id) WHERE backfill_run_id IS NOT NULL;
 ```
 
 **Why a separate table:** `world_media_assets.world_id` is `NOT NULL` — an unmatchable file cannot satisfy the ownership constraint. Weakening the main registry's ownership constraint to accommodate orphans would silently corrupt deletion and reference-scan behavior (a `NULL`-world row would be invisible to per-world scans). The separate table keeps the main registry's invariants strict while giving orphans a first-class, protected home.
@@ -898,18 +1004,51 @@ CREATE TABLE backfill_runs (
                             CHECK (state IN ('in_progress','complete','failed')),
   started_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at            TIMESTAMPTZ,
+  failure_reason          TEXT,           -- set when state transitions to 'failed' (rev 19 — B4)
   final_inventory_count   INT,            -- authoritative file count after write-freeze
   final_inventory_checksum TEXT,          -- SHA-256 of the inventory manifest itself
   files_classified        INT NOT NULL DEFAULT 0,
   files_pending           INT NOT NULL DEFAULT 0
 );
+
+-- Durable per-file inventory manifest (rev 19 — B4). The checksum above seals the
+-- manifest against tampering; THIS table is the authoritative set the
+-- reconciliation proves equality against. One row per inventoried file per run.
+CREATE TABLE backfill_inventory_files (
+  run_id     UUID NOT NULL REFERENCES backfill_runs(run_id) ON DELETE CASCADE,
+  filename   TEXT NOT NULL,  -- storage filename ({uuid}.{ext})
+  size_bytes BIGINT,
+  sha256     TEXT,           -- content hash at inventory time (may be NULL if unreadable; then file goes to pending_review, never skipped)
+  PRIMARY KEY (run_id, filename)
+);
+CREATE INDEX ON backfill_inventory_files (run_id);
 ```
 
 **Backfill procedure with durable gate:**
 1. `INSERT` a `backfill_runs` row (`state='in_progress'`). This run owns the backfill.
-2. Take the final inventory (post-write-freeze, §2.1 step 7). Record `final_inventory_count` and `final_inventory_checksum` (SHA-256 over the sorted filename+size+checksum manifest) in the run row.
-3. Classify each file per the policy above, incrementing `files_classified` / `files_pending`.
-4. **Reconcile:** every file in the final inventory must have exactly one outcome — a row in `world_media_assets` OR a row in `unattributed_media_files`. Verify: `files_classified + files_pending = final_inventory_count`, and independently `SELECT count(*) FROM world_media_assets WHERE <backfilled> + SELECT count(*) FROM unattributed_media_files WHERE <this run> = final_inventory_count`. Additionally verify: (a) zero unresolved rows in `backfill_conflicts` for this run (`resolved_at IS NULL` count = 0); (b) zero off-manifest files on disk (re-list the directory and diff against the manifest — any file not in the manifest blocks completion per the added-after-freeze rule). Any discrepancy → investigate, do not complete.
+2. Take the final inventory (post-write-freeze, §2.1 step 7). For EVERY file, insert one row into `backfill_inventory_files` (`run_id`, `filename`, `size_bytes`, `sha256`) in the same transaction. Then record `final_inventory_count` (= `SELECT count(*) FROM backfill_inventory_files WHERE run_id = ?`) and `final_inventory_checksum` (SHA-256 over the sorted `filename+size_bytes+sha256` rows) in the run row. The manifest table is the authoritative set; the checksum seals it.
+3. Classify each file per the policy above, incrementing `files_classified` / `files_pending`. Every classification INSERT into `world_media_assets` or `unattributed_media_files` sets `backfill_run_id` to this run's id (rev 19 — B4).
+4. **Reconcile (executable — rev 19, B4):** every file in the final inventory must have exactly one outcome row for THIS run — proven by set equality in both directions, not by counts (counts could include rows from earlier runs):
+```sql
+-- Direction 1: every inventoried file has an outcome row for this run.
+-- Must return ZERO rows.
+SELECT i.filename
+  FROM backfill_inventory_files i
+ WHERE i.run_id = :run_id
+EXCEPT
+(SELECT w.filename FROM world_media_assets w WHERE w.backfill_run_id = :run_id
+ UNION
+ SELECT u.filename FROM unattributed_media_files u WHERE u.backfill_run_id = :run_id);
+
+-- Direction 2: every outcome row for this run corresponds to an inventoried file.
+-- Must return ZERO rows. (Catches rows inserted for files never inventoried.)
+(SELECT w.filename FROM world_media_assets w WHERE w.backfill_run_id = :run_id
+ UNION
+ SELECT u.filename FROM unattributed_media_files u WHERE u.backfill_run_id = :run_id)
+EXCEPT
+SELECT i.filename FROM backfill_inventory_files i WHERE i.run_id = :run_id;
+```
+Additionally verify: (a) zero unresolved rows in `backfill_conflicts` for this run (`resolved_at IS NULL` count = 0); (b) zero off-manifest files on disk (re-list the directory and diff against the manifest — any file not in the manifest blocks completion per the added-after-freeze rule). Any discrepancy → investigate, do not complete. The old `<backfilled>` / `<this run>` placeholders are withdrawn — every predicate above is executable against the schema as defined.
 5. Only when reconciliation passes: `UPDATE backfill_runs SET state='complete', completed_at=now()` in a single transaction.
 
 **Enforcement gate:** lifecycle enforcement (registry-gated serving per §4.5, `DELETE` endpoint, quota accounting) enables **only** when a `backfill_runs` row exists with `state='complete'`. The startup check queries this table — not the `pending_review` count. If no `complete` run exists, enforcement stays disabled and health reports `"media_lifecycle": "backfill_incomplete"`.
@@ -1333,15 +1472,36 @@ The job row is the durable source of truth for *which phase* the deletion is in.
 
 ### 5.1 Authoritative quota rule
 
-**There is exactly one definition, used by every path** (upload check, delete, reconciliation, error responses):
+**There is exactly one definition, used by every path** (upload check, delete, reconciliation, error responses). It counts BOTH committed registry usage AND outstanding reservations — a reservation is bytes the system has promised to a future registry row, and omitting it lets concurrent uploads overspend (rev 19 — B2):
 
 ```sql
-quota_used_bytes = COALESCE(SUM(size_bytes), 0)
+-- Authoritative per-world admission figure (single definition):
+quota_used_bytes(world_id) =
+  registered_usage(world_id) + outstanding_reservations(world_id)
+
+registered_usage(world_id) = COALESCE(SUM(size_bytes), 0)
   FROM world_media_assets
   WHERE world_id = :world_id
     AND lifecycle IN ('active', 'pending_deletion')
     AND file_confirmed_present = true
+
+outstanding_reservations(world_id) = COALESCE(SUM(size_bytes), 0)
+  FROM storage_reservations
+  WHERE world_id = :world_id
+    AND state IN ('RESERVED','WRITING')   -- active reservations only (rev 16 — B1.1)
 ```
+
+**Atomic reservation→registry handoff (rev 19 — B2):** the Phase-2 commit transaction performs BOTH the reservation state change and the registry row insert atomically:
+```sql
+BEGIN;  -- holds level-1 (commit lock set, §4.3c)
+UPDATE storage_reservations
+   SET state = 'COMMITTED', released_at = now()
+ WHERE reservation_id = :rid AND state IN ('RESERVED','WRITING');
+INSERT INTO world_media_assets (world_id, filename, url, mimetype, size_bytes, roles, ...)
+VALUES (...);  -- same size_bytes as the reservation
+COMMIT;
+```
+The bytes leave the reservation bucket and enter the registry bucket in the SAME commit — no double-count (a `COMMITTED` reservation is excluded from `outstanding_reservations`), no gap (a missing row would mean the transaction didn't commit, and then the reservation is still `RESERVED`/`WRITING` or was rolled back). If the transaction rolls back, the reservation row is unchanged and the bytes remain counted exactly once as outstanding. On `ABANDONED`/`ROLLED_BACK`, the bytes leave the reservation bucket and enter `abandoned_temp_bytes` (durable SUM, §5.5) — again exactly once, never zero and never two.
 
 | Category | Counts toward quota? | Reason |
 |---|---|---|
@@ -1349,6 +1509,8 @@ quota_used_bytes = COALESCE(SUM(size_bytes), 0)
 | `active` assets, file confirmed missing | **No** | Nothing on disk; triggers data-loss alert instead (§9.2) |
 | `pending_deletion` assets | **Yes** | File still on disk until removal confirmed; prevents quota evasion |
 | Detached assets (unreferenced, still `active`) | **Yes** | On disk; incentivizes proper deletion |
+| Active reservations (`RESERVED`/`WRITING`) | **Yes** | Bytes promised to an in-flight upload; prevents concurrent overspend (rev 19 — B2) |
+| Committed/abandoned/rolled-back reservations | **No** | Left the outstanding bucket atomically (into registry or abandoned accounting) |
 | Quarantined orphans (no registry row) | **No** (toward any world) | Cannot attribute to a world; tracked separately as `unattributed_bytes` for ops visibility |
 
 **Reconciliation input:** `file_confirmed_present` is set `true` at upload. The periodic reconciliation job (§9.4) may set it `false` if the file is missing. Per-request quota checks use the database value — never a live filesystem walk.
@@ -1383,7 +1545,7 @@ Two simultaneous uploads could each pass the quota check and collectively exceed
 1. Acquire the global media advisory lock (level 1): `SELECT pg_advisory_xact_lock(hashtext('media_global'))`.
 2. Acquire the per-world quota advisory lock (level 2): `SELECT pg_advisory_xact_lock(hashtext('media_quota:' || world_id))`.
 3. Acquire the world row lock (level 3): `SELECT ... FOR UPDATE OF worlds WHERE world_id = ?`.
-4. Inside the same transaction: compute `quota_used_bytes` per §5.1, add the in-flight file size, compare against quota; run the capacity check per §5.5 (which reads the durable `storage_reservations` state).
+4. Inside the same transaction: compute `quota_used_bytes(world_id)` per §5.1 — registered usage PLUS outstanding reservations (rev 19 — B2: the old formula counted only registry rows, so two concurrent Phase-1s could both pass against the same 45 MB and overspend); add the in-flight file size, compare against quota; run the capacity check per §5.5 (which reads the durable `storage_reservations` state).
 5. If within quota and capacity: INSERT the `storage_reservations` row and COMMIT. All locks release (transaction-scoped). Phase 1 holds level-1 for milliseconds — it never spans the file write.
 
 **Phase 2 — write and commit:** the file write proceeds under Domain R (durable reservation + `flock` handshake, §5.5 — no level-1 held); the commit transaction (rename + asset INSERT + reservation→COMMITTED) re-acquires level-1 per the §4.3c lock set. See §5.5 for the full two-phase protocol.
@@ -1807,9 +1969,12 @@ This invariant is provable from database state alone — `SELECT state, COUNT(*)
 3. **Assert:** `quota_used_bytes` decreased by the file's size. Subsequent upload within the freed quota succeeds. `GET /media/old.jpg` → 404.
 4. **Assert:** No claim is made that any lock survived from T1 to T2 — T2's safety comes from re-verification under freshly acquired locks, not from lock continuity.
 
-### S5: Concurrent uploads near quota boundary
-1. World has 45 MB used of 50 MB quota. Two 4 MB uploads start simultaneously.
-2. **Assert:** Advisory lock serializes them. Exactly one succeeds; the other gets **507** `{code: "QUOTA_EXCEEDED", quota_exceeded: true}`. Final usage ≤ 50 MB.
+### S5: Concurrent uploads near quota boundary (rev 19 — B2: reservations in admission)
+1. World has 45 MB registered of 50 MB quota, zero outstanding reservations. Two 4 MB uploads (A and B) start simultaneously.
+2. Upload A Phase-1: acquires level-1 + level-2, computes 45 (registered) + 0 (outstanding) + 4 = 49 ≤ 50 → passes, inserts its 4 MB reservation (`RESERVED`), commits. Locks release.
+3. Upload B Phase-1: acquires the locks, computes 45 (registered) + 4 (A's outstanding reservation) + 4 = 53 > 50 → **507** `{code: "QUOTA_EXCEEDED", quota_exceeded: true}`. No reservation inserted, no file written.
+4. **Assert:** exactly one upload proceeds. (Under the pre-rev-19 registry-only formula, B would have computed 45 + 4 = 49, passed, and both uploads would have finished at 53 MB registered vs 50 MB quota — the finding's exact overspend. The outstanding-reservation term closes it: serialization alone was never sufficient.)
+5. Upload A Phase-2 commits: reservation → `COMMITTED` AND registry row inserted in ONE transaction. **Assert:** quota reads 49 MB (45 + 4 registered, 0 outstanding) — the 4 MB moved buckets atomically, counted exactly once at every instant. Then A is deleted via T2: quota returns to 45 MB on T2's commit.
 
 ### S6: Upload racing with deletion
 1. Upload of 5 MB file starts (holds advisory lock, computing quota). Concurrent DELETE of a 3 MB unreferenced asset starts.
@@ -1885,6 +2050,7 @@ This invariant is provable from database state alone — `SELECT state, COUNT(*)
 2. **Assert:** the metadata update SUCCEEDS (no 422 — the rev-10 prohibition is superseded). The transaction atomically appends B to the asset's `shared_with_worlds` (`= ['B']`) under the asset-row lock. World B's metadata now references the URL.
 3. **Assert:** World A's deletion scan now sees World B's reference: attempting to delete `/media/aaa.jpg` → **409** `{code: "ASSET_REFERENCED"}` (the scan checks `shared_with_worlds`). The world-scoped deletion soundness that the old 422 protected is now provided by the shared-reference tracking (§4.3b, §4.7c) — the 422's rationale is obsolete.
 4. **Assert:** the endpoint-authorization 403 is unaffected: `DELETE /worlds/B/media/{assetId}` (B's path, A's asset) → **403** (B cannot manage A's asset; sharing confers read/reference rights, not management rights).
+5. **Assert (rev 19 — B6):** reference validation NEVER returns `ASSET_WRONG_WORLD` — the rev-10 422 validation behavior is fully superseded (step 2 proves the success path). The code exists ONLY as the 403 endpoint-authorization above. Any test asserting a 422 from reference validation is testing obsolete behavior.
 
 ### S19: Dual-role backfill + independent role replacement
 1. Legacy file `/media/dual.jpg` is referenced as World C's cover art (`world.metadata.coverArtUrl`) and as a scene illustration in the same world. Backfill runs.
@@ -1970,8 +2136,8 @@ This invariant is provable from database state alone — `SELECT state, COUNT(*)
 1. Backfill starts: `backfill_runs` row inserted (`in_progress`), 60 of 100 files classified, then the process crashes.
 2. Restart. Startup finds the `in_progress` run from before the clean shutdown → marks it `failed`, logs at warning.
 3. **Assert:** enforcement stays disabled — health reports `"media_lifecycle": "backfill_incomplete"`. The `pending_review` count is irrelevant; the gate checks for a `complete` run row, and none exists.
-4. Operator restarts backfill → new run row (`in_progress`), new final inventory, new freeze. The 60 already-classified files are **re-verified** per the rev-11 rerun protocol (not skipped): each row's classification is recomputed against current metadata and snapshots; matches are confirmed, mismatches become `backfill_conflicts` rows, operator-reviewed unattributed records are preserved untouched. The remaining 40 are classified fresh. Reconciliation verifies `60 + 40 = 100 = final_inventory_count` **and** zero unresolved conflicts.
-5. **Assert:** run transitions to `complete` in a single transaction. Only then does enforcement enable. A file added to `/data/media/` *during* the backfill (after the final inventory was recorded) is caught by the count reconciliation — the run cannot complete until it is classified.
+4. Operator restarts backfill → new run row (`in_progress`), new final inventory (100 rows in `backfill_inventory_files`), new freeze. The 60 already-classified files are **re-verified** per the rev-11 rerun protocol (not skipped): each row's classification is recomputed against current metadata and snapshots; matches are confirmed, mismatches become `backfill_conflicts` rows, operator-reviewed unattributed records are preserved untouched. The remaining 40 are classified fresh, each INSERT setting `backfill_run_id` to the new run. Reconciliation runs the rev-19 executable set-equality queries (both directions against `backfill_inventory_files`) **and** zero unresolved conflicts.
+5. **Assert:** run transitions to `complete` in a single transaction. Only then does enforcement enable. A file added to `/data/media/` *during* the backfill (after the final inventory was recorded) is caught by Direction-1 of the reconciliation (inventoried set minus outcome set ≠ ∅) — the run cannot complete until it is classified. The old count-based check (`60 + 40 = 100`) is withdrawn: counts could include rows from the failed R1.
 
 ### S31: Backfill rerun with changed metadata — conflict flagged, not overwritten
 1. Backfill run R1 classifies `/media/x.jpg` as World A's cover (`world_media_assets` row: `world_id=A`, `roles={'cover'}`). R1 fails before completing (crash); marked `failed` on restart.
@@ -1987,8 +2153,8 @@ This invariant is provable from database state alone — `SELECT state, COUNT(*)
 2. A creator attempts `POST /worlds/:id/media` during the run.
 3. **Assert:** **503** `{code: "BACKFILL_IN_PROGRESS", retryable: true}`. No file written, no row created. The upload transaction's freeze check (after acquiring level 1, before the quota check) saw the `in_progress` run.
 4. (Bypass variant) An operator copies `/media/sneaky.jpg` directly onto the volume via shell, bypassing the application.
-5. R1's reconciliation step 4(b) re-lists the directory and diffs against the manifest → `/media/sneaky.jpg` is off-manifest.
-6. **Assert:** R1 logs at error, creates an `unattributed_media_files` row (`classification_status='pending_review'`, notes `"appeared after inventory freeze"`), and **cannot complete** — the classified set must equal the inventoried set exactly. Operator removes the file (or aborts R1 and starts R2 with a new freeze/inventory including it). No silent absorption.
+5. R1's reconciliation re-lists the directory and diffs against `backfill_inventory_files` (rev 19 — B4: the manifest table, not just the checksum) → `/media/sneaky.jpg` is off-manifest. Direction-1 of the set-equality queries would also catch it if it were (incorrectly) given a row without manifest membership.
+6. **Assert:** R1 logs at error, creates an `unattributed_media_files` row (`classification_status='pending_review'`, `backfill_run_id` = R1, notes `"appeared after inventory freeze"`), and **cannot complete** — the classified set must equal the inventoried set exactly. Operator removes the file (or aborts R1 and starts R2 with a new freeze/inventory including it). No silent absorption.
 
 ### S33: Lock re-acquisition across a multi-transaction deletion pass
 1. Draft-only world with 2 assets; world deletion starts. Instrument lock acquisition (log every `pg_advisory_xact_lock` / `pg_advisory_lock` call with the transaction ID).
@@ -2166,23 +2332,25 @@ This invariant is provable from database state alone — `SELECT state, COUNT(*)
 15. **Drift (c) — stale row (rev 16 — B4.2):** Setup: row `(F.filename, S2)` exists but S2's `canon_data` no longer contains F's URL (out-of-contract snapshot edit). **Action:** run re-verification. **Assert:** (i) conflict `snapshot_ref_drift`/`stale_row`. (ii) Fail-closed default: asset-delete T1 scan for F → **409** `ASSET_REFERENCED` — the stale row still protects; over-protection is operator-visible, never data loss. (iii) Operator resolution: the transaction re-runs the §4.2 scan under its locks, confirms absence, DELETEs the stale row, marks resolved. (iv) Negative case: if the re-scan FINDS the URL (scanner false negative), the transaction must NOT delete the row — assert the row survives and the conflict is reclassified, never silently dropped.
 
 ### S47: Restore fencing (external guarantee + fail-closed check)
-1. **Setup:** application running, maintenance fence inactive, media volume populated.
+1. **Setup:** application running, maintenance fence inactive, media volume populated. One upload is mid-Phase-2 (active `RESERVED` reservation, writer heartbeating).
 2. **Action:** operator activates the fence (`active = true`), waits for level-1 quiescence (0 holders), then stops all machines (`fly scale count 0`).
-3. **Assert (verification gate, rev 16 — B5.2):** `fly status` shows 0 machines AND the following query returns zero rows:
+3. **Assert (B8 invalidation, rev 19):** the activation transaction atomically set the in-flight reservation to `ROLLED_BACK`. The writer's next heartbeat UPDATE affects 0 rows → aborts; its next chunk re-validation reads the non-active reservation → aborts before `write()`. **Assert:** no chunk write begins after the activation commit (at most the already-in-flight chunk's `write()` completes). The orphaned temp file is cleaned by the periodic job via the normal `ROLLED_BACK` path.
+4. **Assert (verification gate, rev 16 — B5.2):** `fly status` shows 0 machines AND the following query returns zero rows:
     ```sql
     SELECT pid, usename, application_name, state
       FROM pg_stat_activity
      WHERE usename = '<app_db_role>' AND pid <> pg_backend_pid();
     ```
     Then: open an ad-hoc `psql` session AS the application role (simulating a forgotten admin session or automation) and re-run the query → 1 row. **Assert:** the gate now FAILS — the restore must not proceed until that session is terminated. Terminate it, re-run → 0 rows → gate passes. **Machine count alone is not proof; the role-filtered session check is.**
-4. **Action:** restore a database backup whose `system_maintenance` row has `active = false` (the dangerous case: the flag alone would un-fence).
-5. **Assert:** with zero writer processes running, no write is possible regardless of the flag — the external guarantee holds independently of database state. Then the re-assertion runs as the FIRST SQL: `SELECT active FROM system_maintenance WHERE id = 1` → `true`. Volume restore proceeds only after.
-6. **Action:** simulate a missing table: `DROP TABLE system_maintenance` (in a test environment).
-7. **Assert:** `is_maintenance_active()` catches `undefined_table` → returns `true`. All mutating endpoints → **503** `MAINTENANCE_MODE`. Health → `degraded`. Critical alert `SYSTEM_MAINTENANCE_TABLE_MISSING` fires. **No path interprets the error as "maintenance inactive."**
-8. **Action:** restore the table; simulate a query error (revoke SELECT on the table from the app role).
-9. **Assert:** same fail-closed behavior: 503 on mutations, `degraded` health, error alert. The function's contract ("true on any error") holds for permission errors as well as missing objects.
-10. **Action:** complete the restore: volume restored, reconciliation `diagnose` clean, release criteria (§4.3d) all pass. Start ONE machine.
-11. **Assert:** the machine's startup verification (table exists, row exists, migration version) passes; health reports correctly; operator lifts the fence; single machine serves writes; THEN scale to normal count. **At no instant was there a running writer without a provably active fence, and no second writer started before the first was verified.**
+5. **Action:** restore a database backup whose `system_maintenance` row has `active = false` (the dangerous case: the flag alone would un-fence).
+6. **Assert:** with zero writer processes running, no write is possible regardless of the flag — the external guarantee holds independently of database state. Then the re-assertion runs as the FIRST SQL (the `INSERT ... ON CONFLICT DO UPDATE` setting `active = true`); a subsequent `is_maintenance_active()` call returns `true` (rev 19 — B7: the check goes through the wrapper, never a direct SELECT). Volume restore proceeds only after.
+7. **Action:** simulate a missing table: `DROP TABLE system_maintenance` (in a test environment).
+8. **Assert:** `is_maintenance_active()` catches `undefined_table` → returns `true`. All mutating endpoints → **503** `MAINTENANCE_MODE`. Health → `degraded`. Critical alert `SYSTEM_MAINTENANCE_TABLE_MISSING` fires. **No path interprets the error as "maintenance inactive."**
+9. **Action:** restore the table; simulate a query error (revoke SELECT on the table from the app role).
+10. **Assert:** same fail-closed behavior: 503 on mutations, `degraded` health, error alert. The function's contract ("true on any error") holds for permission errors as well as missing objects.
+11. **Action (B3 recovery protocol, rev 19):** volume restored; `diagnose` reports discrepancies. Operator establishes a recovery authorization (scope `restore-reconcile`), verifies writer exclusion (level-1 quiescence ✓, zero active reservations ✓ — guaranteed by step 3's invalidation, zero app sessions ✓), then runs `repair` UNDER the authorization while the fence stays active.
+12. **Assert:** repair mutates (quarantine moves, row fixes) with the fence still active — no circular dependency. A second concurrent authorization request is rejected by the partial unique index. After repair reports zero error-level findings: authorization revoked, release criteria (§4.3d) all pass (criterion 2 satisfied by this authorized repair run). Start ONE machine.
+13. **Assert:** the machine's startup verification (table exists, row exists, migration version) passes; health reports correctly; operator lifts the fence; single machine serves writes; THEN scale to normal count. **At no instant was there a running writer without a provably active fence, no second writer started before the first was verified, and repair never required lifting the fence.**
 
 ### S48: Competing-transaction lock-order tests (rev 16 — B4.3)
 Prerequisite: R1–R7 applied. `lock_timeout = 30s` on all test sessions (bounds any unforeseen wait; advisory waits are detector-invisible).
@@ -2213,8 +2381,9 @@ Prerequisite: R1–R7 applied. `lock_timeout = 30s` on all test sessions (bounds
 4. **Action:** run re-verification (new backfill run). The cross-check (§4.7c step 2) compares discovered snapshot references against the table.
 5. **Assert:** ZERO `snapshot_ref_drift`/`missing_row` conflicts for `legacy.jpg`. **The first re-verification after backfill does not flag population as drift.** (Pre-rev-17, this produced a false `missing_row` conflict for every legacy snapshot-referenced file.)
 6. **Draft-only file:** file `/media/draftonly.jpg` referenced only in World M's draft (no snapshots). **Assert:** backfill creates the registry row and ZERO ref rows — the empty set is the correct complete population. Re-verification: no conflict.
-7. **Atomicity:** kill -9 the backfill worker between the registry-row INSERT and the ref-row INSERTs (inside the classification transaction).
-8. **Assert:** the transaction rolls back entirely — no registry row, no ref rows, no partial population. Retry completes both atomically. **Half-populated state is impossible.**
+7. **Orphan snapshot (rev 19 — B5):** file `/media/orphan.jpg` is referenced in snapshot S7's `canon_data`, but S7's `world_id` is NULL (legacy orphan). **Action:** backfill classifies it. **Assert:** the `(orphan.jpg, S7, NULL)` ref row inserts successfully — the nullable `world_id` permits it (a NOT NULL constraint would have made this insertion impossible and broken the §4.2 orphan promise). The file gets an `unattributed_media_files` row (`protected = true`); the ref row protects it from deletion. Re-verification: the drift cross-check treats NULL-world rows as unowned-but-protected — no false drift, no invented owner.
+8. **Atomicity:** kill -9 the backfill worker between the registry-row INSERT and the ref-row INSERTs (inside the classification transaction).
+9. **Assert:** the transaction rolls back entirely — no registry row, no ref rows, no partial population. Retry completes both atomically. **Half-populated state is impossible.**
 
 ### S51: Deployment flock self-test (rev 17)
 1. **Setup:** fresh deployment (or staging) before serving traffic.
@@ -2265,10 +2434,11 @@ Prerequisite: R1–R7 applied. `lock_timeout = 30s` on all test sessions (bounds
 1. **Setup:** `system_maintenance.active = true` (fence active). For each writer below, attempt the operation and assert the outcome. **No writer may mutate while the fence is active.**
 2. **Action + assert (application writers):** upload Phase-1 → **503** `MAINTENANCE_MODE`; upload Phase-2 commit → **503** (checked in Phase 1; commit aborts); asset delete T1/T2 → **503**; scene/world metadata update → **503**; publish → **503**; world deletion T1 → **503**; replacement T2 → **503**.
 3. **Action + assert (background writers):** expiry-claim worker cycle → no CAS UPDATE executes (aborts at the B6 fenced section; log `maintenance_fence_active`); backfill worker → run does not start / completion aborts; periodic capacity job → cycle skipped; startup recovery → reports `degraded`, retries, does not repair; snapshot GC → n/a (dormant).
-4. **Action + assert (fail-closed):** `DROP TABLE system_maintenance` (simulate failed migration). Repeat step 2's upload attempt.
-5. **Assert:** **503** `MAINTENANCE_MODE` — `is_maintenance_active()` returns true on `undefined_table`. Health = `degraded`; critical alert `SYSTEM_MAINTENANCE_TABLE_MISSING`. **No code path interprets the missing table as "not in maintenance."**
-6. **Action + assert (single path):** grep the implementation for direct `SELECT active FROM system_maintenance` outside `is_maintenance_active()`.
-7. **Assert:** zero occurrences. **Any direct SELECT is a spec violation** (single-check-path rule, rev 16 — B5.1). This assertion is code-review-enforced; steps 2–5 are executable.
+4. **Action + assert (recovery authorization, rev 19 — B3):** with the fence STILL active, the operator establishes a recovery authorization (scope `repair`), verifies writer exclusion (level-1 quiescence, zero active reservations, zero app sessions), then runs `repair` under the authorization. **Assert:** repair mutates (quarantine moves, row fixes) while every normal writer from steps 2–3 remains fenced — the circular dependency is broken WITHOUT lifting the fence. Then: attempt a second concurrent authorization → rejected by the partial unique index. Attempt a normal upload during the authorized repair → still **503** `MAINTENANCE_MODE` (the authorization does not weaken the fence for normal writers). Revoke the authorization → the next repair transaction aborts (zero live authorizations → ROLLBACK).
+5. **Action + assert (fail-closed):** `DROP TABLE system_maintenance` (simulate failed migration). Repeat step 2's upload attempt.
+6. **Assert:** **503** `MAINTENANCE_MODE` — `is_maintenance_active()` returns true on `undefined_table`. Health = `degraded`; critical alert `SYSTEM_MAINTENANCE_TABLE_MISSING`. **No code path interprets the missing table as "not in maintenance."**
+7. **Action + assert (single path):** grep the implementation for direct `SELECT active FROM system_maintenance` outside `is_maintenance_active()`.
+8. **Assert:** zero occurrences. **Any direct SELECT is a spec violation** (single-check-path rule, rev 16 — B5.1; the §4.3d example now uses the wrapper, rev 19 — B7). This assertion is code-review-enforced; steps 2–6 are executable.
 
 ### S56: Serving during unresolved `missing_row` drift (rev 18 — A24)
 1. **Setup:** file `drift.jpg` has a `world_media_assets` row (World W1, `lifecycle='active'`). Snapshot S1's `canon_data` references `/media/drift.jpg`, but `asset_snapshot_references` has NO row for `(drift.jpg, S1)` (protection row missing — the drift). An unresolved `snapshot_ref_drift`/`missing_row` conflict exists for `drift.jpg`.
@@ -2278,6 +2448,44 @@ Prerequisite: R1–R7 applied. `lock_timeout = 30s` on all test sessions (bounds
 5. **Assert:** **409** `ASSET_REFERENCED` — deletion is blocked while the drift conflict is unresolved (fail-safe direction for writes). Reads serve; writes block.
 6. **Action:** operator resolves the drift (re-runs the §4.2 scan under locks 1 → 3 → 5 → 8, INSERTs the missing ref row, marks the conflict resolved).
 7. **Assert:** serving continues to return 200; deletion now follows the normal §4.3b lifecycle (no longer blocked by drift). **The resolution was purely additive — no protection was dropped at any point.**
+
+### S57: Migration failure rolls back cleanly (rev 19 — B1)
+1. **Setup:** a migration applies the `world_media_assets` DDL including the `roles` domain CHECK and the `trg_world_media_assets_roles_unique` trigger (rev 19 — B1: no subquery in CHECK — PostgreSQL would reject the DDL otherwise).
+2. **Action:** simulate a migration failure — e.g., the trigger function has a syntax error, or a data backfill in the same migration violates a constraint.
+3. **Assert:** PostgreSQL rolls back the ENTIRE migration transaction — the table is not created (or not altered), the trigger does not exist without its table, no partial schema remains. **Assert** via `information_schema`: no `world_media_assets` table, no `trg_world_media_assets_roles_unique` trigger.
+4. **Assert:** the migrate step exits non-zero → the Fly release fails → the previous release keeps serving. Health reports `degraded`; a critical alert fires with the migration name and the PostgreSQL error. The operator fixes the cause and re-runs the migration from a clean schema state.
+5. **Assert (positive):** with the corrected DDL, the migration applies cleanly; inserting `roles = '{cover,cover}'` raises `check_violation` from the trigger (not a silent accept); inserting `roles = '{bogus}'` violates the CHECK. Both constraints are enforced, in the inserting transaction, with no subquery anywhere in the DDL.
+
+### S58: NULL-world snapshot reference is protected, servable, drift-repairable (rev 19 — B5)
+1. **Setup:** snapshot S7 exists in `canon_snapshots` with `world_id = NULL` (orphan — legacy data). Its `canon_data` references `/media/orphan.jpg`. File exists on disk. `asset_snapshot_references` has no row for it.
+2. **Action:** backfill classifies `/media/orphan.jpg`: the §4.2 scan finds the URL in S7's `canon_data` (query (b) — orphan enumeration).
+3. **Assert:** the `(orphan.jpg, S7, NULL)` ref row inserts successfully — the nullable `world_id` permits it. The file gets an `unattributed_media_files` row (`protected = true`, `referencing_worlds = []` — no world to name). **Assert:** attempting to delete the file → blocked (409 `ASSET_REFERENCED` — the ref row counts in the scan regardless of NULL `world_id`).
+4. **Action:** request `GET /media/orphan.jpg` with snapshot context S7 (requester authorized for the snapshot).
+5. **Assert:** **200, file served** — serving validates against the snapshot row's persisted state (§4.5); a NULL `world_id` on the ref row does not make the file unservable.
+6. **Action:** delete the ref row manually (simulating drift); run re-verification.
+7. **Assert:** `snapshot_ref_drift`/`missing_row` conflict created; the scan still finds the URL in S7's `canon_data` (ground truth); repair re-inserts `(orphan.jpg, S7, NULL)` additively. **Assert:** at no point was the file deletable while the snapshot referenced it.
+
+### S59: Fence activation invalidates in-flight Phase-2 uploads (rev 19 — B8)
+1. **Setup:** fence inactive. Upload U is mid-Phase-2: reservation in `WRITING`, temp file growing at the deterministic path, writer heartbeating every 2 min, chunks validating under `LOCK_SH`.
+2. **Action:** operator activates the maintenance fence.
+3. **Assert:** the activation transaction atomically set U's reservation to `ROLLED_BACK` (same commit as `active = true`). The writer's next heartbeat `UPDATE ... WHERE released_at IS NULL` affects 0 rows → writer aborts. **Assert:** the writer's next chunk iteration re-validates under `LOCK_SH`, reads the non-active reservation, and aborts BEFORE `write()`.
+4. **Assert (the B8 invariant):** no chunk write begins after the activation commit. Instrument the writer: count `write()` syscalls after the activation timestamp → zero new chunks (at most the single in-flight chunk's `write()` — already inside the syscall when activation committed — completes; the loop then aborts).
+5. **Action:** a NEW upload attempts Phase-1 while the fence is active.
+6. **Assert:** **503** `MAINTENANCE_MODE` — Phase-1's fence check under level-1 fails before any reservation is inserted. The fence needs no cooperation from Phase-2 writers to prevent new work; invalidation handles the in-flight ones.
+7. **Assert (cleanup):** the periodic job finds U's temp file with a `ROLLED_BACK` reservation → unlinks it via the normal cleanup path, logs at info. No orphan, no leaked capacity (the reservation already left the outstanding bucket at invalidation).
+
+### S60: Repair under active fence via recovery authorization (rev 19 — B3)
+1. **Setup:** fence active (`is_maintenance_active()` true). `diagnose` reports an error-level finding: orphan file `/media/orph.jpg` on disk, no row, zero references (confirmed by re-scan).
+2. **Action:** operator runs `repair` WITHOUT establishing a recovery authorization.
+3. **Assert:** repair refuses to start — logs `repair_refused_fence_active`, no mutation. (Pre-rev-19, the only fix was lifting the fence — the circular dependency.)
+4. **Action:** operator establishes a recovery authorization (scope `repair`, reason recorded), verifies writer exclusion: level-1 quiescence = 0 holders, `SELECT count(*) FROM storage_reservations WHERE state IN ('RESERVED','WRITING')` = 0, role-filtered `pg_stat_activity` shows no app sessions. Then runs `repair` under the authorization.
+5. **Assert:** repair moves `/media/orph.jpg` to `.quarantine/` while the fence stays active — every normal writer still 503s. The mutation is logged with the `authorization_id`.
+6. **Action:** while the authorized repair runs, attempt a second recovery authorization (another operator session).
+7. **Assert:** rejected by the partial unique index — recovery is exclusive. The second session cannot mutate.
+8. **Action:** simulate repair failure — kill -9 the repair session mid-quarantine-move.
+9. **Assert:** the in-flight transaction rolls back (file stays in place — moves are path-conditional and idempotent); the fence STAYS active; health stays `degraded`. Normal writes do NOT reopen. Operator establishes a NEW authorization and retries → repair completes idempotently.
+10. **Action:** repair reports zero error-level findings. Operator revokes the authorization, verifies release criteria, lifts the fence.
+11. **Assert:** fence lifts ONLY after revocation + criteria. **At no point was repair able to run without authorization, and at no point did repair failure reopen normal writes.**
 
 ## 7. Risks
 
@@ -2354,8 +2562,8 @@ Recovery must reconcile **both** directions. After any restore: re-run reconcili
    ```
    This closes the window for the case where a writer process is (incorrectly) restarted early: it would read `active=true` and 503. But the PRIMARY protection remains step 4 — no writer process exists to read anything.
 8. **Restore volume.**
-9. **Run reconciliation:** `diagnose` first (read-only assessment), then `repair` if discrepancies found (§9.4). The repair pass is what re-establishes DB↔filesystem consistency.
-10. **Verify per §4.3d release criteria:** zero error-level findings, single-owner invariant holds, no unmanaged/absent-file alerts, no in-progress backfill.
+9. **Run reconciliation under recovery authorization (rev 19 — B3):** `diagnose` first (read-only assessment — needs no authorization). If discrepancies are found, the operator establishes a recovery authorization per the §4.3d protocol (fence already active from step 1; writer-exclusion verified), then runs `repair` under that authorization. The repair pass is what re-establishes DB↔filesystem consistency. On repair failure: the fence stays active, the authorization is revoked or expires, and the operator retries with a new authorization — normal writes never reopen. After repair reports zero error-level findings: revoke the authorization, then proceed to step 10.
+10. **Verify per §4.3d release criteria:** zero error-level findings, single-owner invariant holds, no unmanaged/absent-file alerts, no in-progress backfill. (Criterion 2 is satisfied by the step-9 repair run under recovery authorization.)
 11. **Controlled resumption (rev 15):** start ONE machine. Its startup verification (§4.3d: table exists, row exists, migration version) must pass and health must report `healthy` (or `degraded (maintenance)` with the fence still active — expected). The operator then lifts the fence per the release criteria (`UPDATE system_maintenance SET active = false`), verifies the single machine serves correctly, and only then scales to the normal machine count. At no point is a second writer started before the first is verified.
 
 **Invariant (rev 15 — B5.2):** at no instant is there a running writer process while the fence is not provably active. During steps 4–10, the guarantee is physical (no writer processes exist); the database flag is a secondary tripwire for operator error (early restart). The restore procedure never depends on the database to protect itself mid-replacement.
@@ -2393,7 +2601,7 @@ Reconciliation has two explicitly named modes. The names are used consistently a
 - Row (`active`) without file → log at error, raise data-loss alert. Do NOT set `file_confirmed_present=false` (that is a repair action).
 - Row (`pending_deletion`) without file → log at info. This is the **expected** state after a successful T2 file removal whose row-finalization hasn't run yet — or after a crash between unlink and commit. It is safe to finalize, but `diagnose` does not finalize it.
 
-**`repair`: explicit operator action only.** Started with an explicit `--repair-media` flag (or equivalent operator command). In addition to everything `diagnose` logs, `repair` may:
+**`repair`: explicit operator action only.** Started with an explicit `--repair-media` flag (or equivalent operator command). Entry requirement (rev 19 — B3): the session must EITHER observe the fence inactive (`is_maintenance_active()` false — normal-operation repair), OR hold a valid recovery authorization (established per the §4.3d protocol — fenced repair). Under an active fence with no live authorization, `repair` refuses to start (it does not weaken the fence and does not lift it). In addition to everything `diagnose` logs, `repair` may:
 
 - Set `file_confirmed_present=false` for `active` rows whose file is confirmed missing (releases quota per §5.1 AND raises the data-loss alert — the two consequences are linked, never separated).
 - Finalize `pending_deletion` rows whose file is confirmed absent — **only after a fresh, conclusive zero-reference scan** under the prescribed locks (world row → asset row → scene rows, §4.3c reference-changing class). This is the §4.3b T2 completion that a crash interrupted — expected, not anomalous — but the scan is still required:
@@ -2456,6 +2664,7 @@ This fail-fast behavior is non-negotiable: silently treating a missing mount as 
 - Rev 15 (2026-10-17): ChatGPT rev-14 delta review — remaining gaps. B1.1: durable accounting handoff — `storage_reservations.state` column IS the accounting category; commit/rollback/ENOSPC/abandon transitions are single-transaction state changes (no scan in the handoff); `abandoned_temp_bytes` redefined as durable SUM over ABANDONED rows; periodic scan value demoted to verification/cleanup. B1.2: race-safe expiry claim protocol — epoch counter on heartbeats, 60s observation wait, 120s file-mtime grace, compare-and-swap claim (`WHERE epoch = E1`); writer obligations (0-row heartbeat → abort; chunk-check every 1MB/30s → abort on non-active state); bounded-windows table; live writers never claimed. B1.3: conservation invariant split into (a) DURABLE RESPONSIBILITY (exact, provable from DB state alone) and (b) MEASUREMENT FRESHNESS bound (scan lag ≤ 5 min; overhead reserve is a capacity-planning margin, explicitly NOT an accounting proof). B4.1: full shared-asset contract — per-file serving authorization under the context world's policy (404 on foreign context); `shared_with_worlds` AND `asset_snapshot_references` both block deletion (T1/T2 scans); world-deletion T1 ownership transfer to lowest shared world_id; snapshot-protected transfer to `unattributed_media_files`; atomic share add/remove in metadata-update transactions. B4.2: `asset_snapshot_references` table (publish-populated, retention-cleaned, with design justification); re-verification cross-checks it (`snapshot_ref_drift` conflict); most-recent-snapshot-world-deleted → ownership to next-most-recent. B4.3: ONE canonical total lock order (positions 0–9 covering session/global/quota/world/backfill_runs/conflict/asset/unattributed/snapshot-ref/scene locks); multi-world ascending-`world_id` and multi-row ascending-ID rules; deadlock-freedom Lemma/Theorem; rev-14 no-upgrade rule subsumed as corollary. B5.1: `is_maintenance_active()` fail-closed function contract (returns true on missing row, missing table, any query error, incomplete migration); behavior matrix; startup verification; startup/request-time agreement; no ambiguous path. B5.2: external fencing procedure — stop ALL machines with verified 0-running gate before DB restore; re-assertion demoted to defense-in-depth; controlled single-machine resumption; future multi-machine cutover variant noted. B2 verification: DEFECT FOUND AND FIXED — metadata updates, publish, and replacement T2 MUST hold level 1 for backfill-freeze serialization (rev-14 table contradicted §4.7b's proof; corrected); post-completion mutation coverage enumerated for all 7 mutation types; filesystem/DB crash-boundary interleavings specified. B3 verification: confirmed same `media_global` advisory key in all 8 call sites; lock held for entire operation; read-only vs mutating distinguished; 13-path table (added publish snapshot-ref path) — no changes needed. 47 acceptance scenarios (S1–S47; S43/S44 strengthened, S46 shared-ownership lifecycle + S47 restore fencing new).
 - Rev 16 (2026-10-17): ChatGPT rev-15 delta review — 3 open correctness risks + consistency enforcement. B1.2: fenced writer/expiry coordination — per-chunk `LOCK_SH` validate+write critical section on the deterministic temp path; expiry finalizes only inside `LOCK_EX|LOCK_NB` (non-blocking; `EWOULDBLOCK` = abort cycle); epoch-CAS + 60s observation + 120s mtime retained as liveness evidence; post-abandonment writes ZERO (proven by lock exclusion, S43 steps 18–21); no new state or column; explicit coherent-`flock` deployment assumption with self-test. B4.2: stable identity = `filename` (no FK to registry tables; CASCADE replaced by blocking-before-delete + same-transaction GC cleanup + drift audit); T1 transfer transaction specified exactly (1→2→3→6→8); snapshot serving after transfer via snapshot-row state; three drift conditions with authoritative source (snapshots win) and fail-closed behavior; GC transaction; anti-resurrection guard G3. B4.3: lock-order proof completed against actual DB locking — R1 (job row = position 4), R2 (ORDER BY mandate for multi-row statements), R3 (T5 explicit deletes), R4 (T4 explicit snapshot-ref delete), R5 (attribution locks world row first), R6 (T1 locks new-owner world rows), R7 (backfill writes lock referenced row); Lemmas A–F + Theorem; three competing-transaction demonstrations; Lemma E (session lock). B1.1: state/timestamp CHECK constraints; capacity queries on `state`; commit-transition size semantics + honest DB/filesystem boundary. B4.1: owner-drops-reference eager transfer; reference-lifecycle verification table; serving lookup per registry state. B5.1: single-check-path rule, no-narrowing rule, background-writer contract enumeration. B5.2: role-filtered `pg_stat_activity` session check (verified, procedure already complete). 48 acceptance scenarios (S1–S48; S21 revised, S43/S45/S46/S47 strengthened, S48 new).
 - Rev 17 (2026-10-17): Controlled corrective revision per the rev-16 full adversarial audit (30 findings: 7 CORRECTNESS, 13 CONSISTENCY, 10 COMPLETENESS). Phase 1: A6 (two-domain filesystem-exclusion invariant — Domain L/Domain R); A1 (G3 scoped to new-file registrations, transfers exempt); A2 (backfill populates snapshot refs atomically). Phase 2: A16 (LOCK_EX through COMMIT/ROLLBACK, normative); A17 (safe-open protocol, no O_CREAT, inode identity, rename-window outcome); A18 (writer lock-release ordering). Phase 3: A8 (Phase-1/Phase-2 lock sets); A10 (7 ops added to lock table); A13 (Lemma C restated); A14 (drift-resolution case (d)); A15 (claim lock set + starvation); A22 (snapshot-content stability). Phase 4: A7, A9, A19, A20, A3, A5, A12, A29, A4/A23 (GC dormant in MVP). Phase 5: S49–S52 new; S43 extended; A24 (serving during drift). 52 acceptance scenarios (S1–S52). Design Gate REMAINS CLOSED — a fresh full-document adversarial audit will follow before the gate is reconsidered. No implementation authorized.
+- Rev 19 (2026-10-18): Corrective revision per the rev-18 full-document review (8 findings B1–B8). B3 FIRST (governing decision): new **recovery authorization protocol** in §4.3d — a durable `recovery_authorizations` table (scope/reason/expiry, at-most-one-live by partial unique index), a 7-step establishment protocol (fence must be active; operator authorization; writer-exclusion verification as proof, not a flag; per-transaction level-1 + authorization assertion; closed allowlist of permitted operations; failure keeps the fence active and health degraded; revocation before release), reconciliation with Domain R (no live reservation can exist post-activation — B8; recovery file mutations never address paths with live reservations), level-0 (world-deletion recovery not in the allowlist, untouched), level-1 (recovery transactions acquire canonically), and §9.2 (restore runs repair under authorization — the circular dependency is resolved without lifting the fence). Release criterion 2 revised. §9.4 repair entry requirement: fence inactive OR valid recovery authorization. B1: `roles` subquery CHECK replaced — domain stays in CHECK (`<@`), intra-array uniqueness moves to a BEFORE INSERT/UPDATE trigger (`check_roles_unique`, raises `check_violation`); migration atomicity documented; DDL is executable PostgreSQL. B2: authoritative quota formula is now `registered_usage + outstanding_reservations`; atomic reservation→registry handoff in one commit (no double-count, no gap); §5.1 table + Phase-1 step 4 updated. B4: new `backfill_inventory_files` manifest table + `backfill_run_id` on both registry tables + `failure_reason` on `backfill_runs`; reconciliation rewritten as executable set-equality queries in both directions (placeholders withdrawn). B5: `asset_snapshot_references.world_id` nullable — orphan snapshots get `(filename, snapshot_id, NULL)` ref rows; protection stays filename-keyed. B6: 422 `ASSET_WRONG_WORLD` on reference validation fully superseded — the code exists only as 403 endpoint authorization; S18 asserts the success path. B7: §4.3d example writer transaction uses `is_maintenance_active()` (single-check-path rule; S47 re-assertion fixed likewise). B8: fence activation atomically invalidates in-flight Phase-2 reservations (`→ ROLLED_BACK`); heartbeat/chunk re-validation aborts writers; at most one in-flight chunk completes post-activation; drain-wait rejected (unbounded). Scenarios: S5 rewritten (45/50/4+4 interleaving, exactly one upload proceeds, atomic handoff); S18 +B6 assert; S30–S32 executable reconciliation; S47 +B3/B8/B7 (invalidation, wrapper re-assertion, authorized repair in restore); S50 +B5 orphan-snapshot case; S55 +B3 recovery-authorization path (step 4); new S57 (migration failure rollback), S58 (NULL-world snapshot), S59 (fence invalidation), S60 (repair under active fence; failure keeps fence). 60 acceptance scenarios (S1–S60). Design Gate REMAINS CLOSED — a fresh full-document adversarial audit must pass before the gate is reconsidered. No implementation authorized.
 - Rev 18 (2026-10-17): Targeted corrective revision per the rev-17 full adversarial audit (14 findings B1–B14). Phase 1 (correctness): B1 — §4.3d mutation table row 1 corrected to Domain R (no level-1 for Phase-2 chunk writes); B8 — backfill classification SQL sequence pinned normatively (G3 check BEFORE registry INSERT and BEFORE first ref-row INSERT; order 1 → 3 → (6 or 7) → 8); B9 — path-vanished CAS corrected (claim columns stay NULL for ROLLED_BACK per CHECK constraint); B6 — expiry-claim protocol steps 5d/5e/5f acquire level-1 and call is_maintenance_active() per the background-writer rule. Phase 2 (proof/coverage): B2 — S26 scoped to Domain L; new S53 (Domain-R exclusion); B10 — DESIGN DECISION: T4 lock order changed 6→8→7 to 6→7→8 (strictly ascending; no semantic dependency prevents it); all T4 tables reconciled; new S54 (attribution atomicity), S55 (maintenance-fence single check path), S56 (serving during unresolved drift); lock-proof assumptions (i)–(v) explicit in-document. Phase 3 (consistency): B3 (Domain-L qualification), B4 (history reordered), B5 (GC dormant in writer list), B7 (S52 static check), B11 (quota paragraph rewritten), B12 (S49 phase split), B13 (S52 claim-side executable + path-absent), B14 (proof hygiene: Lemma D, repair row, level-0 naming, Lemma A inventory, Delete T1/T2 position-8, R2 GC note, analysis (a) sequence). 56 acceptance scenarios (S1–S56). Design Gate REMAINS CLOSED — a fresh full-document adversarial audit must pass before the gate is reconsidered. No implementation authorized.
 - Post-packet clarification (2026-10-18): S54/R5 lock-order annotation — the attribution listing `1 → 3 → 7 → 6` is statement order; the *blocking* acquisition sequence is 1 → 3 → 7 (strictly ascending per E1) because the trailing INSERT is a non-blocking new-row insert per Lemma A. Annotated in R5, the §4.3c table (`6*` footnote), Lemma C, and S54 step 5. No design change; no new revision.
 
