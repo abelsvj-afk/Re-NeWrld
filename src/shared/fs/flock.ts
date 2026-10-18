@@ -22,6 +22,44 @@ export class FlockError extends Error {
   }
 }
 
+/**
+ * Typed lock-failure contract (RES-1c B2).
+ *
+ * Callers MUST distinguish these — do not catch generic FlockError
+ * and infer the cause from message text.
+ */
+export class LockContentionError extends FlockError {
+  /** The lock is verified held by another process. Safe to skip/retry. */
+  constructor(path: string) {
+    super(`Lock contention: ${path} is held by another process`);
+    this.name = 'LockContentionError';
+  }
+}
+
+export class LockVerificationError extends FlockError {
+  /** Could not verify lock state (/proc unavailable, stat failed, etc.). Fail closed. */
+  constructor(message: string) {
+    super(`Lock verification failed: ${message}`);
+    this.name = 'LockVerificationError';
+  }
+}
+
+export class LockSpawnError extends FlockError {
+  /** The flock binary could not be spawned. Deployment bug — fail closed. */
+  constructor(message: string) {
+    super(`Failed to spawn flock: ${message}`);
+    this.name = 'LockSpawnError';
+  }
+}
+
+export class LockTimeoutError extends FlockError {
+  /** Blocking lock acquisition timed out. Caller decides: retry or fail. */
+  constructor(path: string, timeoutMs: number) {
+    super(`Timeout waiting for lock acquisition on ${path} (${timeoutMs}ms)`);
+    this.name = 'LockTimeoutError';
+  }
+}
+
 export interface LockHandle {
   /** The child process holding the lock. Kill to release. */
   process: ChildProcess;
@@ -63,7 +101,7 @@ async function verifyLockHeld(pid: number, targetPath: string): Promise<boolean>
     targetDev = st.dev;
     targetIno = st.ino;
   } catch (err) {
-    throw new FlockError(`Cannot stat target ${targetPath}: ${(err as Error).message}`);
+    throw new LockVerificationError(`cannot stat target ${targetPath}: ${(err as Error).message}`);
   }
 
   // Step 2: Check the process's open FDs via fstat on /proc/<pid>/fd/<n>.
@@ -86,8 +124,8 @@ async function verifyLockHeld(pid: number, targetPath: string): Promise<boolean>
     }
   } catch (err) {
     // Cannot read /proc/<pid>/fd → fail closed. Do NOT fall back to true.
-    throw new FlockError(
-      `Cannot verify open FDs for pid ${pid}: ${(err as Error).message}; failing closed`
+    throw new LockVerificationError(
+      `cannot verify open FDs for pid ${pid}: ${(err as Error).message}`
     );
   }
 
@@ -122,7 +160,7 @@ async function verifyLockHeld(pid: number, targetPath: string): Promise<boolean>
       }
     }
   } catch (err) {
-    throw new FlockError(`/proc/locks unavailable: ${(err as Error).message}; failing closed`);
+    throw new LockVerificationError(`/proc/locks unavailable: ${(err as Error).message}`);
   }
 
   return false;
@@ -151,6 +189,7 @@ async function waitForLock(
   pid: number,
   targetPath: string,
   timeoutMs: number,
+  nonBlocking: boolean,
 ): Promise<void> {
   const start = Date.now();
   const pollInterval = 50;
@@ -158,8 +197,14 @@ async function waitForLock(
   while (Date.now() - start < timeoutMs) {
     // Check if process exited.
     if (child.exitCode !== null || child.signalCode !== null) {
-      throw new FlockError(
-        `flock process exited with code ${child.exitCode} before acquiring lock (already locked)`,
+      if (nonBlocking) {
+        // Non-blocking `flock -n` exits immediately with non-zero when
+        // the lock is held. This is CONFIRMED contention (not inference).
+        throw new LockContentionError(targetPath);
+      }
+      // Blocking mode: unexpected exit means the lock was never acquired.
+      throw new LockVerificationError(
+        `flock process exited with code ${child.exitCode} before acquiring lock on ${targetPath}`,
       );
     }
 
@@ -172,13 +217,16 @@ async function waitForLock(
 
   // Timeout: kill the waiter and throw.
   child.kill('SIGKILL');
-  throw new FlockError(`Timeout waiting for lock acquisition on ${targetPath} (${timeoutMs}ms)`);
+  throw new LockTimeoutError(targetPath, timeoutMs);
 }
 
 /**
  * Acquires an exclusive non-blocking lock on a path.
  *
- * @throws FlockError if the lock is already held.
+ * @throws LockContentionError if the lock is verified held by another process.
+ * @throws LockVerificationError if lock state cannot be verified (fail closed).
+ * @throws LockSpawnError if the flock binary cannot be spawned.
+ * @throws LockTimeoutError if verification times out.
  */
 export async function acquireExclusiveNonBlocking(path: string): Promise<LockHandle> {
   const fileStat = await stat(path).catch(async () => {
@@ -205,7 +253,7 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
       spawnErrorPromise,
       new Promise<null>((r) => setTimeout(() => r(null), 100)),
     ]);
-    throw new FlockError(`Failed to spawn flock: ${err?.message ?? 'unknown'}`);
+    throw new LockSpawnError(err?.message ?? 'unknown');
   }
 
   // Check for async spawn error (e.g., ENOENT for missing binary).
@@ -214,13 +262,13 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
     new Promise<null>((r) => setTimeout(() => r(null), 50)),
   ]);
   if (spawnError) {
-    throw new FlockError(`Failed to spawn flock: ${spawnError.message}`);
+    throw new LockSpawnError(spawnError.message);
   }
 
   try {
     // For non-blocking, the process exits immediately if locked.
     // Wait for lock confirmation with a short timeout.
-    await waitForLock(child, pid, path, 2000);
+    await waitForLock(child, pid, path, 2000, true);  // non-blocking → contention is explicit
   } catch (err) {
     // Ensure child is dead.
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
@@ -251,7 +299,7 @@ export async function acquireShared(path: string, timeoutMs: number = 10000): Pr
       spawnErrorPromise,
       new Promise<null>((r) => setTimeout(() => r(null), 100)),
     ]);
-    throw new FlockError(`Failed to spawn flock: ${err?.message ?? 'unknown'}`);
+    throw new LockSpawnError(err?.message ?? 'unknown');
   }
 
   const spawnError = await Promise.race([
@@ -259,12 +307,12 @@ export async function acquireShared(path: string, timeoutMs: number = 10000): Pr
     new Promise<null>((r) => setTimeout(() => r(null), 50)),
   ]);
   if (spawnError) {
-    throw new FlockError(`Failed to spawn flock: ${spawnError.message}`);
+    throw new LockSpawnError(spawnError.message);
   }
 
   try {
     // Wait for the lock to actually be acquired (not just process alive).
-    await waitForLock(child, pid, path, timeoutMs);
+    await waitForLock(child, pid, path, timeoutMs, false);
   } catch (err) {
     try { child.kill('SIGKILL'); } catch { /* ignore */ }
     throw err;

@@ -19,7 +19,7 @@ import type pkg from 'pg';
 import {
   acquireExclusiveNonBlocking,
   releaseLock,
-  FlockError,
+  LockContentionError,
 } from '../../../../shared/fs/flock.js';
 import { lockPathFor } from './phase2-writer.service.js';
 
@@ -135,10 +135,12 @@ async function cleanupOne(
   try {
     ownershipLock = await acquireExclusiveNonBlocking(lockPath);
   } catch (err) {
-    if (err instanceof FlockError) {
+    if (err instanceof LockContentionError) {
       deps.log('info', 'Cleanup skipped: writer active', { reservationId });
       return; // Skip this cycle; retry next cycle.
     }
+    // Non-contention failures (verification, spawn, timeout) are NOT
+    // "writer active". Re-throw to fail closed.
     throw err;
   }
 
@@ -280,7 +282,7 @@ async function retryPendingFsync(
   try {
     ownershipLock = await acquireExclusiveNonBlocking(lockPath);
   } catch (err) {
-    if (err instanceof FlockError) {
+    if (err instanceof LockContentionError) {
       deps.log('info', 'Pending fsync skipped: writer active', { reservationId });
       return;
     }

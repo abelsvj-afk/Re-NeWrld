@@ -1,6 +1,6 @@
 # RES-1c Design: Expiry Claim Worker
 
-**Status:** DRAFT rev 2 — for review (addresses B1–B5 from rev 1 review)
+**Status:** DRAFT rev 3 — for review (addresses B2: typed lock-error contract)
 **Scope:** Expiry-claim worker per ADR-017 §5.5. Does NOT include the Phase-2 writer (RES-1b), the registry handoff (QUOTA-1), or the abandoned-temp cleanup job (covered by RES-1b §1.6e).
 **Depends on:** RES-1b (ownership lock protocol, `flock.ts`, deterministic temp paths). RES-1c is serial after RES-1b because the claim must acquire the writer-side ownership lock.
 
@@ -47,12 +47,36 @@ For each candidate (discovery transaction already committed):
 1. **Read epoch:** `E1 = epoch` from the discovery SELECT.
 2. **Acquire ownership lock:** `acquireExclusiveNonBlocking(lockPathFor(mediaRoot, reservation_id))`.
    - The lockfile path is deterministic: `/data/media/.tmp/{reservation_id}.lock` (RES-1b §1.1).
-   - **B2 — Distinguish lock-busy from other failures:**
-     - If acquisition fails with **confirmed contention** (lock verified held by another process via `/proc/locks`) → a writer is alive → **skip** candidate, move to next. This is the only case that means "writer is alive."
-     - If acquisition fails with **verification failure** (`/proc` unavailable, device/inode mismatch, stat error) → **fail closed**: log `error` with `reservation_id`, increment `expiry_claim_errors_total`, do NOT skip silently, do NOT claim. The candidate remains for the next tick.
-     - If acquisition fails with **filesystem error** (permission denied, I/O error) → same as above: fail closed, operational alert.
-     - If the `flock` binary is missing → `FlockError` on spawn → fail closed (this is a deployment bug, not contention).
-   - Rationale: Treating every `FlockError` as "writer alive" would silently protect reservations that are actually orphaned but unclaimable due to infrastructure failure. That hides the problem.
+   - **B2 — Typed lock-error contract** (`src/shared/fs/flock.ts`):
+     The helper exposes a typed error hierarchy. Callers match on the class, never on message text.
+     ```typescript
+     export class FlockError extends Error {}                    // base
+     export class LockContentionError extends FlockError {}       // verified held by another process
+     export class LockVerificationError extends FlockError {}     // /proc unavailable, stat failed, etc.
+     export class LockSpawnError extends FlockError {}            // flock binary missing/failed
+     export class LockTimeoutError extends FlockError {}          // blocking acquire timed out
+     ```
+     - `acquireExclusiveNonBlocking()` throws `LockContentionError` **only** when `flock -n` exits immediately (kernel-confirmed contention). This is not inferred — it is the kernel's own signal.
+     - `LockVerificationError` → **fail closed**: log `error` with `reservation_id`, increment `expiry_claim_errors_total`, do NOT skip silently, do NOT claim. Candidate remains for next tick.
+     - `LockSpawnError` → fail closed (deployment bug, not contention).
+     - `LockTimeoutError` → only from blocking acquires; the claim uses non-blocking, so this indicates a bug if seen.
+     - Worker handling:
+     ```typescript
+     try {
+       lock = await acquireExclusiveNonBlocking(lockPath);
+     } catch (err) {
+       if (err instanceof LockContentionError) {
+         // Confirmed: writer alive → skip candidate.
+         metrics.expiry_claim_skips_total.inc({ reason: 'lock_held' });
+         continue;
+       }
+       // All other lock errors: fail closed, operational alert.
+       log('error', 'Expiry claim lock failure', { reservationId, error: err.message });
+       metrics.expiry_claim_errors_total.inc();
+       continue; // Do not claim; retry next tick.
+     }
+     ```
+   - Rationale: Treating every `FlockError` as "writer alive" would silently protect reservations that are actually orphaned but unclaimable due to infrastructure failure.
 3. **Compare-and-swap finalize** (single transaction, opened here, committed immediately):
    ```sql
    BEGIN;

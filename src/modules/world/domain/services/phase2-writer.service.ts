@@ -15,7 +15,7 @@ import {
   acquireExclusiveNonBlocking,
   acquireShared,
   releaseLock,
-  FlockError,
+  LockContentionError,
   type LockHandle,
 } from '../../../../shared/fs/flock.js';
 
@@ -126,13 +126,15 @@ export async function openWriterSession(
   try {
     ownershipLock = await acquireExclusiveNonBlocking(lockPath);
   } catch (err) {
-    if (err instanceof FlockError) {
+    if (err instanceof LockContentionError) {
       await lockFd.close();
       throw new Phase2WriterError(
         'WRITER_CONFLICT',
         `Reservation ${reservationId} already owned by another writer`,
       );
     }
+    // Verification, spawn, or timeout failures are NOT contention.
+    // Fail closed — do not treat as "another writer".
     throw err;
   }
   // Close the Node fd; the flock child process holds the lock via its own fd.
