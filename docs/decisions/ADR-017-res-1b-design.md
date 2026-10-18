@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 20 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 21 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -371,18 +371,44 @@ ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMP
    - Release lock.
 4. The fsync on the directory is valid even when no specific temp file exists — it ensures all prior directory operations are durable.
 
-**Alert resolution rule (rev 17 — independent per failure_type):**
-- `TEMP_CLEANUP_FAILED` fires independently for each failure type:
-  - `failure_type='unlink'` when `temp_cleanup_unlink_attempts >= 5`.
-  - `failure_type='fsync'` when `temp_cleanup_fsync_attempts >= 5`.
-- Each alert clears independently when its operation succeeds:
-  - Unlink alert clears when `unlink()` succeeds → `temp_cleanup_unlink_attempts` reset to 0. The fsync counter is unaffected.
-  - Fsync alert clears when `fsync()` succeeds → `temp_cleanup_fsync_attempts` reset to 0 and marker cleared. The unlink counter is unaffected.
-- An unlink alert MUST NOT remain active merely because fsync is still failing, and vice versa. The alert state accurately reflects which operation has recovered.
-- The alert does NOT clear on manual acknowledgment alone — the underlying operation must succeed. This prevents operators from dismissing a persistent storage issue.
-- Alert firing: once when the counter first reaches 5, then again at 10, 15, ... (every 5 consecutive failures). Not on every cycle while >= 5 (avoids spam).
-- Escalation: if EITHER counter reaches 15 (3 alert cycles) → escalate to `TEMP_CLEANUP_PERSISTENT_FAILURE` (critical) with the specific `failure_type`. Each counter escalates independently.
-- **Example sequence:** unlink fails 5x → unlink alert fires. Unlink succeeds on 6th → unlink_attempts=0 → unlink alert clears. Fsync then fails 5x → fsync alert fires. The unlink alert remains cleared; only the fsync alert is active.
+**Alert lifecycle (rev 21 — complete contract):**
+
+**Alert identity:** Each alert is uniquely identified by `(reservation_id, failure_type)`. The two failure types ('unlink', 'fsync') have fully independent lifecycles. An alert for one type never affects the other.
+
+**Incident model:** Each `(reservation_id, failure_type)` alert follows an incident lifecycle:
+- **Inactive:** Counter < 5. No alert.
+- **Active:** Counter >= 5. Alert fired. The incident is "open."
+- **Resolved:** Counter reset to 0 via operation success. The incident is "closed."
+- **Recurrence:** After resolution, if the counter reaches 5 again → new incident (new alert). The previous incident's history does not carry over.
+
+**Firing rules:**
+- First fire when counter reaches 5.
+- Re-fire at 10, 15, 20, ... (every 5 consecutive failures) while the incident remains open. This ensures ongoing visibility for persistent failures without spamming every cycle.
+- Each fire includes: `reservation_id`, `failure_type`, `attempt_count`, `last_errno`, `incident_id` (UUID generated at first fire, preserved across re-fires of the same incident).
+
+**Resolution rules:**
+- Unlink alert resolves when `unlink()` succeeds OR temp absence is observed (ENOENT) → `temp_cleanup_unlink_attempts` reset to 0.
+- Fsync alert resolves when `fsync()` succeeds → `temp_cleanup_fsync_attempts` reset to 0 and marker cleared.
+- Resolution is automatic and immediate upon the successful operation. No manual action required or sufficient.
+- Manual acknowledgment (operator marking "seen") does NOT resolve the alert. It suppresses notifications but the incident remains open until the operation succeeds. This prevents dismissing a persistent storage issue.
+
+**Recurrence rules:**
+- After resolution (counter reset to 0), the incident is closed.
+- If failures recur and the counter reaches 5 again → new incident with new `incident_id`. Escalation state resets (see below).
+- The new incident is independent; it does not "resume" the old incident's escalation level.
+
+**Escalation:**
+- If a single incident's counter reaches 15 (3rd fire: at 5, 10, 15) → escalate to `TEMP_CLEANUP_PERSISTENT_FAILURE` (critical) with the same `incident_id` and `failure_type`.
+- Escalation is per-incident. If the incident resolves and a new incident begins later, escalation starts over (fires at 5, escalates at 15 of the new incident).
+- The critical alert clears when the underlying operation succeeds (same as the warning alert). There is no separate critical-resolution path.
+
+**Example — full lifecycle:**
+1. Unlink fails 5x → incident U1 opens (warning, `failure_type='unlink'`, `incident_id=aaa`).
+2. Unlink fails 5 more (total 10) → U1 re-fires (still warning).
+3. Unlink fails 5 more (total 15) → U1 escalates to critical.
+4. Unlink succeeds → `unlink_attempts=0` → U1 resolves (both warning and critical clear).
+5. Later, unlink fails 5x again → new incident U2 opens (warning, `incident_id=bbb`, NOT escalated). The prior escalation does not carry over.
+6. Meanwhile, fsync fails 5x → incident F1 opens (`failure_type='fsync'`, `incident_id=ccc`). Independent of U1/U2.
 
 **Why this works:**
 - The retry state is in the database, surviving process restarts and crashes.
@@ -701,6 +727,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Counter reset isolation (rev 18) — fsync success resets only fsync counter; unlink counter resets only on unlink success/ENOENT; stale manual-clear text removed.
 - [x] Marker-counter separation (rev 19) — marker write never touches counters; pending recovery applies ENOENT reset consistently; fsync affects only fsync counter.
 - [x] Test consistency (rev 20) — §6.21 rewritten to match rev 19; no contradictory marker-reset language remains.
+- [x] Complete alert lifecycle (rev 21) — identity per (reservation_id, failure_type); incident model with resolution/recurrence; escalation resets on new incident; manual ack never resolves.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -840,3 +867,12 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** `unlink_attempts=0` (reset by absence), `fsync_attempts` incremented (from prior value). Marker remains set. The fsync failure did NOT re-increment the unlink counter.
 - **Restart preserves history:** Setup: `pending=TRUE`, `unlink_attempts=4`. Crash. Restart. Recovery finds marker.
 - **Assert:** `unlink_attempts` still 4 (not reset by marker rewrite, not reset by restart). The history survives until unlink succeeds or ENOENT is observed.
+
+### 6.26 Alert lifecycle regression (new, rev 21)
+- **Setup:** ACTIVE asset. Simulate unlink failures.
+- **Incident opens:** After 5 failures, assert alert fires with `failure_type='unlink'`, `incident_id` generated (UUID). `unlink_attempts=5`.
+- **Re-fire:** After 10 failures, assert alert re-fires with SAME `incident_id` (same incident). After 15 failures, assert escalation to critical with SAME `incident_id`.
+- **Resolution:** Fix issue. Unlink succeeds. Assert `unlink_attempts=0`. Both warning and critical alerts clear. Incident closed.
+- **Recurrence:** Later, unlink fails 5 times again. Assert NEW alert fires with DIFFERENT `incident_id`. NOT escalated (starts at warning). The prior escalation does not carry over.
+- **Independent types:** During the second unlink incident, simulate fsync failures reaching 5. Assert fsync alert fires with `failure_type='fsync'` and its own `incident_id`. The unlink incident is unaffected. Two independent open incidents.
+- **Manual ack does not resolve:** Acknowledge the unlink alert (operator marks seen). Assert incident remains open (`unlink_attempts` still >= 5). The alert is suppressed for notifications but NOT resolved. Only a successful unlink resolves it.
