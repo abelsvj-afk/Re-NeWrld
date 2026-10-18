@@ -1,11 +1,11 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 5 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 6 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
 
-**Rev 5 changes:** (1) File identity via content digest (SHA-256) — EEXIST with different inode requires digest match; size/metadata alone insufficient. Fail closed if identity unprovable. (2) Startup recovery uses identical verification rules as normal publication — no shortcut to ACTIVE. (3) Explicit filesystem requirements: same-filesystem for temp/final, directory sync ordering, crash boundaries for link/unlink durability.
+**Rev 6 changes:** (1) Authoritative durability order: link → fsync(final_dir) → unlink → fsync(temp_dir); no exceptions. (2) Nested mount detection: startup scans for mounts under media root; per-publication st_dev check on actual destination. (3) Stale tests updated: link/unlink terminology, digest verification, permanent lockfiles.
 
 ---
 
@@ -126,8 +126,9 @@ UPDATE storage_reservations
          - If digests differ, or no digest was recorded → **fail closed**: do NOT activate, do NOT modify the destination. Mark asset as `PUBLICATION_IDENTITY_UNVERIFIED`, alert for manual reconciliation. The file remains untouched.
        - **Size matching is explicitly insufficient.** An unrelated file can have the same size. Reservation metadata alone does not prove the destination contains this reservation's bytes. Only inode equality or content-digest match establishes identity.
    
-   8b. `unlink(temp_path)` — remove the temp directory entry. The file now exists only at `final_path`. (If `unlink` fails with ENOENT → another attempt already unlinked it → proceed; idempotent.)
-9. `fsync` the destination directory.
+   8b. `fsync(final_dir_fd)` — **MUST complete before step 8c.** This makes the link durable. Removing the temp entry before the final entry is durably recorded could lose the file on crash.
+   8c. `unlink(temp_path)` — remove the temp directory entry. The file now exists only at `final_path`. (If `unlink` fails with ENOENT → another attempt already unlinked it → proceed; idempotent.)
+   8d. `fsync(temp_dir_fd)` — ensures the unlink is durable. **Always issued**, even if `temp_dir` and `final_dir` are the same directory (compare by `st_dev`+`st_ino`, not path strings). No "single fsync suffices" exception: the link must be durable (8b) before the temp entry is removed (8c).
 
 **Why link() not rename():** `rename()` silently replaces an existing destination. If a previous publication attempt crashed after rename but before activation, a retry with `rename()` would overwrite the already-published file. `link()` + `unlink()` achieves the same effect (file appears at final path, temp entry removed) but fails safely if the destination exists. The verification step (8a) distinguishes idempotent retry from genuine collision.
 
@@ -136,16 +137,21 @@ UPDATE storage_reservations
 **Same-filesystem requirement:**
 - The temp directory (`/data/media/.tmp/`) and all final destination directories MUST reside on the same filesystem.
 - `link()` fails with `EXDEV` if source and destination are on different filesystems. This is a hard requirement, not a fallback case.
-- **Startup check:** On server startup, verify via `stat()` that `st_dev` is identical for the temp directory and the media root. If different → refuse to start with `FILESYSTEM_SPLIT` error. Log at critical.
-- **Rationale:** Our deployment uses a single volume at `/data`, so this holds. The check prevents silent misconfiguration if the mount topology changes.
+- **Startup check (two parts):**
+  1. **Nested mount detection:** Scan `/proc/mounts` (or equivalent) for any mount points under the media root (`/data/media/`). If any nested mount exists → refuse to start with `NESTED_MOUNT_DETECTED` error. Log at critical with the mount path. Rationale: a nested mount could place a destination directory on a different filesystem even if the media root matches the temp directory.
+  2. **Device verification:** Verify via `stat()` that `st_dev` is identical for the temp directory and the media root. If different → refuse to start with `FILESYSTEM_SPLIT` error. Log at critical.
+- **Per-publication check (defense in depth):** In Phase B, before `link()`, `stat()` the actual destination directory and compare its `st_dev` with the temp directory's `st_dev`. If different → abort publication, mark `PUBLICATION_FAILED`, alert `FILESYSTEM_SPLIT`. This catches a mount change that occurred after startup.
+- **Rationale:** Our deployment uses a single volume at `/data`, so this holds. The checks prevent silent misconfiguration if the mount topology changes.
+- **Runtime EXDEV:** Retained regardless. If `link()` returns EXDEV despite the checks → log at critical, mark `PUBLICATION_FAILED`, alert. Do NOT fall back to copy.
 
-**Directory sync ordering (crash durability):**
-The `link()` + `unlink()` sequence requires careful directory syncing for crash safety:
+**Directory sync ordering (crash durability) — AUTHORITATIVE:**
+The `link()` + `unlink()` sequence has exactly one valid order. No exceptions, no optimizations:
 1. `link(temp_path, final_path)` — creates the directory entry.
-2. `fsync(final_dir_fd)` — ensures the link is durable. **Critical:** without this, a crash could lose the link even though `link()` returned success.
-3. `unlink(temp_path)` — removes the temp directory entry.
-4. `fsync(temp_dir_fd)` — ensures the unlink is durable. **Required even if `temp_dir == final_dir`:** if they are the same directory, a single fsync after both operations suffices, but the code MUST handle the general case where they differ.
-5. If `temp_dir == final_dir`: `fsync` once after step 3 covers both. The implementation MUST still issue the fsync (do not optimize it away based on path comparison — compare `st_dev`+`st_ino` of the directories, not path strings).
+2. `fsync(final_dir_fd)` — ensures the link is durable. **MUST complete before step 3.** Without this, a crash could lose the final entry after the temp entry is removed.
+3. `unlink(temp_path)` — removes the temp directory entry. **MUST NOT execute before step 2 completes.**
+4. `fsync(temp_dir_fd)` — ensures the unlink is durable. **Always issued.** If `temp_dir` and `final_dir` are the same directory (verified by `st_dev`+`st_ino`, not path strings), this is a second fsync on the same fd — still required, not optional.
+
+**Rationale for no exceptions:** The "single fsync after both operations" optimization is UNSAFE. If we do link → unlink → fsync (once), a crash after unlink but before fsync loses both the link and the unlink — the file may exist at neither path durably. The authoritative order guarantees: after step 2, the file is durably at `final_path` regardless of what happens next.
 
 **Crash boundaries for link/unlink durability:**
 | Crash point | Durable state | Recovery behavior |
@@ -441,10 +447,12 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - Assert: zero bytes are written post-finalization.
 - This test proves the heartbeat alone does not authorize writes.
 
-### 6.8 Crash-safe publication (new, rev 2)
-- **Crash after Phase A COMMIT, before Phase B:** Kill the writer after the DB transaction commits but before the rename. Assert: asset row exists with `PENDING`, reservation is `COMMITTED`, temp file exists. Restart → startup scan finds PENDING asset with temp file → completes rename → marks ACTIVE. Assert: file at final path, asset ACTIVE, no orphan.
-- **Crash during Phase B (rename):** Kill mid-rename (or simulate by manually placing file at final path with PENDING asset). Assert: startup scan detects file at final path → marks ACTIVE without re-renaming.
-- **Crash after Phase B, before Phase C:** File at final path, asset PENDING. Assert: startup scan marks ACTIVE. Assert: no duplicate file, no re-rename.
+### 6.8 Crash-safe publication (rev 6 updated)
+- **Crash after Phase A COMMIT, before Phase B:** Kill the writer after the DB transaction commits but before the link. Assert: asset row exists with `PENDING`, reservation is `COMMITTED`, temp file exists. Restart → startup scan finds PENDING asset with temp file → executes link → fsync → unlink → fsync → marks ACTIVE. Assert: file at final path, asset ACTIVE, no orphan.
+- **Crash during Phase B (after link, before fsync):** Kill after `link()` returns but before `fsync(final_dir)`. Assert: recovery checks final_path. If link was durable → verify identity (inode or digest) → unlink temp → mark ACTIVE. If not durable → retry link. No data loss.
+- **Crash during Phase B (after fsync, before unlink):** Kill after `fsync(final_dir)` but before `unlink(temp)`. Assert: temp and final are same inode → unlink temp → mark ACTIVE.
+- **Crash after Phase B, before Phase C:** File at final path (temp unlinked), asset PENDING with digest. Assert: recovery verifies identity via digest (temp gone, cannot use inode) → marks ACTIVE. Assert: no duplicate file.
+- **Crash after Phase B, identity unverifiable:** File at final path, asset PENDING, but digest is NULL or mismatches. Assert: recovery does NOT mark ACTIVE. Marks `PUBLICATION_IDENTITY_UNVERIFIED`, alerts. File untouched.
 - **Temp lost:** PENDING asset with neither temp nor final file exists. Assert: marked `PUBLICATION_FAILED`, alert fires, no silent data loss.
 - **Reader isolation:** During the PENDING window (after Phase A, before Phase C), assert that the serving layer does not return the asset (filtered by `publication_status`).
 
@@ -452,7 +460,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Race to acquire:** Two writers attempt to open the same reservation_id concurrently. Assert: exactly one acquires the ownership lock (`LOCK_EX|LOCK_NB`); the other gets `EWOULDBLOCK` → aborts with `WRITER_CONFLICT` without opening the data file or writing any bytes.
 - **Crash releases ownership:** Writer acquires ownership lock, then crashes (kill -9). Assert: kernel releases the lock. A new writer can acquire ownership for the same reservation (after validating the reservation is still active).
 - **Stale worker:** Writer holds ownership lock; reservation is claimed (ABANDONED) by the expiry worker. A restarted worker validates state → sees ABANDONED → does NOT acquire the lock, does NOT write. Assert: no bytes written to the abandoned temp file.
-- **Lockfile cleanup:** After successful commit, assert the `.lock` file is removed along with the temp file. After abandoned-temp cleanup, assert the `.lock` file is also removed.
+- **Lockfile permanence:** After successful commit, assert the `.lock` file STILL EXISTS on disk (not removed). After abandoned-temp cleanup, assert the `.lock` file STILL EXISTS. Normal operations never unlink lockfiles (rev 4 invariant).
 
 ### 6.10 Concurrent recovery (new, rev 3)
 - **Setup:** Create a PENDING asset (simulate crash after Phase A). Start two recovery workers simultaneously.
@@ -497,13 +505,16 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Crash-safe publication protocol defined (rev 2, §1.6) — rename not in DB transaction; PENDING/ACTIVE with DB-driven recovery.
 - [x] Single-writer ownership mechanism defined (rev 2, §1.1a) — dedicated lockfile, kernel release on crash, restarted-worker rules.
 - [x] Recovery ownership protocol defined (rev 3, §1.6a) — recovery workers must acquire ownership lock; prevents recovery/recovery and recovery/writer races.
-- [x] Lockfile cleanup inode safety defined (rev 3, §1.1b) — unlink only while holding the lock + inode verification.
+- [x] Permanent lockfiles (rev 4, §1.1a/§1.1b) — never unlinked in normal ops; only kernel lock released. (Rev 3 unlink protocol superseded.)
 - [x] Lock lifecycle clarified (rev 3) — LOCK_SH covers Phase A only; ownership lock covers all phases; I4 updated to three-phase boundaries.
 - [x] Permanent lockfiles (rev 4) — never unlinked during normal ops; GC is separate with 7-day grace.
 - [x] No-overwrite publication (rev 4) — link() not rename(); EEXIST triggers verification; collision fails safe.
 - [x] Content-digest identity (rev 5, §1.6b) — SHA-256 recorded in Phase A; EEXIST with different inode requires digest match; size/metadata alone rejected.
 - [x] Recovery verification parity (rev 5) — startup recovery uses identical identity checks as Phase B; no shortcut to ACTIVE.
 - [x] Filesystem requirements (rev 5, §1.6c) — same-filesystem enforced at startup; directory sync ordering specified; crash boundaries for link/unlink durability.
+- [x] Authoritative durability order (rev 6) — link → fsync(final_dir) → unlink → fsync(temp_dir); no exceptions; Phase B and §1.6c agree.
+- [x] Nested mount detection (rev 6) — startup scans /proc/mounts; per-publication st_dev check on actual destination.
+- [x] Stale tests updated (rev 6) — §6.8 uses link/unlink with digest verification; §6.9 asserts lockfile permanence.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
