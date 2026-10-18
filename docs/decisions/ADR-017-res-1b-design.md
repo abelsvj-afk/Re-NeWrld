@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 13 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 14 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -279,12 +279,28 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
 4. If `(dev_t, ino_t) == (dev_f, ino_f)` → same inode: the temp entry is a stale alias of the published file. Safe to unlink.
 5. If different inodes → **do NOT unlink**. Log at error, alert `TEMP_INODE_MISMATCH` with both inodes, reservation_id, and asset_id. This indicates a bug (two different files) or manual interference. Operator must investigate.
 
-**Cleanup:**
-1. `unlink(temp_path)`. If ENOENT → already gone → skip to step 4 (check for pending fsync below).
-2. `fsync(temp_dir_fd)`.
-   - If succeeds → clear any pending flag (step 4).
-   - If fails → record persistent retry state (see below). Do NOT release the ownership lock yet.
-3. Release ownership lock.
+**Cleanup (write-ahead marker protocol) (rev 14):**
+1. Acquire ownership lock, verify inode identity (per above).
+2. **Write the retry marker BEFORE the filesystem operation:**
+   `UPDATE world_media_assets SET temp_cleanup_fsync_pending = TRUE, temp_cleanup_attempts = 0, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ? AND publication_status = 'ACTIVE'`.
+   - If this UPDATE fails (DB error) → abort cleanup, release lock, retry next cycle. Do NOT proceed to unlink without the marker.
+   - The marker must be durably committed before the unlink executes.
+3. `unlink(temp_path)`. If ENOENT → already gone → proceed to step 4 (fsync still required to ensure durability).
+4. `fsync(temp_dir_fd)`.
+   - If succeeds → clear the marker: `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_attempts = 0 WHERE reservation_id = ?`.
+     - If the clear UPDATE fails (DB error) → log at error. The marker remains set; next cycle will retry the fsync (harmless) and attempt to clear again. Do NOT lose the retry state.
+   - If fails → marker is already set (from step 2). Increment: `UPDATE ... SET temp_cleanup_attempts = temp_cleanup_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ?`. If attempts >= 5 → alert `TEMP_CLEANUP_FAILED`.
+5. Release ownership lock.
+
+**Crash windows (all covered):**
+| Crash point | Marker state | Temp state | Recovery |
+|-------------|--------------|------------|----------|
+| After marker write, before unlink | Set | Exists | Recovery finds marker + temp exists → performs unlink + fsync → clears marker. |
+| After unlink, before fsync | Set | Absent (or reappears) | Recovery finds marker → fsyncs directory (temp absent is fine) → clears marker on success. |
+| After fsync succeeds, before marker clear | Set | Absent | Recovery finds marker → fsyncs again (idempotent) → clears marker. No harm. |
+| Before marker write | Not set | Exists | Normal discovery finds temp file → starts cleanup from step 1. |
+
+**Why write-ahead:** The rev-13 gap was writing the marker after the unlink+fsync. A crash between unlink and marker-write left no trace. By writing the marker first, every filesystem mutation is preceded by a durable intent record. The marker is cleared only after the full sequence (unlink + fsync) succeeds.
 
 **Persistent fsync-retry state (rev 13):**
 The problem: if `unlink()` succeeds but `fsync(temp_dir_fd)` fails, and the temp entry does not reappear, the next cycle's file-listing discovery finds nothing. The retry state must persist in the database, not depend on the temp file's presence.
@@ -302,14 +318,25 @@ ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMP
 3. If `temp_cleanup_attempts >= 5` → alert `TEMP_CLEANUP_FAILED` (once per 5-failure window).
 
 **On cleanup cycle (startup and periodic):**
-1. Perform the file-listing discovery (§1.6e above) for temp entries.
+1. Perform the file-listing discovery (§1.6e above) for temp entries. For each candidate, the cleanup protocol (above) writes the marker BEFORE unlinking.
 2. Additionally query: `SELECT reservation_id, temp_cleanup_attempts FROM world_media_assets WHERE temp_cleanup_fsync_pending = TRUE AND publication_status = 'ACTIVE'`.
+   - These are markers from interrupted cleanups (crash after marker write, or fsync failures).
 3. For each pending reservation:
-   - Open the temp directory (not a specific file — the file may be absent).
-   - `fsync(temp_dir_fd)`.
-   - If succeeds → `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_attempts = 0 WHERE reservation_id = ?`. Log at info (recovered).
-   - If fails → `UPDATE ... SET temp_cleanup_attempts = temp_cleanup_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ?`. If attempts >= 5 → alert `TEMP_CLEANUP_FAILED`.
-4. The fsync on the directory is valid even when no specific temp file exists — it ensures all prior directory operations (including the unlink) are durable.
+   - Acquire ownership lock (non-blocking). If fails → skip.
+   - Check if temp file exists:
+     - If exists → verify inode identity → proceed with unlink + fsync (steps 3–4 of cleanup protocol). The marker is already set.
+     - If absent → the unlink already happened (or never needed). Proceed directly to `fsync(temp_dir_fd)`.
+   - `fsync(temp_dir_fd)`:
+     - If succeeds → clear marker: `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_attempts = 0`. Log at info.
+     - If fails → increment attempts. If >= 5 → alert `TEMP_CLEANUP_FAILED`.
+   - Release lock.
+4. The fsync on the directory is valid even when no specific temp file exists — it ensures all prior directory operations are durable.
+
+**Alert resolution rule (rev 14):**
+- `TEMP_CLEANUP_FAILED` fires when `temp_cleanup_attempts >= 5`.
+- The alert clears automatically when a subsequent cleanup cycle succeeds (fsync succeeds → marker cleared → attempts reset to 0).
+- The alert does NOT clear on manual acknowledgment alone — the underlying fsync must succeed. This prevents operators from dismissing a persistent storage issue.
+- If the alert fires 3 times for the same reservation (15 total failed attempts) → escalate to `TEMP_CLEANUP_PERSISTENT_FAILURE` (critical). This indicates a likely hardware or filesystem problem requiring immediate attention.
 
 **Why this works:**
 - The retry state is in the database, surviving process restarts and crashes.
@@ -620,6 +647,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Fsync failure policy consistent (rev 11) — final_dir failure → PENDING; temp_dir failure (final durable) → ACTIVE + retry cleanup. No blanket statements.
 - [x] Stale temp cleanup for ACTIVE assets (rev 12, §1.6e) — bounded retry discovers temp entries via reservation_id, verifies inode identity, safely unlinks with fsync; PENDING/ACTIVE paths never overlap.
 - [x] Persistent fsync-retry state (rev 13) — DB columns track pending temp_dir fsyncs; retry occurs via directory fsync even when temp absent; survives restarts.
+- [x] Write-ahead marker (rev 14) — DB marker written BEFORE unlink(); cleared only after fsync succeeds; crash windows all covered; DB failure handling defined; alert resolution rule explicit.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -696,3 +724,17 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** DB still shows `pending = TRUE`, `attempts = 2`. Retry continues from attempt 3, not from 0. State survived the restart.
 - **Recovery:** After alert, simulate fsync succeeding on attempt 6.
 - **Assert:** Flag cleared, attempts reset. Alert clears. No manual intervention needed for transient failures.
+
+### 6.20 Write-ahead marker crash injection (new, rev 14)
+- **Crash after unlink, before marker write (old gap):** This test verifies the rev-14 fix. Setup: ACTIVE asset with temp entry. Begin cleanup: marker written (step 2), `unlink()` succeeds. Simulate crash BEFORE the DB marker update would have occurred in the old protocol (i.e., verify the new protocol writes the marker BEFORE unlink).
+- **Assert:** After restart, DB shows `temp_cleanup_fsync_pending = TRUE` (marker was written before unlink). Temp entry is absent. Cleanup cycle discovers the marker via DB query (not file listing) → retries `fsync(temp_dir)` → on success clears marker. The retry occurred despite temp absence and despite the crash happening after unlink.
+- **Crash after marker, before unlink:** Setup: marker written, then crash before `unlink()`.
+- **Assert:** After restart, marker is set, temp file exists. Cleanup acquires lock, verifies inode, performs unlink + fsync → clears marker. No duplicate work, no lost state.
+- **Crash after fsync, before marker clear:** Setup: unlink and fsync succeed, then crash before the clear UPDATE.
+- **Assert:** After restart, marker is still set (clear didn't commit). Cleanup retries fsync (idempotent, harmless) → succeeds → clears marker. No data loss, no stuck state.
+- **DB failure on marker write:** Simulate DB error during step 2 (marker write).
+- **Assert:** Cleanup aborts BEFORE unlink. No filesystem mutation occurs without the durable marker. Lock released. Retry next cycle. The invariant "no unlink without marker" holds.
+- **DB failure on marker clear:** Simulate DB error during the clear UPDATE (after successful fsync).
+- **Assert:** Marker remains set. Next cycle retries fsync (succeeds again, idempotent) → attempts clear again. Eventually succeeds. No lost retry state, no premature clearing.
+- **Alert resolution:** Setup: 5 fsync failures → alert fires. Then fsync succeeds on 6th attempt.
+- **Assert:** Marker cleared, attempts reset to 0. Alert clears automatically (per §1.6e alert resolution rule). The alert does not require manual acknowledgment to clear — successful fsync is the resolution condition.
