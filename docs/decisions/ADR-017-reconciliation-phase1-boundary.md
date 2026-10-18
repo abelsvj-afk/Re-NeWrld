@@ -37,7 +37,7 @@ The fence check (§2.1 step 2) runs before the remaining checks. The checks belo
 1. **Metric freshness:** If the cached capacity metric is stale (older than `STORAGE_METRIC_MAX_AGE_SEC`) → reject with 503 `STORAGE_METRIC_STALE`, ROLLBACK. (Fail-closed per §5.5.)
 2. **Narration reserve:** If `narration_bytes >= NARRATION_RESERVE_BYTES` → reject with 503 `NARRATION_CAPACITY_EXCEEDED`, ROLLBACK. (Hard boundary per Addendum 001 §2.3.)
 3. **Per-world quota:** Compute `quota_used_bytes(world_id)` = registered media bytes + `active_reservations_bytes(world_id)` (SUM of `storage_reservations.size_bytes` WHERE `world_id = ?` AND `released_at IS NULL`). If `quota_used + incoming_file_size > MEDIA_WORLD_QUOTA_MB` → reject with 507 `QUOTA_EXCEEDED`, ROLLBACK.
-4. **Physical capacity:** Compute `effective_available` per §5.5 (using the **media** capacity from Addendum 001 §2.2, not the raw volume size). If `effective_available < incoming_file_size` → reject with 507 `STORAGE_FULL`, ROLLBACK.
+4. **Physical capacity:** Compute available bytes live as `storageCapacityBytes - storageUsedBytes - activeReservationsNow`, where `activeReservationsNow` is the live `SUM(size_bytes)` of active reservations (not the cached value). The L1 lock serializes Phase-1 transactions, so the live SUM sees all committed reservations — this is what prevents concurrent oversubscription (S38). If `availableBytes < incoming_file_size` → reject with 507 `STORAGE_FULL`, ROLLBACK. Uses the **media** capacity from Addendum 001 §2.2, not the raw volume size.
 
 ### 2.3 Reservation insert and commit
 
