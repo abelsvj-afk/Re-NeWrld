@@ -2,6 +2,8 @@ import { buildApp } from './app.js';
 import { env } from './config/env.js';
 import { runDeliveryOnce } from './modules/world/domain/services/delivery-worker.service.js';
 import { sendAlertWebhook } from './modules/world/domain/services/alert-webhook.service.js';
+import { runClaimTick } from './modules/world/domain/services/expiry-claim.service.js';
+import { pool } from './shared/database/db.js';
 import { withTransaction } from './shared/database/db.js';
 import { SessionService } from './modules/auth/infrastructure/services/session.service.js';
 import { PostgresPasswordResetRepository } from './modules/auth/infrastructure/persistence/postgres-password-reset.repository.js';
@@ -39,6 +41,45 @@ function startSessionJanitor(app: { log: { info: (o: object, m: string) => void;
 
   void run();
   const timer = setInterval(run, SESSION_CLEANUP_INTERVAL_MS);
+  timer.unref();
+}
+
+/**
+ * Starts the RES-1c expiry claim worker.
+ *
+ * Every 60 seconds, discovers expired reservations and claims them.
+ * Single-flight guard prevents overlap.
+ */
+function startExpiryClaimWorker(app: {
+  log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void; error: (o: object, m: string) => void };
+}): void {
+  let running = false;
+
+  const run = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const deps = {
+        mediaRoot: process.env.MEDIA_ROOT || '/data/media',
+        withTransaction,
+        query: async (sql: string, params?: unknown[]) => {
+          const result = await pool.query(sql, params);
+          return { rows: result.rows, rowCount: result.rowCount };
+        },
+        log: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => {
+          app.log[level](data || {}, msg);
+        },
+      };
+      await runClaimTick(deps);
+    } catch (err) {
+      app.log.error({ err }, 'Expiry claim tick failed');
+    } finally {
+      running = false;
+    }
+  };
+
+  void run();
+  const timer = setInterval(run, 60 * 1000); // Every 60 seconds.
   timer.unref();
 }
 
@@ -111,6 +152,7 @@ async function start() {
     app.log.info(`Server listening on http://${env.HOST}:${env.PORT}`);
     startSessionJanitor(app);
     startDeliveryWorker(app);
+    startExpiryClaimWorker(app);
 
     // Graceful shutdown on SIGTERM/SIGINT (Fly.io scale-to-zero)
     const shutdown = async (signal: string) => {
