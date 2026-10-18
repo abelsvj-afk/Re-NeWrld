@@ -32,3 +32,12 @@ primary_region = 'ams'
 [[mounts]]
   source = 'narration_data'
   destination = '/data/narrations'
+
+# Persistent volume for uploaded media (ADR-017, slice OPS-0).
+# Volume: vol_4912jm2g8pjgw86r (2GB, ams, encrypted). Created 2026-10-18.
+# DEPLOYMENT CONSTRAINT (ADR-017 §9.2): single machine only while media is on
+# a Fly volume. Do NOT deploy this with 2 machines — scale to 1 first (see
+# OPS-0 runbook). A Fly volume cannot be attached to two machines.
+[[mounts]]
+  source = 'media_data'
+  destination = '/data/media'
