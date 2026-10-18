@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 16 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 17 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -378,11 +378,18 @@ ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMP
    - Release lock.
 4. The fsync on the directory is valid even when no specific temp file exists — it ensures all prior directory operations are durable.
 
-**Alert resolution rule (rev 14):**
-- `TEMP_CLEANUP_FAILED` fires when `temp_cleanup_fsync_attempts >= 5` OR `temp_cleanup_unlink_attempts >= 5` (independently, with failure_type in alert).
-- The alert clears automatically when a subsequent cleanup cycle succeeds (fsync succeeds → marker cleared → attempts reset to 0).
-- The alert does NOT clear on manual acknowledgment alone — the underlying fsync must succeed. This prevents operators from dismissing a persistent storage issue.
-- If the alert fires 3 times for the same reservation (15 total failed attempts) → escalate to `TEMP_CLEANUP_PERSISTENT_FAILURE` (critical). This indicates a likely hardware or filesystem problem requiring immediate attention.
+**Alert resolution rule (rev 17 — independent per failure_type):**
+- `TEMP_CLEANUP_FAILED` fires independently for each failure type:
+  - `failure_type='unlink'` when `temp_cleanup_unlink_attempts >= 5`.
+  - `failure_type='fsync'` when `temp_cleanup_fsync_attempts >= 5`.
+- Each alert clears independently when its operation succeeds:
+  - Unlink alert clears when `unlink()` succeeds → `temp_cleanup_unlink_attempts` reset to 0. The fsync counter is unaffected.
+  - Fsync alert clears when `fsync()` succeeds → `temp_cleanup_fsync_attempts` reset to 0 and marker cleared. The unlink counter is unaffected.
+- An unlink alert MUST NOT remain active merely because fsync is still failing, and vice versa. The alert state accurately reflects which operation has recovered.
+- The alert does NOT clear on manual acknowledgment alone — the underlying operation must succeed. This prevents operators from dismissing a persistent storage issue.
+- Alert firing: once when the counter first reaches 5, then again at 10, 15, ... (every 5 consecutive failures). Not on every cycle while >= 5 (avoids spam).
+- Escalation: if EITHER counter reaches 15 (3 alert cycles) → escalate to `TEMP_CLEANUP_PERSISTENT_FAILURE` (critical) with the specific `failure_type`. Each counter escalates independently.
+- **Example sequence:** unlink fails 5x → unlink alert fires. Unlink succeeds on 6th → unlink_attempts=0 → unlink alert clears. Fsync then fails 5x → fsync alert fires. The unlink alert remains cleared; only the fsync alert is active.
 
 **Why this works:**
 - The retry state is in the database, surviving process restarts and crashes.
@@ -697,6 +704,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Retry accounting (rev 15) — single-owner per cycle prevents double-processing; conditional counter reset preserves history; attempts increment only on fsync failure.
 - [x] Legacy subsection removed (rev 16) — write-ahead is the only normative protocol; no post-failure marker writes.
 - [x] Separate unlink counter (rev 16) — temp_cleanup_unlink_attempts tracks unlink failures independently; 5-failure alert per counter.
+- [x] Independent alert lifecycle (rev 17) — unlink alert clears on unlink success; fsync alert clears on fsync success; no cross-contamination; escalation per counter.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -807,3 +815,14 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** Both counters reset independently on their respective successes. A successful unlink does not reset the fsync counter (and vice versa).
 - **Independent counters:** Setup: 2 unlink failures, then unlink succeeds, then 2 fsync failures.
 - **Assert:** `unlink_attempts=0` (reset on success), `fsync_attempts=2`. The counters track independently. No alert fires (neither reached 5).
+
+### 6.23 Independent alert lifecycle (new, rev 17)
+- **Setup:** ACTIVE asset with temp entry. Simulate `unlink()` failing 5 times.
+- **Assert:** After 5th failure, `temp_cleanup_unlink_attempts=5`, alert `TEMP_CLEANUP_FAILED` fires with `failure_type='unlink'`. `temp_cleanup_fsync_attempts=0` (fsync never attempted).
+- **Action:** Fix the unlink issue. Next cycle: `unlink()` succeeds → `unlink_attempts` reset to 0.
+- **Assert:** Unlink alert clears (counter < 5). The alert resolution is tied to unlink success, not fsync.
+- **Action:** Now simulate `fsync()` failing 5 times.
+- **Assert:** `temp_cleanup_fsync_attempts` increments to 5. Alert `TEMP_CLEANUP_FAILED` fires with `failure_type='fsync'`. The unlink alert REMAINS CLEARED (unlink_attempts=0). Only the fsync alert is active. The two alerts are independent.
+- **Action:** Fix fsync. Next cycle: `fsync()` succeeds.
+- **Assert:** `fsync_attempts` reset to 0, marker cleared. Fsync alert clears. Both alerts now inactive.
+- **No cross-contamination:** Throughout the sequence, verify that unlink successes never affect the fsync counter and vice versa. An operation's recovery clears only its own alert.
