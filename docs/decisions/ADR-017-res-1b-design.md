@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 9 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 10 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -474,7 +474,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 
 ### 6.8 Crash-safe publication (rev 6 updated)
 - **Crash after Phase A COMMIT, before Phase B:** Kill the writer after the DB transaction commits but before the link. Assert: asset row exists with `PENDING`, reservation is `COMMITTED`, temp file exists. Restart → startup scan finds PENDING asset with temp file → executes link → fsync → unlink → fsync → marks ACTIVE. Assert: file at final path, asset ACTIVE, no orphan.
-- **Crash during Phase B (after link, before fsync):** Kill after `link()` returns but before `fsync(final_dir)`. Assert: recovery checks final_path. If link appears present → verify identity (inode or digest) → **MUST issue `fsync(final_dir)` and confirm success BEFORE unlinking temp** (rev 7, §1.6d). Only then unlink temp → mark ACTIVE. If link not durable (final doesn't exist) → retry link. No data loss. **Identity alone (inode match) does not authorize unlinking; durability must be confirmed via fsync.**
+- **Crash during Phase B (after link, before fsync):** Kill after `link()` returns but before `fsync(final_dir)`. Assert: recovery checks final_path. If link appears present → verify identity (inode or digest) → **MUST issue `fsync(final_dir)` and confirm success BEFORE unlinking temp** (rev 7, §1.6d). Only then unlink temp → **MUST issue `fsync(temp_dir_fd)` and confirm success** → mark ACTIVE. If `fsync(final_dir)` fails → stay PENDING, preserve temp, alert. If `fsync(temp_dir)` fails (after final durable) → mark ACTIVE, log warning, retry temp cleanup (§1.6d). If link not durable (final doesn't exist) → retry link. No data loss. **Identity alone does not authorize unlinking; durability must be confirmed via fsync.**
 - **Recovery fsync failure:** Simulate `fsync(final_dir)` failing (EIO) during recovery. Assert: recovery does NOT unlink temp. Asset remains PENDING. Alert `FSYNC_FAILED` fires. Temp entry preserved for retry. A failed fsync is never treated as successful publication.
 - **Crash during Phase B (after fsync, before unlink):** Kill after `fsync(final_dir)` but before `unlink(temp)`. Assert: temp and final are same inode → recovery MUST re-issue `fsync(final_dir_fd)` and confirm success → unlink temp → `fsync(temp_dir_fd)` → mark ACTIVE. Prior sync does not substitute for recovery sync.
 - **Crash after Phase B, before Phase C:** File at final path (temp unlinked), asset PENDING with digest. Assert: recovery verifies identity via digest → `fsync(final_dir_fd)` MUST succeed → marks ACTIVE. If fsync fails → stay PENDING, alert. Assert: no duplicate file.
@@ -545,13 +545,14 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Stale language removed (rev 7) — all rename→link/unlink; lockfile cleanup→permanent; §1.6a recovery uses link terminology.
 - [x] Recovery durability consistency (rev 8) — every recovery path routes through §1.6d; fsync(final_dir) required before unlink or ACTIVE even when temp is gone; syncing never substitutes for identity.
 - [x] Crash tables and tests consistent (rev 9) — §1.6c, §6.8, §6.14, §6.16 all require: identity → fsync(final_dir) → unlink → fsync(temp_dir) → ACTIVE. No shortcuts.
+- [x] Full sweep (rev 10) — §6.13 retry test and §6.8 after-link test include fsync(temp_dir_fd) with failure behavior; zero remaining unlink→ACTIVE shortcuts.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
 - **Pre-existing destination (different bytes):** Setup: final_path already contains a file with different bytes (simulating a collision or stale file). Writer attempts Phase B `link(temp, final)`.
 - **Assert:** `link()` fails with `EEXIST`. The writer does NOT overwrite. The verification step (8a) detects the inode mismatch and the absence of a matching asset row → marks `PUBLICATION_FAILED`, alerts `PUBLICATION_COLLISION`. The existing file is byte-identical before and after (verify via checksum).
 - **Retry with correct file:** Setup: writer crashes after `link()` succeeds but before `unlink(temp)`. On recovery, temp and final are the same inode. Recovery worker re-runs Phase B.
-- **Assert:** `link()` fails with `EEXIST`, but verification (8a) sees `(dev_f, ino_f) == (dev_t, ino_t)` → treats as idempotent success → unlinks temp → marks ACTIVE. No duplicate, no error.
+- **Assert:** `link()` fails with `EEXIST`, but verification (8a) sees `(dev_f, ino_f) == (dev_t, ino_t)` → treats as idempotent success → `fsync(final_dir_fd)` MUST succeed → unlinks temp → `fsync(temp_dir_fd)` MUST succeed → marks ACTIVE. No duplicate, no error. If either fsync fails → stay PENDING, alert per §1.6d.
 - **Retry after full completion:** Setup: Phase B and C both completed (file at final, asset ACTIVE), but the writer crashes before releasing locks. Recovery worker scans and finds the asset is ACTIVE (not PENDING).
 - **Assert:** Recovery skips (not PENDING). No re-link, no re-activation. Idempotent.
 - **Collision with active asset:** Setup: an ACTIVE asset exists at final_path for reservation R1. A buggy writer for R2 attempts to publish to the same final_path.
