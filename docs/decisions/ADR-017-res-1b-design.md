@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 27 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 28 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -427,7 +427,7 @@ CREATE TABLE temp_cleanup_incidents (
     escalated_at TIMESTAMPTZ,
     last_fired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_fired_count INT NOT NULL,  -- counter value at last fire (5, 10, 15...)
-    acknowledged_at TIMESTAMPTZ,    -- operator ack (suppresses notifications, does NOT resolve)
+    acknowledged_at TIMESTAMPTZ     -- operator ack (suppresses notifications, does NOT resolve)
     -- No UNIQUE on (reservation_id, failure_type, status): multiple resolved
     -- incidents must coexist for audit. Uniqueness enforced below.
 );
@@ -453,7 +453,7 @@ CREATE UNIQUE INDEX temp_cleanup_incidents_open_unique
 - **Recurrence UUID:** When a new incident opens (counter reaches 5 after a prior resolution), `gen_random_uuid()` generates a fresh ID. The old resolved incident remains in the table with `status='resolved'` (for audit). The partial unique index only applies to open/escalated statuses, so the new incident inserts cleanly. The old resolved row remains for audit.
 - **Stale incident reconciliation:** On startup, query for incidents with `status IN ('open','escalated')`. For each, check the current counter value:
   - If counter < 5 → the operation must have succeeded without resolving the incident (crash window). Resolve it: `SET status='resolved', resolved_at=now()`. Log at warning (`STALE_INCIDENT_RESOLVED`).
-  - If counter >= 5 → incident is legitimately open. Re-emit alert if delivery unconfirmed (see delivery protocol below).
+  - If counter >= 5 → incident is legitimately open. Do NOT re-emit from the incident row. Instead, rely on the outbox: check for existing `pending` delivery events for this incident (`SELECT FROM temp_cleanup_delivery_outbox WHERE incident_id=? AND status='pending'`). If a pending event exists → the delivery worker's normal claim/retry protocol handles it (including stale-claim reclaim after 5 min). If NO pending event exists but the incident is open (e.g., event was marked sent but incident not resolved — crash window) → create a new delivery event for the current `fire_count` (deduplicated by `UNIQUE(incident_id, fire_count)`; if it already exists, the worker will pick it up).
   - This ensures a resolved incident cannot remain active after recovery.
 
 **Alert delivery protocol (rev 25 — outbox pattern):**
@@ -532,24 +532,45 @@ CREATE INDEX ON temp_cleanup_delivery_outbox (status, next_attempt_at)
    ```
    - If 0 rows → claim superseded; abort (the new claimant will handle retry scheduling).
    - `next_attempt_at` enforces the backoff. Initial events have `next_attempt_at=now()` (immediately eligible).
-5. **Exhausted (10th failure — fenced transaction):** When `attempts` would increment to 10, execute as a single fenced transaction:
+5. **Exhausted (10th failure — conditional fenced transaction):** The transition to `failed` is conditional on the prior attempt count being exactly 9. This makes the increment-and-threshold decision atomic — no caller can skip to failed early.
    ```sql
    BEGIN;
+   -- Case A: attempts 0-8 → increment, stay pending with backoff
    UPDATE temp_cleanup_delivery_outbox 
-   SET status='failed', 
-       attempts=10, 
-       last_attempt_at=now(), 
-       last_error=?,
-       claimed_by=NULL, claimed_at=NULL, claim_token=NULL
-   WHERE delivery_event_id=? AND claim_token=<token> AND status='pending';
-   -- If 0 rows: claim superseded, abort (do not transition).
+   SET attempts = attempts + 1,
+       last_attempt_at = now(),
+       last_error = ?,
+       claimed_by = NULL, claimed_at = NULL, claim_token = NULL,
+       next_attempt_at = now() + (CASE 
+           WHEN attempts = 0 THEN interval '1 minute'
+           WHEN attempts = 1 THEN interval '5 minutes'
+           WHEN attempts = 2 THEN interval '15 minutes'
+           WHEN attempts = 3 THEN interval '30 minutes'
+           ELSE interval '1 hour' END)
+   WHERE delivery_event_id = ? 
+     AND claim_token = <token> 
+     AND status = 'pending' 
+     AND attempts < 9;
+   -- Case B: attempts = 9 → this is the 10th failure, transition to failed
+   UPDATE temp_cleanup_delivery_outbox 
+   SET status = 'failed',
+       attempts = 10,
+       last_attempt_at = now(),
+       last_error = ?,
+       claimed_by = NULL, claimed_at = NULL, claim_token = NULL
+       -- next_attempt_at unchanged (irrelevant; no automatic retry for failed)
+   WHERE delivery_event_id = ? 
+     AND claim_token = <token> 
+     AND status = 'pending' 
+     AND attempts = 9;
    COMMIT;
    ```
-   - Attempts 1–9: event remains `status='pending'` with `next_attempt_at` set per backoff schedule. Eligible for automatic retry.
-   - Attempt 10: event transitions directly to `status='failed'` in the same UPDATE (no intermediate pending state). The `next_attempt_at` is irrelevant (no automatic retry).
-   - After commit: log at critical (`ALERT_DELIVERY_FAILED` with `delivery_event_id`, `incident_id`, `failure_type`, `attempts=10`).
-   - The `failed` event remains in the outbox indefinitely for manual intervention. An operator may: (a) inspect `last_error`, (b) reset to `pending` with `attempts=0` and `next_attempt_at=now()` for manual retry, or (c) leave as failed (audit trail). It is never auto-deleted or silently dropped.
-   - Manual retry reuses the same `delivery_event_id` (receiver deduplication still applies if the original send actually succeeded).
+   - **Atomicity:** The `attempts < 9` vs `attempts = 9` conditions are evaluated in the same transaction against the current row. Exactly one UPDATE matches. A caller cannot mark failed without 9 prior failures — the WHERE clause enforces it.
+   - **Fencing:** Both UPDATEs require the claim token. If 0 rows affected in both → claim superseded, abort.
+   - Attempts 1–9: event remains `status='pending'` with `next_attempt_at` per backoff. Eligible for automatic retry.
+   - Attempt 10: transitions directly to `status='failed'`. After commit: log at critical (`ALERT_DELIVERY_FAILED` with `delivery_event_id`, `incident_id`, `failure_type`, `attempts=10`).
+   - The `failed` event remains indefinitely for manual intervention: (a) inspect `last_error`, (b) reset to `pending` with `attempts=0`, `next_attempt_at=now()` for manual retry, or (c) leave as failed (audit). Never auto-deleted.
+   - Manual retry reuses the same `delivery_event_id` (receiver deduplication applies if the original send succeeded).
 
 **Claim fencing rationale:** Without the token, worker B (reclaiming a stale claim) and worker A (still processing) could both update the event. Worker A's late success could overwrite worker B's retry scheduling, or vice versa. The token ensures only the current claimant modifies state. The receiver's `delivery_event_id` deduplication remains the backstop against duplicate external notifications.
 
@@ -892,6 +913,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Backoff and fencing (rev 26) — next_attempt_at enforces retry delays; claim_token prevents stale workers from overwriting; receiver dedup remains backstop.
 - [x] Legacy cleanup (rev 27) — removed delivery_confirmed_at/delivery_attempts from incident schema; fixed stale test to use outbox.
 - [x] 10th-failure transaction (rev 27) — single fenced UPDATE transitions to 'failed'; attempts 1-9 remain pending with backoff; manual retry path defined.
+- [x] SQL validity and atomic threshold (rev 28) — trailing comma fixed; 10th-failure conditional on attempts=9 with fencing; reconciliation uses outbox.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
