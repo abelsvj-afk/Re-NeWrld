@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 15 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 16 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -285,9 +285,13 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
    ```sql
    UPDATE world_media_assets 
    SET temp_cleanup_fsync_pending = TRUE,
-       temp_cleanup_attempts = CASE 
+       temp_cleanup_fsync_attempts = CASE 
            WHEN temp_cleanup_fsync_pending = FALSE THEN 0 
-           ELSE temp_cleanup_attempts 
+           ELSE temp_cleanup_fsync_attempts 
+       END,
+       temp_cleanup_unlink_attempts = CASE 
+           WHEN temp_cleanup_fsync_pending = FALSE THEN 0 
+           ELSE temp_cleanup_unlink_attempts 
        END,
        temp_cleanup_last_attempt_at = now()
    WHERE reservation_id = ? AND publication_status = 'ACTIVE'
@@ -297,18 +301,26 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
    - If this UPDATE fails (DB error) → abort cleanup, release lock, retry next cycle. Do NOT proceed to unlink without the marker.
    - The marker must be durably committed before the unlink executes.
 
-**When attempts increment (rev 15):** The `temp_cleanup_attempts` counter increments ONLY when `fsync(temp_dir_fd)` returns an error. It does NOT increment on:
-- Successful fsync (resets to 0).
-- Rediscovery of an already-pending cleanup (counter preserved, not incremented).
-- Pass-2 skip due to single-owner rule (not processed, not counted).
-- Lock acquisition failure (not attempted, not counted).
+**When counters increment (rev 16):** The two failure counters are independent:
+- `temp_cleanup_fsync_attempts` increments ONLY when `fsync(temp_dir_fd)` returns an error. Reset to 0 on successful fsync (followed by marker clear).
+- `temp_cleanup_unlink_attempts` increments ONLY when `unlink(temp_path)` returns an error (other than ENOENT). Reset to 0 on successful unlink.
+- Neither increments on: successful operation (resets), rediscovery of pending cleanup (preserved), single-owner skip (not processed), lock acquisition failure (not attempted).
 
-**Consecutive failure definition:** Failures are consecutive if no successful fsync intervenes. A successful fsync (followed by marker clear) resets the counter to 0. The 5-failure alert and 15-failure escalation count consecutive fsync errors, not total cycles or rediscoveries.
+**Consecutive failure definition:** For each counter, failures are consecutive if no success of that operation type intervenes. A successful fsync resets only the fsync counter; a successful unlink resets only the unlink counter. The 5-failure alert fires independently for each counter. The 15-failure escalation (3 alert cycles) applies per counter.
+
+**Alert details:** `TEMP_CLEANUP_FAILED` includes `failure_type` ('fsync' or 'unlink'), `reservation_id`, `attempt_count`, and `last_errno` to distinguish the failure mode.
 3. `unlink(temp_path)`. If ENOENT → already gone → proceed to step 4 (fsync still required to ensure durability).
+   - If `unlink()` fails (other than ENOENT):
+     - Increment: `UPDATE ... SET temp_cleanup_unlink_attempts = temp_cleanup_unlink_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ?`.
+     - Log at warning with reservation_id, errno, failure_type='unlink'.
+     - If `temp_cleanup_unlink_attempts >= 5` → alert `TEMP_CLEANUP_FAILED` with `failure_type='unlink'`.
+     - Do NOT proceed to fsync (nothing was unlinked). Release lock. Retry unlink on next cycle.
+     - The marker remains set (from step 2). The fsync counter is unaffected.
+   - If `unlink()` succeeds → reset unlink counter: `UPDATE ... SET temp_cleanup_unlink_attempts = 0 WHERE reservation_id = ?`. Proceed to step 4.
 4. `fsync(temp_dir_fd)`.
-   - If succeeds → clear the marker: `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_attempts = 0 WHERE reservation_id = ?`.
+   - If succeeds → clear the marker: `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_fsync_attempts = 0, temp_cleanup_unlink_attempts = 0 WHERE reservation_id = ?`.
      - If the clear UPDATE fails (DB error) → log at error. The marker remains set; next cycle will retry the fsync (harmless) and attempt to clear again. Do NOT lose the retry state.
-   - If fails → marker is already set (from step 2). Increment: `UPDATE ... SET temp_cleanup_attempts = temp_cleanup_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ?`. If attempts >= 5 → alert `TEMP_CLEANUP_FAILED`.
+   - If fails → marker is already set (from step 2). Increment: `UPDATE ... SET temp_cleanup_fsync_attempts = temp_cleanup_fsync_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ?`. If attempts >= 5 → alert `TEMP_CLEANUP_FAILED`.
 5. Release ownership lock.
 
 **Crash windows (all covered):**
@@ -324,17 +336,28 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
 **Persistent fsync-retry state (rev 13):**
 The problem: if `unlink()` succeeds but `fsync(temp_dir_fd)` fails, and the temp entry does not reappear, the next cycle's file-listing discovery finds nothing. The retry state must persist in the database, not depend on the temp file's presence.
 
-**Schema:**
+**Schema (rev 16):**
 ```sql
 ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_fsync_pending BOOLEAN DEFAULT FALSE;
-ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_attempts INT DEFAULT 0;
+ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_fsync_attempts INT DEFAULT 0;
+ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_unlink_attempts INT DEFAULT 0;
 ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMPTZ;
 ```
+- `temp_cleanup_fsync_pending`: TRUE if a cleanup is in progress or needs fsync retry.
+- `temp_cleanup_fsync_attempts`: Consecutive `fsync(temp_dir_fd)` failures. Reset to 0 on success.
+- `temp_cleanup_unlink_attempts`: Consecutive `unlink(temp_path)` failures. Reset to 0 on success.
+- The two counters are independent. An fsync failure does not affect the unlink counter and vice versa.
 
-**On fsync failure:**
-1. `UPDATE world_media_assets SET temp_cleanup_fsync_pending = TRUE, temp_cleanup_attempts = temp_cleanup_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ? AND publication_status = 'ACTIVE'`.
-2. Log at warning with reservation_id, attempt count, errno.
-3. If `temp_cleanup_attempts >= 5` → alert `TEMP_CLEANUP_FAILED` (once per 5-failure window).
+**Note on rev 13–15 naming:** Earlier revisions used `temp_cleanup_attempts` for the fsync counter. Rev 16 renames it to `temp_cleanup_fsync_attempts` for clarity and adds the separate unlink counter. Implementations must use the rev-16 names.
+
+**On fsync failure (rev 16 — write-ahead):** The marker was already written in step 2 (before unlink). On fsync failure:
+1. `UPDATE world_media_assets SET temp_cleanup_fsync_attempts = temp_cleanup_fsync_attempts + 1, temp_cleanup_last_attempt_at = now() WHERE reservation_id = ? AND publication_status = 'ACTIVE'`.
+   - The `temp_cleanup_fsync_pending` flag remains TRUE (it was set in step 2).
+   - Do NOT reset the counter; increment the existing value.
+2. Log at warning with reservation_id, attempt count, errno, failure_type='fsync'.
+3. If `temp_cleanup_fsync_attempts >= 5` → alert `TEMP_CLEANUP_FAILED` with `failure_type='fsync'` (once per 5-failure window).
+
+**Note:** This subsection supersedes the rev-13 "set marker after failure" ordering. The marker is written write-ahead (step 2); this subsection only increments the counter. Every normative description in this document uses the write-ahead protocol.
 
 **On cleanup cycle (startup and periodic):**
 
@@ -342,7 +365,7 @@ ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMP
 
 1. Initialize `processed = {}` (empty set).
 2. **Pass 1 — file-listing discovery:** For each temp file candidate, if `reservation_id` in `processed` → skip. Otherwise perform cleanup protocol (marker write → unlink → fsync). Add `reservation_id` to `processed` regardless of outcome.
-3. **Pass 2 — DB pending markers:** Query: `SELECT reservation_id, temp_cleanup_attempts FROM world_media_assets WHERE temp_cleanup_fsync_pending = TRUE AND publication_status = 'ACTIVE'`. For each row, if `reservation_id` in `processed` → skip (already handled in Pass 1). Otherwise perform fsync retry. Add to `processed`.
+3. **Pass 2 — DB pending markers:** Query: `SELECT reservation_id, temp_cleanup_fsync_attempts, temp_cleanup_unlink_attempts FROM world_media_assets WHERE temp_cleanup_fsync_pending = TRUE AND publication_status = 'ACTIVE'`. For each row, if `reservation_id` in `processed` → skip (already handled in Pass 1). Otherwise perform fsync retry. Add to `processed`.
    - These are markers from interrupted cleanups (crash after marker write, or fsync failures).
 3. For each pending reservation:
    - Acquire ownership lock (non-blocking). If fails → skip.
@@ -350,13 +373,13 @@ ALTER TABLE world_media_assets ADD COLUMN temp_cleanup_last_attempt_at TIMESTAMP
      - If exists → verify inode identity → proceed with unlink + fsync (steps 3–4 of cleanup protocol). The marker is already set.
      - If absent → the unlink already happened (or never needed). Proceed directly to `fsync(temp_dir_fd)`.
    - `fsync(temp_dir_fd)`:
-     - If succeeds → clear marker: `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_attempts = 0`. Log at info.
+     - If succeeds → clear marker: `UPDATE ... SET temp_cleanup_fsync_pending = FALSE, temp_cleanup_fsync_attempts = 0, temp_cleanup_unlink_attempts = 0`. Log at info.
      - If fails → increment attempts. If >= 5 → alert `TEMP_CLEANUP_FAILED`.
    - Release lock.
 4. The fsync on the directory is valid even when no specific temp file exists — it ensures all prior directory operations are durable.
 
 **Alert resolution rule (rev 14):**
-- `TEMP_CLEANUP_FAILED` fires when `temp_cleanup_attempts >= 5`.
+- `TEMP_CLEANUP_FAILED` fires when `temp_cleanup_fsync_attempts >= 5` OR `temp_cleanup_unlink_attempts >= 5` (independently, with failure_type in alert).
 - The alert clears automatically when a subsequent cleanup cycle succeeds (fsync succeeds → marker cleared → attempts reset to 0).
 - The alert does NOT clear on manual acknowledgment alone — the underlying fsync must succeed. This prevents operators from dismissing a persistent storage issue.
 - If the alert fires 3 times for the same reservation (15 total failed attempts) → escalate to `TEMP_CLEANUP_PERSISTENT_FAILURE` (critical). This indicates a likely hardware or filesystem problem requiring immediate attention.
@@ -672,6 +695,8 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Persistent fsync-retry state (rev 13) — DB columns track pending temp_dir fsyncs; retry occurs via directory fsync even when temp absent; survives restarts.
 - [x] Write-ahead marker (rev 14) — DB marker written BEFORE unlink(); cleared only after fsync succeeds; crash windows all covered; DB failure handling defined; alert resolution rule explicit.
 - [x] Retry accounting (rev 15) — single-owner per cycle prevents double-processing; conditional counter reset preserves history; attempts increment only on fsync failure.
+- [x] Legacy subsection removed (rev 16) — write-ahead is the only normative protocol; no post-failure marker writes.
+- [x] Separate unlink counter (rev 16) — temp_cleanup_unlink_attempts tracks unlink failures independently; 5-failure alert per counter.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -739,7 +764,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 
 ### 6.19 Persistent fsync-retry state (new, rev 13)
 - **Setup:** ACTIVE asset with stale temp entry. Cleanup runs: `unlink()` succeeds, `fsync(temp_dir)` fails (simulate EIO). Temp entry does NOT reappear (remains absent).
-- **Assert:** DB shows `temp_cleanup_fsync_pending = TRUE`, `temp_cleanup_attempts = 1`, `last_attempt_at` set. Asset remains ACTIVE.
+- **Assert:** DB shows `temp_cleanup_fsync_pending = TRUE`, `temp_cleanup_fsync_attempts = 1`, `last_attempt_at` set. Asset remains ACTIVE.
 - **Next cycle (temp still absent):** Run cleanup again. The file-listing discovery finds nothing (temp absent).
 - **Assert:** DB query finds `temp_cleanup_fsync_pending = TRUE`. Cleanup retries `fsync(temp_dir_fd)` (on the directory, not the file). If succeeds → flag cleared, attempts reset to 0. The retry occurred despite temp absence.
 - **Persistent failures:** Simulate 5 consecutive fsync failures with temp absent throughout.
@@ -772,3 +797,13 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** Marker write sees `pending=FALSE` → initializes attempts to 0. This is a new obligation, not a continuation.
 - **Attempts increment only on fsync failure:** Setup: pending marker with attempts=2. Cycle runs but lock acquisition fails (another process holds it).
 - **Assert:** Attempts remains 2 (not incremented). Lock failure is not an fsync failure. Next cycle retries.
+
+### 6.22 Unlink failure counting (new, rev 16)
+- **Five consecutive unlink failures:** Setup: ACTIVE asset with temp entry. Simulate `unlink()` failing with EACCES 5 times (fsync never reached).
+- **Assert:** After each failure, `temp_cleanup_unlink_attempts` increments (1, 2, 3, 4, 5). `temp_cleanup_fsync_attempts` remains 0 (fsync never attempted). After 5th failure → alert `TEMP_CLEANUP_FAILED` with `failure_type='unlink'`.
+- **Restart persistence:** After 3 unlink failures, simulate restart.
+- **Assert:** DB shows `unlink_attempts=3`, `pending=TRUE`. Next cycle continues from 3 (not reset). The counter survived the restart.
+- **Successful recovery:** After 3 failures, fix permissions. Next cycle: `unlink()` succeeds → `unlink_attempts` reset to 0. Then `fsync()` succeeds → marker cleared, `fsync_attempts` reset to 0.
+- **Assert:** Both counters reset independently on their respective successes. A successful unlink does not reset the fsync counter (and vice versa).
+- **Independent counters:** Setup: 2 unlink failures, then unlink succeeds, then 2 fsync failures.
+- **Assert:** `unlink_attempts=0` (reset on success), `fsync_attempts=2`. The counters track independently. No alert fires (neither reached 5).
