@@ -1,11 +1,11 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 3 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 4 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
 
-**Rev 3 changes:** (1) Recovery workers must acquire the ownership lock before touching PENDING assets — prevents recovery/recovery and recovery/writer races. (2) Lockfile cleanup requires holding the lock + inode verification before unlink — closes the stale-inode ownership break. (3) Lock lifecycle clarified: LOCK_SH covers Phase A only; ownership lock covers all phases; I4 updated to the three-phase boundaries.
+**Rev 4 changes:** (1) Lockfiles are permanent — never unlinked during commit/rollback/recovery/cleanup; only the kernel lock is released. GC is a separate operation with a 7-day terminal grace period. (2) Publication uses `link()` (not `rename()`) — fails with EEXIST if destination exists; no overwrite possible. Existing destination is verified before treating as success.
 
 ---
 
@@ -111,10 +111,21 @@ UPDATE storage_reservations
 6. Verify exactly 1 row affected. If 0 → ROLLBACK entire transaction (including asset INSERT), release locks, abort. The temp file remains; the reservation is terminal.
 7. COMMIT.
 
-**Phase B — Filesystem publication (non-transactional, idempotent):**
-8. `rename(temp_path, final_path)`.
-   - If the rename fails with ENOENT (temp already gone) → check if final_path exists. If yes → another attempt already renamed it (idempotent retry) → proceed to step 9. If no → log at error, mark asset as `PUBLICATION_FAILED`, alert. The DB has a PENDING asset with no file — recoverable via re-upload.
+**Phase B — Filesystem publication (non-transactional, no-overwrite) (rev 4):**
+8. `link(temp_path, final_path)` — hard link, NOT rename. `link()` fails with `EEXIST` if the destination exists; it never overwrites.
+   - If `link()` succeeds → temp and final are now the same inode. Proceed to step 8b.
+   - If `link()` fails with `EEXIST` → the destination already exists. Go to step 8a (verification).
+   - If `link()` fails with ENOENT (temp gone) → check if final_path exists. If yes → go to step 8a. If no → log at error, mark asset as `PUBLICATION_FAILED`, alert.
+   
+   8a. **Destination verification (EEXIST case):** `stat(final_path)` → `(dev_f, ino_f)`. `stat(temp_path)` → `(dev_t, ino_t)` (may fail with ENOENT if temp was already unlinked).
+       - If `(dev_f, ino_f) == (dev_t, ino_t)` → the link already succeeded (idempotent retry after crash) → proceed to step 8b.
+       - Else → query the asset row: does an ACTIVE asset already exist for this `final_path` with a different `reservation_id`? If yes → **COLLISION**: do NOT overwrite. Log at error, mark this asset as `PUBLICATION_FAILED`, alert `PUBLICATION_COLLISION` with both reservation IDs. The existing file is untouched.
+       - Else (no ACTIVE asset for this path, but a file exists) → the file is from a previous crashed attempt of THIS reservation. Verify by comparing file size with the reservation's `size_bytes` (or by the PENDING asset row's `reservation_id`). If verified → treat as successful link → proceed to step 8b. If not verified → fail safe, alert.
+   
+   8b. `unlink(temp_path)` — remove the temp directory entry. The file now exists only at `final_path`. (If `unlink` fails with ENOENT → another attempt already unlinked it → proceed; idempotent.)
 9. `fsync` the destination directory.
+
+**Why link() not rename():** `rename()` silently replaces an existing destination. If a previous publication attempt crashed after rename but before activation, a retry with `rename()` would overwrite the already-published file. `link()` + `unlink()` achieves the same effect (file appears at final path, temp entry removed) but fails safely if the destination exists. The verification step (8a) distinguishes idempotent retry from genuine collision.
 
 **Phase C — Activation (transactional):**
 10. BEGIN; `UPDATE world_media_assets SET publication_status='ACTIVE' WHERE asset_id=? AND publication_status='PENDING'`; COMMIT.
@@ -141,7 +152,7 @@ Two distinct locks with different lifetimes:
 |-------|----------------|----------------|-----|
 | Chunk writes | Per-chunk hold | Held | LOCK_SH excludes claim's LOCK_EX; ownership excludes other writers |
 | Phase A (DB txn) | Held through COMMIT/ROLLBACK | Held | LOCK_SH prevents claim finalizing mid-transaction; ownership prevents writer conflict |
-| Phase B (rename) | Released | Held | Reservation is COMMITTED (terminal); no claim/cleanup acts on it. Ownership prevents writer conflict. Rename is atomic and idempotent. |
+| Phase B (link+unlink) | Released | Held | Reservation is COMMITTED (terminal); no claim/cleanup acts on it. Ownership prevents writer conflict. link() never overwrites; EEXIST triggers verification. |
 | Phase C (activation) | Released | Held | Same as Phase B. DB UPDATE is transactional. |
 | Recovery | Not held | Must acquire | Recovery worker proves writer is dead via lock acquisition. |
 
@@ -182,8 +193,8 @@ For each asset with `publication_status='PENDING'`:
 |-------------|----------|----------|----------|
 | During Phase A (before COMMIT) | Transaction rolls back; no asset row; reservation still active | Temp file exists | Reservation remains active; writer (if alive) can retry; expiry claim handles if dead |
 | After Phase A COMMIT, before Phase B | Asset PENDING; reservation COMMITTED | Temp file exists | Startup scan: temp exists → execute Phase B + C |
-| During Phase B (rename) | Asset PENDING; reservation COMMITTED | Either temp or final (rename is atomic) | Startup scan: check both paths → complete or mark failed |
-| After Phase B, before Phase C | Asset PENDING; reservation COMMITTED | File at final path | Startup scan: final exists → mark ACTIVE |
+| During Phase B (link) | Asset PENDING; reservation COMMITTED | Temp exists, or both temp+final (same inode), or final only | Startup scan: if link succeeded (same inode or final exists) → unlink temp if needed → mark ACTIVE; if EEXIST with different file → verify or fail safe |
+| After Phase B, before Phase C | Asset PENDING; reservation COMMITTED | File at final path (temp unlinked) | Startup scan: final exists, temp gone → mark ACTIVE |
 | After Phase C | Asset ACTIVE; reservation COMMITTED | File at final path | Normal state; no recovery needed |
 
 **What this guarantees:**
@@ -249,34 +260,39 @@ The heartbeat is a *liveness signal*, not a *write authorization*. Every chunk w
 
 6a. **I6a (Single-writer ownership):** At most one writer holds the ownership lock (`{reservation_id}.lock`, `LOCK_EX|LOCK_NB`) for a given reservation at any time. A writer that cannot acquire the ownership lock MUST NOT open, write to, or modify the temp data file. The lock is held for the entire upload and released by the kernel on crash.
 
-### 1.1b Ownership Lock Acquisition and Cleanup (rev 3)
+### 1.1b Ownership Lock Acquisition (rev 4)
 
-**The inode problem:** `flock` locks an inode, not a path. If process A holds `LOCK_EX` on inode 100 (path P), and process B unlinks P and creates a new file at P (inode 200), process C can acquire `LOCK_EX` on inode 200. A and C both believe they own the reservation. Unlinking a lockfile while the lock might be held breaks the ownership guarantee.
+**The inode problem (rev 3):** `flock` locks an inode, not a path. Unlinking a lockfile while the lock might be held allows a new inode at the same path with a conflicting lock. **Rev 4 solution:** Lockfiles are never unlinked during normal operations. The acquisition protocol establishes ownership on a stable inode.
 
 **Acquisition protocol (inode-verified):**
-1. Open P with `O_CREAT | O_RDWR` → fd.
+1. Open P with `O_CREAT | O_RDWR` → fd. (`O_CREAT` is safe: if the file exists, we open the existing inode; if not, we create it. Nothing unlinks it during normal operations.)
 2. `fstat(fd)` → record `(dev1, ino1)`.
 3. `flock(fd, LOCK_EX | LOCK_NB)`. If `EWOULDBLOCK` → close fd, abort with `WRITER_CONFLICT`.
-4. `stat(P)` → if ENOENT → someone unlinked it → `flock(fd, LOCK_UN)`, close, abort/retry.
-5. `stat(P)` → `(dev2, ino2)`. If `(dev1, ino1) != (dev2, ino2)` → the file was replaced → `flock(fd, LOCK_UN)`, close, retry from step 1 (max 3 attempts, then abort with `LOCKFILE_UNSTABLE`).
-6. Success: we hold `LOCK_EX` on the inode that P currently resolves to.
+4. `stat(P)` → `(dev2, ino2)`. If `(dev1, ino1) != (dev2, ino2)` → the file was replaced (only possible via out-of-scope GC) → `flock(fd, LOCK_UN)`, close, retry from step 1 (max 3 attempts, then abort with `LOCKFILE_UNSTABLE`).
+5. Success: we hold `LOCK_EX` on the stable inode for this reservation.
 
-**Cleanup protocol (proving the lock is free):**
-The lockfile MUST NOT be unlinked unless the cleaning process holds the ownership lock.
-1. Open P (without `O_CREAT` — if ENOENT, nothing to clean).
-2. Attempt `flock(fd, LOCK_EX | LOCK_NB)` with inode verification (steps 2–5 above).
-   - If `EWOULDBLOCK` → an owner is active → ABORT cleanup for this reservation. Do NOT unlink.
-   - If inode verification fails → retry or abort.
-3. We now hold the lock. No other process can believe it owns the reservation (any other holder would have blocked our acquisition; any stale fd refers to an inode we now own).
-4. Unlink P.
-5. `flock(fd, LOCK_UN)`, close fd.
+**Release protocol:**
+1. `flock(fd, LOCK_UN)`.
+2. Close fd.
+3. Do NOT unlink P. The lockfile persists.
 
 **Why this is safe:**
-- If writer A holds the lock, cleanup B's non-blocking acquire fails → B does not unlink. The path→inode mapping remains stable.
-- If A crashed, the kernel released the lock. B acquires it, verifies the inode, unlinks. Any stale fd held by a dead process is irrelevant.
-- The race "A opens but hasn't locked yet when B unlinks" is closed by B's lock acquisition: B can only unlink after acquiring the lock. If A hasn't locked yet, B gets the lock first. A then fails its `LOCK_EX|LOCK_NB` (B holds it) or fails inode verification (B unlinked). Either way, A does not proceed.
+- The path→inode mapping is stable because nothing unlinks the lockfile during the reservation's active lifetime.
+- If writer A holds the lock, writer B's non-blocking acquire fails → B aborts. No split-lock possible.
+- If A crashes, the kernel releases the lock. B acquires it on the same inode. No stale state.
 
-**Cleanup timing:** The lockfile is unlinked only after (a) successful publication (Phase C complete), (b) voluntary rollback committed, or (c) abandoned-temp cleanup of an ABANDONED row — and in all cases only via the cleanup protocol above.
+**Cleanup timing (rev 4):** The lockfile is NEVER unlinked during ordinary commit, rollback, recovery, or abandoned-temp cleanup. The kernel lock is released and the file descriptor is closed; the lockfile remains on disk. This eliminates the unlink/recreate race entirely — the path→inode mapping for a reservation's lockfile is stable for the lifetime of the reservation ID.
+
+**Why permanent:** Unlinking a lockfile while holding its lock creates a window where a new process can create a new inode at the same path and acquire a lock on it, while the original holder still believes it owns the old inode. This split-lock condition is unfixable with unlink-based cleanup. Permanent lockfiles (0 bytes each) avoid the problem completely.
+
+**Garbage collection (separate operation, not in RES-1b scope):**
+Lockfiles accumulate (one 0-byte file per reservation). A future GC operation may remove them under these rules:
+1. Only for reservations terminal (COMMITTED, ROLLED_BACK, ABANDONED) for > 7 days, or with no reservation row.
+2. Acquire `LOCK_EX|LOCK_NB` with inode verification. If it fails → skip (in use).
+3. If acquired → unlink the lockfile, release, close.
+4. The 7-day grace period ensures no in-flight upload, recovery, or claim is still referencing the lock domain (uploads expire after 5 minutes; recovery runs at startup; claims run every 60s).
+
+GC is explicitly out of scope for RES-1b implementation. The design notes it here for completeness.
 
 7. **I7 (No level-1 during chunks):** Phase-2 chunk writes never acquire the level-1 advisory lock. Domain R protection (reservation + flock) is sufficient and necessary to avoid multi-minute lock holds.
 
@@ -380,19 +396,18 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** The asset is renamed (if needed) and marked ACTIVE exactly once. No double-rename, no conflicting updates.
 - **Recovery vs. live writer:** Start a writer (holding ownership lock, in Phase B). Start a recovery worker. Assert: recovery worker fails to acquire the lock → skips the asset. Writer completes normally. No interference.
 
-### 6.11 Lockfile cleanup race (new, rev 3)
-- **Setup:** Writer A holds the ownership lock (inode 100). Cleanup process B attempts to unlink the lockfile.
-- **Assert:** B's `LOCK_EX|LOCK_NB` fails with `EWOULDBLOCK` → B aborts cleanup, does NOT unlink. The path→inode mapping remains stable.
-- **Action:** Kill writer A (kernel releases lock). B retries.
-- **Assert:** B acquires the lock, verifies inode identity, unlinks the path, releases. 
-- **Race variant:** Writer C opens the lockfile path but hasn't acquired the lock yet when B unlinks (after acquiring it). Assert: C's subsequent `LOCK_EX|LOCK_NB` fails (B holds it) OR C's inode verification fails (path unlinked) → C does not proceed as owner.
-- **Stale inode:** Simulate the inode-replacement attack (unlink + create new file at same path while A holds lock on old inode). Assert: A's inode verification on next acquisition attempt fails → A does not proceed with a stale lock.
+### 6.11 Permanent lockfile verification (rev 4)
+- **Setup:** Writer A acquires the ownership lock for reservation R1, completes the upload through Phase C, releases the lock.
+- **Assert:** The lockfile `{R1}.lock` still exists on disk after commit. It was NOT unlinked.
+- **Action:** Writer B (new reservation R2, different ID) acquires its own lockfile. Writer C attempts to acquire R1's lockfile (simulating a buggy retry).
+- **Assert:** C's `LOCK_EX|LOCK_NB` on R1's lockfile succeeds (A released it). This is correct: R1's reservation is COMMITTED (terminal), so a new claim on its lock domain is harmless. The lockfile's persistence does not block legitimate operations.
+- **No-unlink invariant:** Instrument all code paths (commit, rollback, recovery, abandoned-temp cleanup). Assert: no `unlink()` syscall is ever issued for a `*.lock` path during normal operations. (GC is out of scope.)
+- **Split-lock prevention:** The permanent-lockfile rule eliminates the unlink/recreate race by construction. Document this as the rationale: the old approach (unlink while holding lock) allowed inode 200 to be locked while inode 100 was still held; permanent files make this impossible.
 
 ### 6.12 Lock lifecycle verification (new, rev 3)
 - **Instrument:** Track `LOCK_SH` (data file) and ownership lock (`LOCK_EX` on lockfile) acquisition/release times relative to Phase A/B/C boundaries.
 - **Assert:** `LOCK_SH` is released after Phase A COMMIT/ROLLBACK and before Phase B starts. It is never held during Phase B or Phase C.
 - **Assert:** Ownership lock is held continuously from before the first chunk through Phase C completion.
-- **Assert:** During Phase B and C (when `LOCK_SH` is released), no expiry claim or cleanup operation modifies the reservation's files (verified by attempting claims/cleanups and asserting they skip COMMITTED reservations).
 - **Kill at boundary:** Kill the writer between Phase A COMMIT and Phase B. Assert: startup scan recovers via the ownership lock protocol; no `LOCK_SH` is leaked (it was already released); the ownership lock was released by the kernel.
 
 ---
@@ -420,4 +435,16 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Recovery ownership protocol defined (rev 3, §1.6a) — recovery workers must acquire ownership lock; prevents recovery/recovery and recovery/writer races.
 - [x] Lockfile cleanup inode safety defined (rev 3, §1.1b) — unlink only while holding the lock + inode verification.
 - [x] Lock lifecycle clarified (rev 3) — LOCK_SH covers Phase A only; ownership lock covers all phases; I4 updated to three-phase boundaries.
+- [x] Permanent lockfiles (rev 4) — never unlinked during normal ops; GC is separate with 7-day grace.
+- [x] No-overwrite publication (rev 4) — link() not rename(); EEXIST triggers verification; collision fails safe.
 - [x] No implementation written; design-only.
+
+### 6.13 No-overwrite publication (new, rev 4)
+- **Pre-existing destination (different bytes):** Setup: final_path already contains a file with different bytes (simulating a collision or stale file). Writer attempts Phase B `link(temp, final)`.
+- **Assert:** `link()` fails with `EEXIST`. The writer does NOT overwrite. The verification step (8a) detects the inode mismatch and the absence of a matching asset row → marks `PUBLICATION_FAILED`, alerts `PUBLICATION_COLLISION`. The existing file is byte-identical before and after (verify via checksum).
+- **Retry with correct file:** Setup: writer crashes after `link()` succeeds but before `unlink(temp)`. On recovery, temp and final are the same inode. Recovery worker re-runs Phase B.
+- **Assert:** `link()` fails with `EEXIST`, but verification (8a) sees `(dev_f, ino_f) == (dev_t, ino_t)` → treats as idempotent success → unlinks temp → marks ACTIVE. No duplicate, no error.
+- **Retry after full completion:** Setup: Phase B and C both completed (file at final, asset ACTIVE), but the writer crashes before releasing locks. Recovery worker scans and finds the asset is ACTIVE (not PENDING).
+- **Assert:** Recovery skips (not PENDING). No re-link, no re-activation. Idempotent.
+- **Collision with active asset:** Setup: an ACTIVE asset exists at final_path for reservation R1. A buggy writer for R2 attempts to publish to the same final_path.
+- **Assert:** `link()` fails with `EEXIST`. Verification finds the ACTIVE asset row for R1 (different reservation_id) → fails safe, alerts. R1's file is untouched. R2's asset is marked `PUBLICATION_FAILED`.
