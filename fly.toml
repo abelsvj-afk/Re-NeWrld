@@ -27,17 +27,11 @@ primary_region = 'ams'
   cpu_kind = 'shared'
   cpus = 1
 
-# Persistent volume for TTS narration audio (ADR-016).
-# Create with: flyctl volumes create narration_data --size 1 --app re-newrld --region ams
+# Persistent volume for TTS narration audio (ADR-016) + uploaded media (ADR-017).
+# Single-volume consolidation (2026-10-18): Fly allows only 1 volume per
+# machine, so the 4GB narration_data volume hosts both /data/narrations
+# (existing audio files) and /data/media (ADR-017 uploads) as subdirectories.
+# ADR-017 addendum pending for the separate-media_data change.
 [[mounts]]
   source = 'narration_data'
-  destination = '/data/narrations'
-
-# Persistent volume for uploaded media (ADR-017, slice OPS-0).
-# Volume: vol_4912jm2g8pjgw86r (2GB, ams, encrypted). Created 2026-10-18.
-# DEPLOYMENT CONSTRAINT (ADR-017 §9.2): single machine only while media is on
-# a Fly volume. Do NOT deploy this with 2 machines — scale to 1 first (see
-# OPS-0 runbook). A Fly volume cannot be attached to two machines.
-[[mounts]]
-  source = 'media_data'
-  destination = '/data/media'
+  destination = '/data'
