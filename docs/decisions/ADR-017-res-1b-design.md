@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 11 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 12 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -258,6 +258,44 @@ For each asset with `publication_status='PENDING'` (after acquiring the ownershi
 **Cost:** One SHA-256 pass over the file during recovery (only when needed). The writer's incremental hashing adds negligible overhead to chunk writes.
 
 **Limitations:** SHA-256 is not a proof against malicious collision, but the threat model here is crash recovery, not adversarial tampering. For this purpose, it reliably distinguishes "this is our file" from "this is a different file."
+
+### 1.6e Stale Temp Cleanup for ACTIVE Assets (rev 12)
+
+**The gap (rev 11):** When `fsync(temp_dir_fd)` fails but the final link is durable, §1.6d permits marking ACTIVE and retrying temp cleanup later. However, the startup recovery (§1.6a) only scans PENDING assets. If the temp entry reappears after a crash (unlink not durable), no described mechanism revisits it. The ACTIVE asset remains published while a stale temp entry lingers indefinitely.
+
+**The mechanism:** A dedicated cleanup path for temp entries belonging to ACTIVE assets. Runs on startup (after PENDING recovery) and periodically (every 15 minutes via the maintenance job).
+
+**Discovery:**
+1. List `/data/media/.tmp/*.part` files.
+2. For each, extract `reservation_id` from the filename (`{reservation_id}.part`).
+3. Query: `SELECT asset_id, final_path FROM world_media_assets WHERE reservation_id = ? AND publication_status = 'ACTIVE'`.
+   - If a row exists → candidate for stale temp cleanup.
+   - If no row (or status is PENDING) → skip. PENDING assets are handled by §1.6a recovery; missing rows are handled by orphan logic.
+
+**Verification (before unlink):**
+1. Acquire the ownership lock for `reservation_id` (non-blocking, inode-verified per §1.1b). If `EWOULDBLOCK` → skip this cycle (someone is active; retry next cycle).
+2. `stat(temp_path)` → `(dev_t, ino_t)`. If ENOENT → already cleaned → skip.
+3. `stat(final_path)` (from the ACTIVE asset row) → `(dev_f, ino_f)`. If ENOENT → **do NOT unlink temp**. The ACTIVE asset has no file at its final path — this is a data-integrity issue. Log at error, alert `ACTIVE_ASSET_MISSING_FILE`. Leave temp in place for forensic analysis.
+4. If `(dev_t, ino_t) == (dev_f, ino_f)` → same inode: the temp entry is a stale alias of the published file. Safe to unlink.
+5. If different inodes → **do NOT unlink**. Log at error, alert `TEMP_INODE_MISMATCH` with both inodes, reservation_id, and asset_id. This indicates a bug (two different files) or manual interference. Operator must investigate.
+
+**Cleanup:**
+1. `unlink(temp_path)`. If ENOENT → already gone → skip (idempotent).
+2. `fsync(temp_dir_fd)`.
+3. Release ownership lock.
+
+**Failure handling (bounded retries):**
+- If `unlink()` fails (other than ENOENT) → log at warning, retry next cycle. After 5 consecutive failures → alert `TEMP_CLEANUP_FAILED` with reservation_id and errno. Continue retrying (the alert ensures operator awareness; the retry ensures eventual cleanup if the issue resolves).
+- If `fsync(temp_dir_fd)` fails → log at warning. The unlink may not be durable; the temp entry may reappear. Retry next cycle. After 5 consecutive fsync failures → alert `TEMP_CLEANUP_FAILED`. The ACTIVE asset is unaffected (final is durable).
+- **Bounded, not infinite:** The retry counter resets on success. The alert fires once per 5-failure window (not on every failure) to avoid alert spam. Manual intervention clears the alert.
+
+**Why this is safe:**
+- Only acts on temp files with a corresponding ACTIVE asset. PENDING assets are explicitly excluded (different recovery path).
+- Inode verification ensures we only unlink a temp entry that aliases the published file. We never delete a temp file that contains different bytes.
+- Ownership lock prevents interference with any (buggy) active writer.
+- The ACTIVE asset's final file is never touched — only the stale temp directory entry is removed.
+
+**Distinction from PENDING recovery:** §1.6a recovery handles PENDING assets (publication incomplete). §1.6e handles ACTIVE assets with leftover temp entries (publication complete, cleanup incomplete). The two never overlap: PENDING recovery skips ACTIVE assets; §1.6e skips PENDING assets.
 
 ### 1.6a Recovery Ownership Protocol (rev 3)
 
@@ -547,6 +585,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Crash tables and tests consistent (rev 9) — §1.6c, §6.8, §6.14, §6.16 all require: identity → fsync(final_dir) → unlink → fsync(temp_dir) → ACTIVE. No shortcuts.
 - [x] Full sweep (rev 10) — §6.13 retry test and §6.8 after-link test include fsync(temp_dir_fd) with failure behavior; zero remaining unlink→ACTIVE shortcuts.
 - [x] Fsync failure policy consistent (rev 11) — final_dir failure → PENDING; temp_dir failure (final durable) → ACTIVE + retry cleanup. No blanket statements.
+- [x] Stale temp cleanup for ACTIVE assets (rev 12, §1.6e) — bounded retry discovers temp entries via reservation_id, verifies inode identity, safely unlinks with fsync; PENDING/ACTIVE paths never overlap.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -596,3 +635,18 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Digest-verified recovery with fsync success:** Same setup, fsync succeeds.
 - **Assert:** Recovery marks ACTIVE. The fsync was issued even though there was no temp entry to remove — it confirms the final link's durability.
 - **Ordering verification:** Instrument recovery to record syscall order. Assert on all recovery paths: `fsync(final_dir)` completes successfully before any `unlink(temp)` or `ACTIVE` transition. No path skips the sync.
+
+### 6.18 Stale temp cleanup for ACTIVE assets (new, rev 12)
+- **Reappearing temp entry:** Setup: ACTIVE asset; temp entry reappears (simulate by recreating the hard link after a crash). Run the §1.6e cleanup.
+- **Assert:** Discovery finds the temp file, maps it to the ACTIVE asset via reservation_id. Inode verification confirms same inode as final. Ownership lock acquired. `unlink(temp)` succeeds, `fsync(temp_dir)` succeeds. Temp entry gone, final file untouched, asset remains ACTIVE.
+- **Temp entry with different inode:** Setup: ACTIVE asset; temp path contains a DIFFERENT file (different inode, simulating a bug).
+- **Assert:** Inode verification fails → do NOT unlink. Alert `TEMP_INODE_MISMATCH` fires with both inodes. Temp file preserved. Final file untouched. Asset remains ACTIVE.
+- **Missing final file:** Setup: ACTIVE asset row exists, but final_path does not exist on disk (simulating data loss).
+- **Assert:** Do NOT unlink temp. Alert `ACTIVE_ASSET_MISSING_FILE` fires. Temp preserved for forensics. Asset remains ACTIVE (row unchanged).
+- **Failed unlink retry:** Setup: ACTIVE asset with stale temp; simulate `unlink()` failing 5 times (permission error).
+- **Assert:** First 4 failures → log warning, retry next cycle. 5th failure → alert `TEMP_CLEANUP_FAILED`. 6th cycle (after fixing permissions) → succeeds, alert clears. Bounded retries work.
+- **Failed fsync retry:** Setup: ACTIVE asset with stale temp; `unlink()` succeeds but `fsync(temp_dir)` fails repeatedly.
+- **Assert:** Temp entry may reappear; cleanup retries. After 5 fsync failures → alert. Asset remains ACTIVE throughout (final was already durable). No data loss.
+- **PENDING exclusion:** Setup: PENDING asset with temp file. Run §1.6e cleanup.
+- **Assert:** Skipped (not ACTIVE). The PENDING recovery path (§1.6a) handles it, not §1.6e. No interference between the two mechanisms.
+- **Periodic execution:** Assert the cleanup runs on startup (after PENDING recovery) and every 15 minutes via the maintenance job. A stale temp entry created between runs is cleaned within 15 minutes.
