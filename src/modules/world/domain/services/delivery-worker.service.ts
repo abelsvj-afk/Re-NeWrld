@@ -208,41 +208,48 @@ export async function runDeliveryOnce(deps: DeliveryWorkerDeps): Promise<boolean
   }
 
   // Tx2: Fenced confirm or failure.
-  await deps.withTransaction(async (tx) => {
+  // Returns the outcome so metrics increment AFTER commit, not inside.
+  type Tx2Outcome = 'sent' | 'failed' | 'retry' | 'superseded';
+  const tx2Outcome: Tx2Outcome = await deps.withTransaction(async (tx): Promise<Tx2Outcome> => {
     if (!sendError) {
       const confirmed = await confirmDelivery(event.delivery_event_id, claimToken, tx);
       if (!confirmed) {
         deps.log('warn', 'Claim superseded during send', {
           deliveryEventId: event.delivery_event_id,
         });
-      } else {
-        deps.log('info', 'Delivery confirmed', {
-          deliveryEventId: event.delivery_event_id,
-          incidentId: event.incident_id,
-        });
-        deps.metrics.sentTotal.inc();
+        return 'superseded';
       }
-    } else {
-      const outcome = await handleDeliveryFailure(
-        event.delivery_event_id,
-        claimToken,
-        sendError.message,
-        tx,
-      );
-      deps.log(outcome === 'failed' ? 'error' : 'warn', `Delivery ${outcome}`, {
+      deps.log('info', 'Delivery confirmed', {
         deliveryEventId: event.delivery_event_id,
-        outcome,
+        incidentId: event.incident_id,
       });
-      if (outcome === 'failed') {
-        deps.log('error', 'ALERT_DELIVERY_FAILED', {
-          deliveryEventId: event.delivery_event_id,
-          incidentId: event.incident_id,
-          attempts: MAX_ATTEMPTS,
-        });
-        deps.metrics.failedTotal.inc();
-      }
+      return 'sent';
     }
+    const outcome = await handleDeliveryFailure(
+      event.delivery_event_id,
+      claimToken,
+      sendError.message,
+      tx,
+    );
+    deps.log(outcome === 'failed' ? 'error' : 'warn', `Delivery ${outcome}`, {
+      deliveryEventId: event.delivery_event_id,
+      outcome,
+    });
+    if (outcome === 'failed') {
+      deps.log('error', 'ALERT_DELIVERY_FAILED', {
+        deliveryEventId: event.delivery_event_id,
+        incidentId: event.incident_id,
+        attempts: MAX_ATTEMPTS,
+      });
+      return 'failed';
+    }
+    return 'retry';
   });
+
+  // Metrics increment AFTER the transaction commits successfully.
+  // If withTransaction throws (commit failure), no counter is touched.
+  if (tx2Outcome === 'sent') deps.metrics.sentTotal.inc();
+  else if (tx2Outcome === 'failed') deps.metrics.failedTotal.inc();
 
   return true;
 }

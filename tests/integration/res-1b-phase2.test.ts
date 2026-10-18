@@ -656,6 +656,59 @@ describe('RES-1b Delivery Worker (B8)', () => {
     expect(Number(after.rows[0].attempts)).toBe(1);
   });
 
+  it('delivery metrics: counter not incremented if transaction fails to commit', async () => {
+    const { runDeliveryOnce } = await import(
+      '../../src/modules/world/domain/services/delivery-worker.service.js'
+    );
+    const { createWorkerMetrics } = await import(
+      '../../src/shared/metrics/worker-metrics.js'
+    );
+
+    const reservationId = await createReservation();
+    const incident = (await pool.query(
+      `INSERT INTO temp_cleanup_incidents (reservation_id, failure_type, status, last_fired_count)
+       VALUES ($1, 'unlink', 'open', 5) RETURNING incident_id`,
+      [reservationId],
+    )).rows[0];
+    (await pool.query(
+      `INSERT INTO temp_cleanup_delivery_outbox (incident_id, reservation_id, failure_type, fire_count, severity, status)
+       VALUES ($1, $2, 'unlink', 5, 'warning', 'pending') RETURNING delivery_event_id`,
+      [incident.incident_id, reservationId],
+    )).rows[0];
+
+    const dm = createWorkerMetrics();
+
+    let txCount = 0;
+    const flakyWithTransaction = async <T>(fn: (tx: any) => Promise<T>): Promise<T> => {
+      txCount++;
+      if (txCount === 1) return withTransaction(fn);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await fn(client);
+        await client.query('ROLLBACK');
+        throw new Error('simulated commit failure');
+      } finally {
+        client.release();
+      }
+    };
+
+    const deps = {
+      withTransaction: flakyWithTransaction,
+      workerId: 'test-commit-fail',
+      log: () => {},
+      send: async () => {},
+      metrics: {
+        sentTotal: { inc: () => dm.deliverySentTotal.inc() },
+        failedTotal: { inc: () => dm.deliveryFailedTotal.inc() },
+      },
+    };
+
+    await expect(runDeliveryOnce(deps)).rejects.toThrow('simulated commit failure');
+    expect(dm.deliverySentTotal.get()).toBe(0);
+    expect(dm.deliveryFailedTotal.get()).toBe(0);
+  });
+
 describe('RES-1b Webhook Adapter (B8)', () => {
   it('encodeDev: correct for various device numbers', async () => {
     const { encodeDev } = await import('../../src/shared/fs/flock.js');
