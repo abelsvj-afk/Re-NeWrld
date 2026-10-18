@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 24 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 25 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -451,33 +451,72 @@ CREATE UNIQUE INDEX temp_cleanup_incidents_open_unique
 
 **Crash recovery:**
 - **Crash after operation succeeds but before incident resolution commits:** The transaction rolls back. Counter remains >= 5, incident remains open/escalated. Next cycle retries the operation (which will succeed again, idempotent) and resolves the incident. No stale resolved state.
-- **Crash after incident opens but before alert delivery:** The incident row is committed (in the same txn as the counter). Alert delivery is a separate, at-least-once notification. On restart, the recovery scans for `status IN ('open','escalated')` incidents and re-emits alerts for any without confirmed delivery (tracked via a `delivery_confirmed_at` column, or the alert system deduplicates by `incident_id`). The incident is not lost.
+- **Crash after incident opens but before alert delivery:** The incident row and outbox event are committed atomically (same txn as the counter). On restart, the delivery worker finds the 'pending' outbox event and sends it. The incident is not lost. (Rev 25: the database outbox is the authoritative delivery mechanism; there is no alternative receiver-deduplication path.)
 - **Recurrence UUID:** When a new incident opens (counter reaches 5 after a prior resolution), `gen_random_uuid()` generates a fresh ID. The old resolved incident remains in the table with `status='resolved'` (for audit). The partial unique index only applies to open/escalated statuses, so the new incident inserts cleanly. The old resolved row remains for audit.
 - **Stale incident reconciliation:** On startup, query for incidents with `status IN ('open','escalated')`. For each, check the current counter value:
   - If counter < 5 → the operation must have succeeded without resolving the incident (crash window). Resolve it: `SET status='resolved', resolved_at=now()`. Log at warning (`STALE_INCIDENT_RESOLVED`).
   - If counter >= 5 → incident is legitimately open. Re-emit alert if delivery unconfirmed (see delivery protocol below).
   - This ensures a resolved incident cannot remain active after recovery.
 
-**Alert delivery protocol (rev 24 — authoritative):**
+**Alert delivery protocol (rev 25 — outbox pattern):**
 
-The database is the authoritative delivery tracker. The alert system is a notifier, not the source of truth.
+**Problem rev 24 had:** A single `delivery_confirmed_at` on the incident row cannot distinguish a crash-retry (same notification, send again) from a legitimate re-fire (new notification for the same incident at count 10, 15, 20...). Both share the incident_id. Rev 25 separates these with a durable outbox.
 
-**Delivery flow:**
-1. When an incident fires (or re-fires), the cleanup worker INSERTs/UPDATEs the incident row (with `delivery_confirmed_at=NULL`, `delivery_attempts=0` for new fires).
-2. A separate delivery worker (or the same process, after commit) picks up incidents where `delivery_confirmed_at IS NULL AND status IN ('open','escalated')`.
-3. The delivery worker sends the notification to the alert system (PagerDuty/Opsgenie/webhook).
-4. On successful send: `UPDATE temp_cleanup_incidents SET delivery_confirmed_at=now(), delivery_attempts=delivery_attempts+1 WHERE incident_id=?`.
-5. On failed send: `UPDATE ... SET delivery_attempts=delivery_attempts+1, last_fired_at=now() WHERE incident_id=?`. Retry with exponential backoff (1min, 5min, 15min). After 10 delivery failures → log at critical (`ALERT_DELIVERY_FAILED`), continue retrying (alerts must not be silently dropped).
+**Two identities:**
+- `incident_id`: identifies the continuing incident (one per failure episode).
+- `delivery_event_id`: identifies one specific notification event (one per firing). Each re-fire generates a NEW event with a NEW ID, even for the same incident.
+
+**Outbox schema:**
+```sql
+CREATE TABLE temp_cleanup_delivery_outbox (
+    delivery_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    incident_id UUID NOT NULL REFERENCES temp_cleanup_incidents(incident_id),
+    reservation_id UUID NOT NULL,
+    failure_type TEXT NOT NULL,
+    fire_count INT NOT NULL,  -- the counter value that triggered this event (5, 10, 15...)
+    severity TEXT NOT NULL CHECK (severity IN ('warning', 'critical')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
+    -- 'pending': awaiting delivery
+    -- 'sent': delivery confirmed by receiver
+    -- 'failed': delivery failed after max retries (10); requires manual intervention
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at TIMESTAMPTZ,
+    attempts INT NOT NULL DEFAULT 0,
+    last_attempt_at TIMESTAMPTZ,
+    last_error TEXT,
+    claimed_by TEXT,           -- worker ID holding the claim (for concurrent workers)
+    claimed_at TIMESTAMPTZ,    -- when the claim was taken
+    UNIQUE (incident_id, fire_count)  -- one delivery event per firing
+);
+CREATE INDEX ON temp_cleanup_delivery_outbox (status) WHERE status = 'pending';
+```
+
+**Event creation (in the same txn as the counter/incident update):**
+- When counter reaches 5 (new incident): INSERT incident + INSERT outbox event (`fire_count=5`, `severity='warning'`, `status='pending'`).
+- When counter reaches 10, 15, 20... (re-fire): UPDATE incident (`last_fired_count`, `last_fired_at`) + INSERT new outbox event (`fire_count=10`, etc.). At 15+: `severity='critical'`.
+- The `UNIQUE(incident_id, fire_count)` prevents duplicate events for the same firing (e.g., if the txn retries).
+- Remove `delivery_confirmed_at` and `delivery_attempts` from the incidents table (rev 24 columns superseded by the outbox).
+
+**Delivery worker protocol:**
+1. **Claim:** `UPDATE temp_cleanup_delivery_outbox SET claimed_by=<worker_id>, claimed_at=now() WHERE delivery_event_id = (SELECT delivery_event_id FROM temp_cleanup_delivery_outbox WHERE status='pending' AND (claimed_at IS NULL OR claimed_at < now() - interval '5 minutes') ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`.
+   - `FOR UPDATE SKIP LOCKED` ensures concurrent workers don't claim the same event.
+   - Stale claims (older than 5 min, worker crashed) are reclaimable.
+2. **Send:** Transmit to the alert system with `delivery_event_id` as the deduplication key.
+3. **Confirm:** On success: `UPDATE ... SET status='sent', sent_at=now() WHERE delivery_event_id=?`.
+4. **Retry:** On failure: `UPDATE ... SET attempts=attempts+1, last_attempt_at=now(), last_error=?, claimed_by=NULL, claimed_at=NULL WHERE delivery_event_id=?`. Next worker picks it up with exponential backoff (based on `attempts`: 1min, 5min, 15min, 30min, 1hr...).
+5. **Exhausted:** After 10 attempts: `SET status='failed'`. Log at critical (`ALERT_DELIVERY_FAILED` with `delivery_event_id`, `incident_id`). The event remains for manual retry; it is never silently dropped.
+
+**Receiver contract (rev 25):**
+- The receiver deduplicates on `delivery_event_id`, NOT `incident_id`.
+- Receiving the same `delivery_event_id` twice → suppress duplicate (crash retry).
+- Receiving a different `delivery_event_id` for the same `incident_id` → new notification (legitimate re-fire). The receiver correlates by `incident_id` for display but notifies per event.
+- This resolves the rev-24 ambiguity: crash retries and re-fires are distinguishable by their event IDs.
 
 **Crash behavior:**
-- **Crash after incident commit, before delivery:** On restart, the delivery worker finds `delivery_confirmed_at IS NULL` → sends the alert. At-least-once delivery. The alert system deduplicates by `incident_id` (idempotent receiver).
-- **Crash after delivery, before confirmation update:** The alert was sent but `delivery_confirmed_at` is still NULL. On restart, the delivery worker re-sends. The alert system deduplicates by `incident_id` → no duplicate notification to the operator. Idempotency is required at the receiver.
-- **Receiver contract:** The alert system MUST deduplicate on `incident_id`. Receiving the same `incident_id` twice does not create a second alert or page twice. This is a hard requirement for the at-least-once delivery model.
-
-**Why DB authoritative (not alert-system deduplication alone):**
-- The database survives process restarts; in-memory deduplication state does not.
-- The `delivery_confirmed_at` column provides an auditable record of what was sent and when.
-- If the alert system is down, the DB retains the pending delivery for retry. A pure in-memory dedup would lose it.
+- **Crash after event insert, before delivery:** Event remains 'pending'. On restart, delivery worker claims and sends. At-least-once.
+- **Crash after send, before confirm:** Event remains 'pending' (or 'claimed' with stale claim). On restart, reclaimed and re-sent. Receiver deduplicates by `delivery_event_id` → no double-page.
+- **Crash during claim:** Stale claim (5 min timeout) → another worker reclaims. No event lost.
+- **Simultaneous workers:** `FOR UPDATE SKIP LOCKED` guarantees exactly one worker claims each event. No concurrent duplicate sends.
 
 **Acknowledgment persistence:** `acknowledged_at` is set by operator action (separate txn). It does NOT change `status`. An acknowledged incident remains 'open' or 'escalated' until the operation succeeds. The alert system suppresses notifications for acknowledged incidents but continues to track them. Acknowledgment is cleared (set to NULL) when a new incident opens (recurrence).
 
@@ -802,6 +841,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Incident persistence contract (rev 22) — DB table with atomic counter+incident updates; crash recovery reconciles stale incidents; recurrence generates fresh UUIDs.
 - [x] Partial unique index (rev 23) — uniqueness on (reservation_id, failure_type) WHERE status IN ('open','escalated'); multiple resolved rows allowed for audit.
 - [x] Update path and delivery contract (rev 24) — covers open+escalated; last_fired_count uses actual value; delivery_confirmed_at with at-least-once + idempotent receiver.
+- [x] Outbox pattern (rev 25) — separates incident_id from delivery_event_id; receiver deduplicates by event; concurrent workers use SKIP LOCKED; stale alternative removed.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -972,3 +1012,13 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** INSERT fails with unique violation on `temp_cleanup_incidents_open_unique`. Only one open/escalated incident per (reservation, type) can exist. The constraint is enforced.
 - **Action:** Resolve U2. Open a third incident U3.
 - **Assert:** U3 inserts successfully. DB contains three resolved/open rows for (R1, 'unlink'): U1 (resolved), U2 (resolved), U3 (open). Audit history preserved; active constraint maintained.
+
+### 6.29 Outbox delivery regression (new, rev 25)
+- **Re-fire generates new event:** Setup: incident open, counter at 5, outbox has event E1 (`fire_count=5`, `status='sent'`). Counter reaches 10.
+- **Assert:** New outbox event E2 created with different `delivery_event_id`, `fire_count=10`, same `incident_id`. E1 remains `status='sent'` (not modified, not overwritten). The receiver gets a new notification for E2 (not suppressed as duplicate of E1).
+- **Crash retry deduplicated:** Setup: outbox event E1 `status='pending'`. Worker claims E1, sends to receiver, crashes before marking 'sent'.
+- **Assert:** On restart, worker reclaims E1 (stale claim) and re-sends. Receiver gets same `delivery_event_id` → deduplicates → operator paged once, not twice.
+- **Concurrent workers:** Setup: two workers, one pending event E1.
+- **Assert:** Only one worker successfully claims E1 (`FOR UPDATE SKIP LOCKED`). The other gets no row (skipped). E1 sent exactly once. No concurrent duplicate.
+- **Event per firing uniqueness:** Simulate txn retry causing duplicate INSERT for `fire_count=10`.
+- **Assert:** Second INSERT fails on `UNIQUE(incident_id, fire_count)`. Only one event per firing exists. No duplicate notifications.
