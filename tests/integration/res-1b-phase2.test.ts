@@ -571,7 +571,11 @@ describe('RES-1b Webhook Adapter (B8)', () => {
     const { createServer } = await import('node:http');
 
     let received: unknown = null;
+    let receivedMethod: string | undefined;
+    let receivedContentType: string | undefined;
     const server = createServer((req, res) => {
+      receivedMethod = req.method;
+      receivedContentType = req.headers['content-type'];
       let body = '';
       req.on('data', (c) => (body += c));
       req.on('end', () => {
@@ -592,8 +596,15 @@ describe('RES-1b Webhook Adapter (B8)', () => {
         fire_count: 5,
         severity: 'warning',
       });
-      expect(received).toMatchObject({
+      expect(receivedMethod).toBe('POST');
+      expect(receivedContentType).toBe('application/json');
+      expect(received).toEqual({
         delivery_event_id: 'evt-1',
+        incident_id: 'inc-1',
+        reservation_id: 'res-1',
+        failure_type: 'unlink',
+        fire_count: 5,
+        severity: 'warning',
         source: 're-newrld-temp-cleanup',
       });
     } finally {
