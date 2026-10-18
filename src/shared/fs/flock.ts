@@ -134,8 +134,12 @@ async function verifyLockHeld(pid: number, targetPath: string): Promise<boolean>
  * This matches what the kernel reports via stat().st_dev for the
  * device numbers shown in /proc/locks.
  */
-function encodeDev(major: number, minor: number): number {
-  return (minor & 0xff) | (major << 8) | ((minor & ~0xff) << 12);
+/**
+ * Encodes (major, minor) to a Linux dev_t using new_encode_dev.
+ * Returns unsigned 32-bit to avoid signed comparison mismatches.
+ */
+export function encodeDev(major: number, minor: number): number {
+  return (((minor & 0xff) | (major << 8) | ((minor & ~0xff) << 12)) >>> 0);
 }
 
 /**

@@ -549,3 +549,145 @@ describe('RES-1b Delivery Worker (B8)', () => {
     expect(confirmedB).toBe(true);
   });
 });
+
+describe('RES-1b Webhook Adapter (B8)', () => {
+  it('encodeDev: correct for various device numbers', async () => {
+    const { encodeDev } = await import('../../src/shared/fs/flock.js');
+    // tmpfs case from earlier: major=0, minor=0x51 → 81
+    expect(encodeDev(0, 0x51)).toBe(81);
+    // sda1: major=8, minor=1 → 2049
+    expect(encodeDev(8, 1)).toBe(2049);
+    // Extended minor (>255): major=8, minor=256
+    // (256 & 0xff)=0, (8<<8)=2048, ((256 & ~0xff)<<12)=(256<<12)=1048576
+    expect(encodeDev(8, 256)).toBe(2048 + 1048576);
+    // Unsigned: high bit set should not go negative.
+    expect(encodeDev(0xfff, 0xfff)).toBeGreaterThan(0);
+  });
+
+  it('webhook: successful delivery (2xx)', async () => {
+    const { sendAlertWebhook } = await import(
+      '../../src/modules/world/domain/services/alert-webhook.service.js'
+    );
+    const { createServer } = await import('node:http');
+
+    let received: unknown = null;
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        received = JSON.parse(body);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      await sendAlertWebhook(`http://127.0.0.1:${port}/alert`, {
+        delivery_event_id: 'evt-1',
+        incident_id: 'inc-1',
+        reservation_id: 'res-1',
+        failure_type: 'unlink',
+        fire_count: 5,
+        severity: 'warning',
+      });
+      expect(received).toMatchObject({
+        delivery_event_id: 'evt-1',
+        source: 're-newrld-temp-cleanup',
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('webhook: non-2xx throws', async () => {
+    const { sendAlertWebhook, WebhookError } = await import(
+      '../../src/modules/world/domain/services/alert-webhook.service.js'
+    );
+    const { createServer } = await import('node:http');
+
+    const server = createServer((req, res) => {
+      res.writeHead(500);
+      res.end('Internal Error');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      await expect(
+        sendAlertWebhook(`http://127.0.0.1:${port}/alert`, {
+          delivery_event_id: 'evt-2',
+          incident_id: 'inc-2',
+          reservation_id: 'res-2',
+          failure_type: 'fsync',
+          fire_count: 10,
+          severity: 'critical',
+        }),
+      ).rejects.toThrow(WebhookError);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('webhook: missing URL throws', async () => {
+    const { sendAlertWebhook, WebhookError } = await import(
+      '../../src/modules/world/domain/services/alert-webhook.service.js'
+    );
+    await expect(
+      sendAlertWebhook(undefined, {
+        delivery_event_id: 'evt-3',
+        incident_id: 'inc-3',
+        reservation_id: 'res-3',
+        failure_type: 'unlink',
+        fire_count: 5,
+        severity: 'warning',
+      }),
+    ).rejects.toThrow(WebhookError);
+  });
+
+  it('webhook: invalid URL throws', async () => {
+    const { sendAlertWebhook, WebhookError } = await import(
+      '../../src/modules/world/domain/services/alert-webhook.service.js'
+    );
+    await expect(
+      sendAlertWebhook('not-a-url', {
+        delivery_event_id: 'evt-4',
+        incident_id: 'inc-4',
+        reservation_id: 'res-4',
+        failure_type: 'unlink',
+        fire_count: 5,
+        severity: 'warning',
+      }),
+    ).rejects.toThrow(WebhookError);
+  });
+
+  it('webhook: timeout throws', async () => {
+    const { sendAlertWebhook, WebhookError } = await import(
+      '../../src/modules/world/domain/services/alert-webhook.service.js'
+    );
+    const { createServer } = await import('node:http');
+
+    // Server that never responds.
+    const server = createServer(() => {
+      // Hang forever.
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      await expect(
+        sendAlertWebhook(`http://127.0.0.1:${port}/alert`, {
+          delivery_event_id: 'evt-5',
+          incident_id: 'inc-5',
+          reservation_id: 'res-5',
+          failure_type: 'unlink',
+          fire_count: 5,
+          severity: 'warning',
+        }),
+      ).rejects.toThrow(/timed out/i);
+    } finally {
+      server.close();
+    }
+  }, 15000);
+});
