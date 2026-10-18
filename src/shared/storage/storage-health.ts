@@ -80,6 +80,24 @@ export function findMount(mounts: MountEntry[], mountpoint: string): MountEntry 
 }
 
 /**
+ * Find the mountpoint containing a path (longest prefix match).
+ * Used when the media path is a subdirectory of a mounted volume
+ * (e.g. /data/media on a volume mounted at /data).
+ */
+export function findContainingMount(mounts: MountEntry[], path: string): MountEntry | null {
+  let best: MountEntry | null = null;
+  for (const m of mounts) {
+    const prefix = m.mountpoint === '/' ? '/' : m.mountpoint + '/';
+    if (path === m.mountpoint || path.startsWith(prefix)) {
+      if (!best || m.mountpoint.length > best.mountpoint.length) {
+        best = m;
+      }
+    }
+  }
+  return best;
+}
+
+/**
  * Evaluate storage health for a path.
  *
  * - 'ok': path is a real mountpoint on a device other than the root
@@ -97,7 +115,7 @@ export function checkStorageHealth(
     return { state: 'unknown', mountpoint, device: null, writable };
   }
   const mounts = parseMounts(mountsText);
-  const entry = findMount(mounts, mountpoint);
+  const entry = findContainingMount(mounts, mountpoint);
   if (!entry) {
     return { state: 'degraded', mountpoint, device: null, writable };
   }

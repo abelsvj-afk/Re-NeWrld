@@ -6,6 +6,7 @@ import {
   decodeEscapes,
   parseMounts,
   findMount,
+  findContainingMount,
   checkStorageHealth,
   probeWritable,
   readMountTable,
@@ -114,7 +115,9 @@ describe('checkStorageHealth', () => {
   it('reports degraded when the path is not a mountpoint', () => {
     const h = checkStorageHealth(ephemeralTable, '/data/media', true);
     expect(h.state).toBe('degraded');
-    expect(h.device).toBeNull();
+    // Now reports the containing filesystem's device (root), not null —
+    // more informative for diagnosing ephemeral storage.
+    expect(h.device).toBe('overlay');
   });
 
   it('reports degraded for a bind-mount of the root filesystem', () => {
@@ -140,6 +143,22 @@ describe('checkStorageHealth', () => {
     const h = checkStorageHealth(table, '/data/media', true);
     expect(h.state).toBe('ok');
     expect(h.device).toBe('/dev/vdb');
+  });
+
+  it('reports ok when the media path is a subdirectory of a mounted volume', () => {
+    // Single-volume consolidation: volume mounted at /data, media at /data/media.
+    const table = 'overlay / overlay rw 0 0\n/dev/vdb /data ext4 rw 0 0\n';
+    const h = checkStorageHealth(table, '/data/media', true);
+    expect(h.state).toBe('ok');
+    expect(h.device).toBe('/dev/vdb');
+  });
+
+  it('reports degraded when only the root filesystem contains the path', () => {
+    // /data is ephemeral (not a mountpoint); longest prefix is / itself.
+    const table = 'overlay / overlay rw 0 0\n';
+    const h = checkStorageHealth(table, '/data/media', true);
+    expect(h.state).toBe('degraded');
+    expect(h.device).toBe('overlay');
   });
 
   it('reports degraded when the write probe failed', () => {
