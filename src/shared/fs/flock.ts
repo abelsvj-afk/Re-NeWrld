@@ -198,9 +198,17 @@ async function waitForLock(
     // Check if process exited.
     if (child.exitCode !== null || child.signalCode !== null) {
       if (nonBlocking) {
-        // Non-blocking `flock -n` exits immediately with non-zero when
-        // the lock is held. This is CONFIRMED contention (not inference).
-        throw new LockContentionError(targetPath);
+        // B2 (rev 4): Classify by exit status, not just "exited".
+        // util-linux flock -n exits 1 when the lock is held by another
+        // process (contention). Other exit codes indicate operational
+        // failures (e.g., 66 = cannot open lock file, 64 = usage error).
+        // Only exit 1 is confirmed contention; everything else fails closed.
+        if (child.exitCode === 1) {
+          throw new LockContentionError(targetPath);
+        }
+        throw new LockVerificationError(
+          `flock -n exited with code ${child.exitCode} (signal: ${child.signalCode}) on ${targetPath}; not contention`,
+        );
       }
       // Blocking mode: unexpected exit means the lock was never acquired.
       throw new LockVerificationError(
@@ -238,7 +246,7 @@ export async function acquireExclusiveNonBlocking(path: string): Promise<LockHan
   });
   // Note: we don't need the inode here; verifyLockHeld gets it via stat.
 
-  const child = spawn('flock', ['-n', path, 'sleep', 'infinity'], { stdio: 'ignore' });
+  const child = spawn('flock', ['-n', path, 'sleep', 'infinity'], { stdio: 'ignore', detached: true });
 
   // B5: Attach error listener BEFORE checking pid. If spawn fails, the
   // 'error' event fires; without a listener it becomes an unhandled rejection.
@@ -286,7 +294,7 @@ export async function acquireShared(path: string, timeoutMs: number = 10000): Pr
   const fileStat = await stat(path);
   // Note: we don't need the inode here; verifyLockHeld gets it via stat.
 
-  const child = spawn('flock', ['-s', path, 'sleep', 'infinity'], { stdio: 'ignore' });
+  const child = spawn('flock', ['-s', path, 'sleep', 'infinity'], { stdio: 'ignore', detached: true });
 
   // B5: Attach error listener before pid check.
   const spawnErrorPromise = new Promise<Error | null>((resolve) => {
@@ -333,9 +341,11 @@ export async function releaseLock(handle: LockHandle): Promise<void> {
 
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
-      // Force kill if still alive after 2s.
+      // Force kill the process group if still alive after 2s.
       try {
-        if (proc.exitCode === null) proc.kill('SIGKILL');
+        if (proc.exitCode === null && proc.pid) {
+          process.kill(-proc.pid, 'SIGKILL'); // Negative PID = process group.
+        }
       } catch { /* ignore */ }
     }, 2000);
 
@@ -345,7 +355,12 @@ export async function releaseLock(handle: LockHandle): Promise<void> {
     });
 
     try {
-      proc.kill('SIGTERM');
+      // Kill the process group (flock + sleep child) to avoid orphans.
+      if (proc.pid) {
+        process.kill(-proc.pid, 'SIGTERM');
+      } else {
+        proc.kill('SIGTERM');
+      }
     } catch {
       clearTimeout(timer);
       resolve();
