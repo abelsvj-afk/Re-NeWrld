@@ -1,6 +1,6 @@
 # RES-1b Design: Phase-2 Writer Obligations
 
-**Status:** DRAFT rev 25 — pending ChatGPT design review. No implementation authorized.
+**Status:** DRAFT rev 26 — pending ChatGPT design review. No implementation authorized.
 **Date:** 2026-10-18.
 **Scope:** Phase-2 writer obligations per ADR-017 §5.5 (rev 16–18). Does NOT include expiry-claim worker (RES-1c) or the registry handoff (QUOTA-1).
 **Dependencies:** RES-1a (accepted). **Blocks:** RES-1c, QUOTA-1.
@@ -486,9 +486,12 @@ CREATE TABLE temp_cleanup_delivery_outbox (
     last_error TEXT,
     claimed_by TEXT,           -- worker ID holding the claim (for concurrent workers)
     claimed_at TIMESTAMPTZ,    -- when the claim was taken
+    claim_token UUID,          -- unique per claim; required for state updates (fencing)
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),  -- earliest eligible retry time
     UNIQUE (incident_id, fire_count)  -- one delivery event per firing
 );
-CREATE INDEX ON temp_cleanup_delivery_outbox (status) WHERE status = 'pending';
+CREATE INDEX ON temp_cleanup_delivery_outbox (status, next_attempt_at) 
+    WHERE status = 'pending';
 ```
 
 **Event creation (in the same txn as the counter/incident update):**
@@ -498,13 +501,42 @@ CREATE INDEX ON temp_cleanup_delivery_outbox (status) WHERE status = 'pending';
 - Remove `delivery_confirmed_at` and `delivery_attempts` from the incidents table (rev 24 columns superseded by the outbox).
 
 **Delivery worker protocol:**
-1. **Claim:** `UPDATE temp_cleanup_delivery_outbox SET claimed_by=<worker_id>, claimed_at=now() WHERE delivery_event_id = (SELECT delivery_event_id FROM temp_cleanup_delivery_outbox WHERE status='pending' AND (claimed_at IS NULL OR claimed_at < now() - interval '5 minutes') ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`.
+1. **Claim:** 
+   ```sql
+   UPDATE temp_cleanup_delivery_outbox 
+   SET claimed_by=<worker_id>, claimed_at=now(), claim_token=gen_random_uuid()
+   WHERE delivery_event_id = (
+     SELECT delivery_event_id FROM temp_cleanup_delivery_outbox 
+     WHERE status='pending' 
+       AND next_attempt_at <= now()
+       AND (claimed_at IS NULL OR claimed_at < now() - interval '5 minutes')
+     ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+   ) RETURNING *;
+   ```
+   - `next_attempt_at <= now()` enforces backoff: failed events wait before retry.
    - `FOR UPDATE SKIP LOCKED` ensures concurrent workers don't claim the same event.
    - Stale claims (older than 5 min, worker crashed) are reclaimable.
+   - Each claim generates a fresh `claim_token` (UUID). The worker must present this token for all subsequent state updates.
 2. **Send:** Transmit to the alert system with `delivery_event_id` as the deduplication key.
-3. **Confirm:** On success: `UPDATE ... SET status='sent', sent_at=now() WHERE delivery_event_id=?`.
-4. **Retry:** On failure: `UPDATE ... SET attempts=attempts+1, last_attempt_at=now(), last_error=?, claimed_by=NULL, claimed_at=NULL WHERE delivery_event_id=?`. Next worker picks it up with exponential backoff (based on `attempts`: 1min, 5min, 15min, 30min, 1hr...).
-5. **Exhausted:** After 10 attempts: `SET status='failed'`. Log at critical (`ALERT_DELIVERY_FAILED` with `delivery_event_id`, `incident_id`). The event remains for manual retry; it is never silently dropped.
+3. **Confirm (fenced):** On success: `UPDATE ... SET status='sent', sent_at=now(), claimed_by=NULL, claim_token=NULL WHERE delivery_event_id=? AND claim_token=<token>`.
+   - If 0 rows updated → the claim was superseded (another worker reclaimed). Do NOT treat as delivered; the new claimant owns the event.
+4. **Retry (fenced):** On failure: 
+   ```sql
+   UPDATE ... SET attempts=attempts+1, last_attempt_at=now(), last_error=?,
+       claimed_by=NULL, claimed_at=NULL, claim_token=NULL,
+       next_attempt_at = now() + (CASE 
+           WHEN attempts=0 THEN interval '1 minute'
+           WHEN attempts=1 THEN interval '5 minutes'
+           WHEN attempts=2 THEN interval '15 minutes'
+           WHEN attempts=3 THEN interval '30 minutes'
+           ELSE interval '1 hour' END)
+   WHERE delivery_event_id=? AND claim_token=<token>;
+   ```
+   - If 0 rows → claim superseded; abort (the new claimant will handle retry scheduling).
+   - `next_attempt_at` enforces the backoff. Initial events have `next_attempt_at=now()` (immediately eligible).
+5. **Exhausted:** After 10 attempts: `SET status='failed'` (fenced by token). Log at critical (`ALERT_DELIVERY_FAILED` with `delivery_event_id`, `incident_id`). The event remains for manual retry; it is never silently dropped.
+
+**Claim fencing rationale:** Without the token, worker B (reclaiming a stale claim) and worker A (still processing) could both update the event. Worker A's late success could overwrite worker B's retry scheduling, or vice versa. The token ensures only the current claimant modifies state. The receiver's `delivery_event_id` deduplication remains the backstop against duplicate external notifications.
 
 **Receiver contract (rev 25):**
 - The receiver deduplicates on `delivery_event_id`, NOT `incident_id`.
@@ -842,6 +874,7 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - [x] Partial unique index (rev 23) — uniqueness on (reservation_id, failure_type) WHERE status IN ('open','escalated'); multiple resolved rows allowed for audit.
 - [x] Update path and delivery contract (rev 24) — covers open+escalated; last_fired_count uses actual value; delivery_confirmed_at with at-least-once + idempotent receiver.
 - [x] Outbox pattern (rev 25) — separates incident_id from delivery_event_id; receiver deduplicates by event; concurrent workers use SKIP LOCKED; stale alternative removed.
+- [x] Backoff and fencing (rev 26) — next_attempt_at enforces retry delays; claim_token prevents stale workers from overwriting; receiver dedup remains backstop.
 - [x] No implementation written; design-only.
 
 ### 6.13 No-overwrite publication (new, rev 4)
@@ -1022,3 +1055,12 @@ Writer holds `LOCK_SH` mid-chunk. Claim attempts `LOCK_EX|LOCK_NB` → fails wit
 - **Assert:** Only one worker successfully claims E1 (`FOR UPDATE SKIP LOCKED`). The other gets no row (skipped). E1 sent exactly once. No concurrent duplicate.
 - **Event per firing uniqueness:** Simulate txn retry causing duplicate INSERT for `fire_count=10`.
 - **Assert:** Second INSERT fails on `UNIQUE(incident_id, fire_count)`. Only one event per firing exists. No duplicate notifications.
+
+### 6.30 Backoff and fencing regression (new, rev 26)
+- **Backoff enforced:** Setup: outbox event E1, first delivery fails. Assert: `next_attempt_at` = now + 1 minute. Claim query immediately after → E1 NOT selected (next_attempt_at in future). After 1 minute (simulate time advance) → E1 eligible again.
+- **Backoff escalation:** Fail again. Assert: `next_attempt_at` = now + 5 minutes. Fail again → +15 minutes. The delays increase per the schedule.
+- **Initial event immediate:** New event E2 created. Assert: `next_attempt_at` <= now (default). Claim query selects E2 immediately. No artificial delay for first delivery.
+- **Stale claim fencing:** Setup: worker A claims E1 (token T_A). Worker A stalls. After 5 min, worker B reclaims E1 (token T_B). Worker A wakes up, tries to mark 'sent' with T_A.
+- **Assert:** UPDATE with `claim_token=T_A` affects 0 rows (token mismatch). Worker A's update is rejected. Worker B owns the event. E1 not marked 'sent' by the stale worker.
+- **Fenced retry:** Worker B's send fails. Worker B updates with T_B → succeeds, sets `next_attempt_at`. Worker A tries retry update with T_A → 0 rows. Only the current claimant modifies state.
+- **Crash during send:** Worker claims E1 (token T), sends to receiver, crashes before confirm. After 5 min, worker B reclaims (new token). Re-sends. Receiver deduplicates by `delivery_event_id` → single notification. Worker B confirms with its token → 'sent'.
