@@ -58,9 +58,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   // Clean up test data (assets before reservations due to FK).
+  // UPLOAD-1: Also clean staging_allowances and the 9 MB test world.
   try {
-    await pool.query(`DELETE FROM world_media_assets WHERE world_id IN ('22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333')`);
-    await pool.query(`DELETE FROM storage_reservations WHERE world_id IN ('22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333')`);
+    await pool.query(`DELETE FROM staging_allowances WHERE world_id IN ('22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', 'b2c3d4e5-f6a7-4b8c-9d0e-f1a2b3c4d5e6', 'd4e5f6a7-b8c9-4d0e-8f1a-b2c3d4e5f6a7')`);
+    await pool.query(`DELETE FROM world_media_assets WHERE world_id IN ('22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', 'b2c3d4e5-f6a7-4b8c-9d0e-f1a2b3c4d5e6', 'd4e5f6a7-b8c9-4d0e-8f1a-b2c3d4e5f6a7')`);
+    await pool.query(`DELETE FROM storage_reservations WHERE world_id IN ('22222222-2222-2222-2222-222222222222', '33333333-3333-3333-3333-333333333333', 'b2c3d4e5-f6a7-4b8c-9d0e-f1a2b3c4d5e6', 'd4e5f6a7-b8c9-4d0e-8f1a-b2c3d4e5f6a7')`);
   } catch {}
   await pool.end();
 });
@@ -464,7 +466,9 @@ describe('QUOTA-1: HTTP file-size enforcement (B5)', () => {
         [worldId, userId]
       );
 
+      // UPLOAD-1: Must have valid PNG magic bytes (89 50 4E 47 0D 0A 1A 0A).
       const okFile = Buffer.alloc(9 * 1024 * 1024, 0);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(okFile, 0);
       const boundary = 'testboundary123';
       const header = Buffer.from(
         `--${boundary}\r\n` +

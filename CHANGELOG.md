@@ -54,6 +54,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Creator/Reader view switching (Slice 3, H-UX3): creator-only toggle in both headers, localStorage preference, one-way redirect for stale preferences, no role changes.
 - Interactive Narrative Engine: locked choice display, inventory drawer, consequence cues, variable registry, state-reactive prose, chapter checkpoints
 - ADR-017 MIG-0: migrations 014 (media durable-ops) and 015 (media registry) — 10 tables, 10 indexes, roles trigger, singleton maintenance seed; integration tests 7/7 passing against real PostgreSQL
+- UPLOAD-1: ADR-017 compliant upload path with staging allowances, magic-bytes validation, and failure-atomic reservation flow (migrations 018-020)
 
 ### Fixed
 - Centralized error handling: Zod errors → 400, typed domain errors → mapped status codes; fixed production startup script for missing `.env`.

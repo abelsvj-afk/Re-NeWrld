@@ -27,7 +27,9 @@ export type WriterErrorCode =
   | 'WRITER_CONFLICT'      // Another writer owns this reservation (409)
   | 'RESERVATION_INACTIVE' // Reservation not in RESERVED/WRITING or released
   | 'HEARTBEAT_FAILED'     // Heartbeat updated 0 rows; reservation no longer active
-  | 'FENCED_WRITE_REJECTED'; // State changed under lock; write aborted
+  | 'FENCED_WRITE_REJECTED' // State changed under lock; write aborted
+  | 'TRANSFER_INCOMPLETE'  // bytes_ready=false; initial transfer not done (UPLOAD-1)
+  | 'FENCE_ACTIVE';         // Maintenance fence active; writes rejected (UPLOAD-1)
 
 export class Phase2WriterError extends Error {
   public readonly code: WriterErrorCode;
@@ -37,7 +39,10 @@ export class Phase2WriterError extends Error {
     super(message);
     this.name = 'Phase2WriterError';
     this.code = code;
-    this.httpStatus = code === 'WRITER_CONFLICT' ? 409 : 410;
+    this.httpStatus =
+      code === 'WRITER_CONFLICT' ? 409 :
+      code === 'FENCE_ACTIVE' ? 503 :
+      code === 'TRANSFER_INCOMPLETE' ? 500 : 410;
   }
 }
 
@@ -46,6 +51,15 @@ export interface Phase2WriterDeps {
   mediaRoot: string;
   /** Validates reservation is active; returns true if state in (RESERVED, WRITING) and released_at IS NULL. */
   isReservationActive: (reservationId: string) => Promise<boolean>;
+  /**
+   * UPLOAD-1: Returns reservation write eligibility.
+   * Checks state, bytes_ready flag, and fence under the caller's lock.
+   * Returns { eligible, reason } — reason is set when not eligible.
+   */
+  checkWriteEligibility?: (reservationId: string) => Promise<{
+    eligible: boolean;
+    reason?: 'INACTIVE' | 'TRANSFER_INCOMPLETE' | 'FENCE_ACTIVE';
+  }>;
   /** Executes heartbeat UPDATE; returns number of rows affected. */
   heartbeat: (reservationId: string) => Promise<number>;
   /** Logger. */
@@ -182,13 +196,28 @@ export async function writeChunkFenced(
   const shLock = await acquireShared(session.tempPath);
   try {
     // Step 2: Re-validate under lock.
-    const active = await deps.isReservationActive(session.reservationId);
-    if (!active) {
-      // Step 3: Abort. No bytes written.
-      throw new Phase2WriterError(
-        'FENCED_WRITE_REJECTED',
-        `Reservation ${session.reservationId} became inactive during write; chunk rejected`,
-      );
+    // UPLOAD-1: Use checkWriteEligibility if available (checks bytes_ready + fence).
+    // Otherwise fall back to isReservationActive (pre-UPLOAD-1 behavior).
+    if (deps.checkWriteEligibility) {
+      const { eligible, reason } = await deps.checkWriteEligibility(session.reservationId);
+      if (!eligible) {
+        const code = reason === 'TRANSFER_INCOMPLETE' ? 'TRANSFER_INCOMPLETE'
+          : reason === 'FENCE_ACTIVE' ? 'FENCE_ACTIVE'
+          : 'FENCED_WRITE_REJECTED';
+        throw new Phase2WriterError(
+          code,
+          `Write rejected for ${session.reservationId}: ${reason}`,
+        );
+      }
+    } else {
+      const active = await deps.isReservationActive(session.reservationId);
+      if (!active) {
+        // Step 3: Abort. No bytes written.
+        throw new Phase2WriterError(
+          'FENCED_WRITE_REJECTED',
+          `Reservation ${session.reservationId} became inactive during write; chunk rejected`,
+        );
+      }
     }
 
     // Step 4: Write (single syscall).

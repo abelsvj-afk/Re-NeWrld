@@ -64,6 +64,47 @@ const WorldParams = z.object({
   id: z.string().uuid({ message: 'Invalid world id' }),
 });
 
+/**
+ * UPLOAD-1: Detect mimetype from magic bytes (not extension or client mimetype).
+ * Returns the mimetype string or null if unrecognized.
+ * - JPEG: FF D8 FF
+ * - PNG: 89 50 4E 47 0D 0A 1A 0A
+ * - WebP: RIFF....WEBP
+ * - GIF: GIF87a or GIF89a
+ */
+function detectMimetypeFromMagic(magic: Buffer): string | null {
+  if (magic.length < 4) return null;
+  // JPEG
+  if (magic[0] === 0xff && magic[1] === 0xd8 && magic[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  // PNG
+  if (
+    magic.length >= 8 &&
+    magic[0] === 0x89 && magic[1] === 0x50 && magic[2] === 0x4e && magic[3] === 0x47 &&
+    magic[4] === 0x0d && magic[5] === 0x0a && magic[6] === 0x1a && magic[7] === 0x0a
+  ) {
+    return 'image/png';
+  }
+  // WebP: RIFF....WEBP
+  if (
+    magic.length >= 12 &&
+    magic[0] === 0x52 && magic[1] === 0x49 && magic[2] === 0x46 && magic[3] === 0x46 &&
+    magic[8] === 0x57 && magic[9] === 0x45 && magic[10] === 0x42 && magic[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  // GIF
+  if (
+    magic.length >= 6 &&
+    magic[0] === 0x47 && magic[1] === 0x49 && magic[2] === 0x46 &&
+    magic[3] === 0x38 && (magic[4] === 0x37 || magic[4] === 0x39) && magic[5] === 0x61
+  ) {
+    return 'image/gif';
+  }
+  return null;
+}
+
 const CreateWorldBody = z.object({
   title: z.string().min(1, { message: 'Title is required' }).max(255),
   description: z.string().max(10000).nullable().optional(),
@@ -543,43 +584,217 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
   });
 
   // --- Media upload (cover art, scene illustrations) ---
+  // UPLOAD-1: ADR-017 compliant failure-atomic upload path (design rev 24).
+  // Flow: allowance → stream → validate → convert → Phase-A → Phase-B/C → 201.
+  // The old direct-write path is REMOVED (no feature flag, no fallback).
   app.post('/worlds/:id/media', { preHandler: creatorOnly }, async (request, reply) => {
     const params = WorldParams.parse(request.params);
     const world = await deps.worldRepository.findById(parseWorldId(params.id));
     if (!world || !world.getCreatorId().equals(request.user!.userId)) {
       return reply.code(404).send({ error: 'World not found' });
     }
+    const worldId = params.id;
 
     const file = await request.file();
     if (!file) {
       return reply.code(400).send({ error: 'No file uploaded' });
     }
 
-    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    if (!allowed.includes(file.mimetype)) {
-      return reply.code(400).send({ error: 'Only JPEG, PNG, WebP, and GIF images are allowed' });
-    }
-
-    const fs = await import('fs/promises');
-    const path = await import('path');
+    // Dynamic imports for the upload flow.
+    const {
+      createAllowance,
+      lockStagingFile,
+      convertAllowance,
+      cancelAllowance,
+      stagingPathFor,
+      StagingAllowanceError,
+    } = await import('../domain/services/staging-allowance.service.js');
+    const { getWorldQuotaBytes, checkFileSizeLimit } = await import('../../../shared/config/quota.js');
+    const { query, withTransaction } = await import('../../../shared/database/db.js');
+    const { createHash } = await import('node:crypto');
+    const path = await import('node:path');
     const { v4: uuidv4 } = await import('uuid');
 
-    await fs.mkdir(deps.mediaStoragePath, { recursive: true });
-    // Derive extension from validated mimetype, not client filename (audit finding)
-    const extByMime: Record<string, string> = {
-      'image/jpeg': '.jpg',
-      'image/png': '.png',
-      'image/webp': '.webp',
-      'image/gif': '.gif',
+    const mediaRoot = deps.mediaStoragePath;
+    const quotaBytes = getWorldQuotaBytes();
+
+    // Staging deps (shared across allowance lifecycle).
+    const stagingDeps = {
+      quotaBytes,
+      maxStagingBytes: 10 * 1024 * 1024,
+      allowanceTtlMs: 2 * 60 * 1000,
+      mediaRoot,
+      isFenceActive: async (tx: any) => {
+        const r = await tx.query(`SELECT active FROM system_maintenance WHERE id = 1`);
+        return r.rows.length > 0 && r.rows[0].active === true;
+      },
+      isBackfillActive: async (tx: any) => {
+        const r = await tx.query(
+          `SELECT 1 FROM backfill_runs WHERE state = 'in_progress' LIMIT 1`
+        );
+        return r.rows.length > 0;
+      },
+      quotaUsedBytes: async (wid: string, tx: any) => {
+        const r = await tx.query(`SELECT quota_used_bytes($1) AS used`, [wid]);
+        return Number(r.rows[0].used);
+      },
+      lockWorldRow: async (wid: string, tx: any) => {
+        const r = await tx.query(`SELECT 1 FROM worlds WHERE world_id = $1 FOR UPDATE`, [wid]);
+        if (r.rows.length === 0) throw new Error('World not found');
+      },
+      createReservation: async (wid: string, sizeBytes: number, bytesReady: boolean, tx: any) => {
+        const r = await tx.query(
+          `INSERT INTO storage_reservations (world_id, size_bytes, state, bytes_ready)
+           VALUES ($1, $2, 'RESERVED', $3) RETURNING reservation_id`,
+          [wid, sizeBytes, bytesReady]
+        );
+        return { reservationId: r.rows[0].reservation_id };
+      },
+      log: (level: string, msg: string, data?: Record<string, unknown>) =>
+        request.log[level as 'info'](data, msg),
     };
-    const ext = extByMime[file.mimetype] ?? '.jpg';
-    const filename = `${uuidv4()}${ext}`;
-    const filepath = path.join(deps.mediaStoragePath, filename);
 
-    const buffer = await file.toBuffer();
-    await fs.writeFile(filepath, buffer);
+    // Step 1: Create staging allowance (BEFORE any bytes accepted).
+    let allowance;
+    try {
+      allowance = await createAllowance(worldId, stagingDeps);
+    } catch (err) {
+      if (err instanceof StagingAllowanceError) {
+        return reply.code(err.httpStatus).send({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
 
-    return reply.code(201).send({ url: `/media/${filename}` });
+    // Step 2: Lock staging file and stream bytes.
+    let stagingFd: any = null;
+    let stagingLock: any = null;
+    try {
+      const locked = await lockStagingFile(mediaRoot, allowance.allowanceId);
+      stagingFd = locked.fd;
+      stagingLock = locked.handle;
+
+      // Stream the multipart file to the staging file.
+      // The multipart plugin enforces the 10 MB cap.
+      const buffer = await file.toBuffer();
+      checkFileSizeLimit(buffer.length); // 413 if over 10 MB (defense in depth)
+      await stagingFd.write(buffer, 0, buffer.length, 0);
+      await stagingFd.sync();
+
+      // Step 3: Magic bytes validation (from staged data, not mimetype).
+      const magic = buffer.subarray(0, 12);
+      const mimetype = detectMimetypeFromMagic(magic);
+      if (!mimetype) {
+        await cancelAllowance(allowance.allowanceId, mediaRoot, stagingDeps);
+        try {
+          const { unlink } = await import('node:fs/promises');
+          await unlink(stagingPathFor(mediaRoot, allowance.allowanceId));
+        } catch { /* ignore */ }
+        return reply.code(415).send({ error: 'INVALID_FILE_TYPE', message: 'File content does not match a supported image format' });
+      }
+
+      // Step 4: Convert allowance → reservation (atomic).
+      // This creates the .part file, transfers bytes, sets bytes_ready=true.
+      const { reservationId, sizeBytes } = await convertAllowance(
+        allowance.allowanceId,
+        worldId,
+        stagingFd,
+        stagingLock,
+        stagingDeps
+      );
+      // Staging lock/fd released by convertAllowance on success.
+      stagingFd = null;
+      stagingLock = null;
+
+      // Step 5: Compute content hash for the registry.
+      const contentSha256 = createHash('sha256').update(buffer).digest('hex');
+
+      // Step 6: Phase-A — commit reservation to registry (asset PENDING).
+      const { commitReservationToRegistry } = await import('../domain/services/quota-handoff.service.js');
+      const extByMime: Record<string, string> = {
+        'image/jpeg': '.jpg',
+        'image/png': '.png',
+        'image/webp': '.webp',
+        'image/gif': '.gif',
+      };
+      const ext = extByMime[mimetype] ?? '.jpg';
+      const filename = `${uuidv4()}${ext}`;
+
+      const { assetId } = await commitReservationToRegistry(
+        {
+          reservationId,
+          worldId,
+          filename,
+          url: `/media/${filename}`,
+          mimetype,
+          sizeBytes,
+          contentSha256,
+        },
+        {
+          withTransaction,
+          log: (l: string, m: string, d?: any) => request.log[l as 'info'](d, m),
+          metrics: { handoffTotal: { inc: () => {} } },
+        }
+      );
+
+      // Step 7: Phase-B/C — link to final location and mark ACTIVE.
+      // For UPLOAD-1, the .part file IS the content. Link it to the final path.
+      const { phaseBPublish, phaseCMarkActive } = await import('../domain/services/publication.service.js');
+      const { tempPathFor } = await import('../domain/services/phase2-writer.service.js');
+      const tempPath = tempPathFor(mediaRoot, reservationId);
+
+      await withTransaction(async (tx) => {
+        await phaseBPublish(
+          {
+            reservationId,
+            worldId,
+            mediaRoot,
+            tempPath,
+            finalFilename: filename,
+            mimetype,
+            sizeBytes,
+            contentSha256,
+          },
+          assetId,
+          {
+            log: (l: string, m: string, d?: any) => request.log[l as 'info'](d, m),
+          } as any,
+          tx
+        );
+        await phaseCMarkActive(assetId, tx, {
+          log: (l: string, m: string, d?: any) => request.log[l as 'info'](d, m),
+        } as any);
+      });
+
+      // Step 8: Return 201 ONLY after asset is ACTIVE.
+      return reply.code(201).send({ url: `/media/${filename}`, assetId });
+
+    } catch (err) {
+      // Cleanup on failure: release staging lock, cancel allowance.
+      if (stagingLock) {
+        try {
+          const { releaseLock } = await import('../../../shared/fs/flock.js');
+          await releaseLock(stagingLock);
+        } catch { /* ignore */ }
+      }
+      if (stagingFd) {
+        try { await stagingFd.close(); } catch { /* ignore */ }
+      }
+      if (allowance) {
+        try {
+          await cancelAllowance(allowance.allowanceId, mediaRoot, stagingDeps);
+        } catch { /* ignore */ }
+      }
+      if (err instanceof StagingAllowanceError) {
+        return reply.code(err.httpStatus).send({ error: err.code, message: err.message });
+      }
+      // QuotaError (from checkFileSizeLimit): 413 FILE_TOO_LARGE, etc.
+      const { QuotaError } = await import('../../../shared/config/quota.js');
+      if (err instanceof QuotaError) {
+        const status = (err as any).httpStatus || (err as any).statusCode || 500;
+        return reply.code(status).send({ error: (err as any).code || 'QUOTA_ERROR', message: err.message });
+      }
+      throw err;
+    }
   });
 
   app.get('/worlds/:id/choices', { preHandler: creatorOnly }, async (request) => {

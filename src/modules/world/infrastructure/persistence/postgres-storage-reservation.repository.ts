@@ -32,8 +32,8 @@ export class PostgresStorageReservationRepository implements StorageReservationR
       throw new Error('sizeBytes must be positive');
     }
     const result = await tx.query<ReservationRow>(
-      `INSERT INTO storage_reservations (world_id, size_bytes, state)
-       VALUES ($1, $2, 'RESERVED')
+      `INSERT INTO storage_reservations (world_id, size_bytes, state, bytes_ready)
+       VALUES ($1, $2, 'RESERVED', true)
        RETURNING reservation_id, world_id, size_bytes, state, epoch,
                  created_at, expires_at, released_at`,
       [input.worldId.getValue(), input.sizeBytes]
