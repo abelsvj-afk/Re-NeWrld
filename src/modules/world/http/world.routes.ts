@@ -972,6 +972,60 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     }
   });
 
+  // SHARE-1: Share an asset with another world.
+  app.post('/worlds/:id/media/:assetId/share', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { assetId } = z.object({ assetId: z.string().uuid() }).parse(request.params);
+    const { targetWorldId } = z.object({ targetWorldId: z.string().uuid() }).parse(request.body);
+    const worldId = params.id;
+
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(worldId), request.user!.userId);
+
+    const { shareAsset, ShareError } = await import(
+      '../domain/services/asset-share.service.js'
+    );
+
+    try {
+      await shareAsset(assetId, worldId, targetWorldId, {
+        log: (l, m, d) => request.log[l as 'info'](d, m),
+      });
+      return reply.code(204).send();
+    } catch (err) {
+      if (err instanceof ShareError) {
+        return reply.code(err.httpStatus).send({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
+  });
+
+  // SHARE-1: Remove sharing for an asset.
+  app.delete('/worlds/:id/media/:assetId/share/:targetWorldId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { assetId, targetWorldId } = z.object({
+      assetId: z.string().uuid(),
+      targetWorldId: z.string().uuid(),
+    }).parse(request.params);
+    const worldId = params.id;
+
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(worldId), request.user!.userId);
+
+    const { unshareAsset, ShareError } = await import(
+      '../domain/services/asset-share.service.js'
+    );
+
+    try {
+      await unshareAsset(assetId, worldId, targetWorldId, {
+        log: (l, m, d) => request.log[l as 'info'](d, m),
+      });
+      return reply.code(204).send();
+    } catch (err) {
+      if (err instanceof ShareError) {
+        return reply.code(err.httpStatus).send({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
+  });
+
   app.get('/worlds/:id/choices', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
     await requireWorldOwnership(deps.worldRepository, parseWorldId(params.id), request.user!.userId);

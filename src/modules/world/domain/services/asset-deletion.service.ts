@@ -20,6 +20,7 @@ import { withTransaction } from '../../../../shared/database/db.js';
 export type DeletionErrorCode =
   | 'ASSET_NOT_FOUND'         // 404
   | 'ASSET_REFERENCED'        // 409 - active references exist
+  | 'ASSET_SNAPSHOT_PROTECTED' // 409 - referenced by published snapshot
   | 'DELETION_ABORTED'        // 409 - lifecycle reverted, retry
   | 'FENCE_ACTIVE'            // 503
   | 'BACKFILL_IN_PROGRESS';   // 503
@@ -92,7 +93,7 @@ export async function deletionT1(
 
     // Asset row lock
     const assetResult = await tx.query(
-      `SELECT asset_id, world_id, url, lifecycle FROM world_media_assets
+      `SELECT asset_id, world_id, url, lifecycle, shared_with_worlds FROM world_media_assets
        WHERE asset_id = $1 FOR UPDATE`,
       [assetId]
     );
@@ -121,6 +122,7 @@ export async function deletionT1(
     }
 
     // Authoritative reference scan (owning world only, pre-SHARE-1)
+    // SHARE-1: Also check snapshot references (by asset_id) and shared-world references
     const refs = await tx.query(
       `SELECT 'cover' AS role FROM worlds
        WHERE world_id = $2 AND metadata->>'coverArtUrl' = $1
@@ -136,6 +138,38 @@ export async function deletionT1(
         `Asset ${assetId} has active references`,
         refs.rows.map((r) => ({ role: r.role }))
       );
+    }
+
+    // SHARE-1: Check snapshot protection (by asset_id)
+    const snapRefs = await tx.query(
+      `SELECT snapshot_id FROM asset_snapshot_references WHERE asset_id = $1 LIMIT 1`,
+      [assetId]
+    );
+    if (snapRefs.rows.length > 0) {
+      throw new DeletionError(
+        'ASSET_SNAPSHOT_PROTECTED',
+        `Asset ${assetId} is referenced by published snapshots and cannot be deleted`
+      );
+    }
+
+    // SHARE-1: Check shared-world references
+    const sharedWith: string[] = asset.shared_with_worlds || [];
+    for (const sharedWorldId of sharedWith) {
+      const sharedRefs = await tx.query(
+        `SELECT 'cover' AS role FROM worlds
+         WHERE world_id = $2 AND metadata->>'coverArtUrl' = $1
+         UNION
+         SELECT 'illustration' AS role FROM scenes
+         WHERE world_id = $2 AND metadata->>'illustrationUrl' = $1`,
+        [asset.url, sharedWorldId]
+      );
+      if (sharedRefs.rows.length > 0) {
+        throw new DeletionError(
+          'ASSET_REFERENCED',
+          `Asset ${assetId} has active references in shared world ${sharedWorldId}`,
+          sharedRefs.rows.map((r) => ({ role: r.role }))
+        );
+      }
     }
 
     // No references — mark pending_deletion

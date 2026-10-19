@@ -292,6 +292,9 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
   ];
   const webDist = candidates.find((c) => fs.existsSync(path.join(c, 'index.html')));
   // Serve uploaded media (cover art, scene illustrations)
+  // SHARE-1: Registry-gated serving replaces static file handler for /media/.
+  // The static plugin is still registered (for sendFile support) but without
+  // the /media/ prefix — the custom handler in media-serving.ts controls access.
   const fastifyStatic = (await import('@fastify/static')).default;
   await fs.promises.mkdir(env.MEDIA_STORAGE_PATH, { recursive: true }).catch(() => {});
   // Startup write probe (ADR-017 OPS-0): cached once, never per-request.
@@ -303,7 +306,18 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
       'Media storage path is not writable at startup; /health will report degraded',
     );
   }
-  await app.register(fastifyStatic, { root: env.MEDIA_STORAGE_PATH, prefix: '/media/' });
+  // Register static for sendFile support (no prefix — SHARE-1 handler owns /media/)
+  await app.register(fastifyStatic, {
+    root: env.MEDIA_STORAGE_PATH,
+    prefix: '/__media_static__/',  // Unused prefix; actual serving via custom route
+    decorateReply: true,
+  });
+  // SHARE-1: Registry-gated media serving
+  const { registerMediaServing } = await import('./modules/world/http/media-serving.js');
+  registerMediaServing(app, {
+    mediaRoot: env.MEDIA_STORAGE_PATH,
+    log: (l, m, d) => app.log[l as 'info'](d, m),
+  });
   if (webDist) {
     await app.register(fastifyStatic, { root: webDist, prefix: '/', decorateReply: false });
     const indexPath = path.join(webDist, 'index.html');

@@ -164,6 +164,28 @@ export class PublishWorldUseCase {
         canonData: parsed.data,
       });
       await this.canon.insert(snapshot, tx);
+
+      // SHARE-1: Populate snapshot references for media assets.
+      // Pins the current cover/illustration assets to this snapshot.
+      const snapshotId = snapshot.getSnapshotId().getValue();
+      const worldIdStr = world.getWorldId().getValue();
+      await tx.query(
+        `INSERT INTO asset_snapshot_references (snapshot_id, asset_id, role)
+         SELECT $1, asset_id, 'cover' FROM world_media_assets
+         WHERE url = (SELECT metadata->>'coverArtUrl' FROM worlds WHERE world_id = $2)
+           AND (SELECT metadata->>'coverArtUrl' FROM worlds WHERE world_id = $2) IS NOT NULL
+         ON CONFLICT DO NOTHING`,
+        [snapshotId, worldIdStr]
+      );
+      await tx.query(
+        `INSERT INTO asset_snapshot_references (snapshot_id, asset_id, role)
+         SELECT DISTINCT $1, a.asset_id, 'illustration'
+         FROM world_media_assets a
+         JOIN scenes s ON s.world_id = $2 AND s.metadata->>'illustrationUrl' = a.url
+         ON CONFLICT DO NOTHING`,
+        [snapshotId, worldIdStr]
+      );
+
       world.publish();
       await this.worlds.save(world, tx);
       return { snapshot, warnings: [...graph.unreachable, ...variableWarnings] };

@@ -70,7 +70,7 @@ export async function validateAssetUrl(
 ): Promise<AssetRef> {
   // Resolve URL → asset
   const result = await tx.query(
-    `SELECT asset_id, world_id, lifecycle, file_confirmed_present
+    `SELECT asset_id, world_id, lifecycle, file_confirmed_present, shared_with_worlds
      FROM world_media_assets WHERE url = $1`,
     [url]
   );
@@ -90,12 +90,17 @@ export async function validateAssetUrl(
     fileConfirmedPresent: row.file_confirmed_present,
   };
 
-  // REF-1: Cross-world references rejected (fail-closed until SHARE-1)
+  // SHARE-1: Cross-world references allowed if asset is shared with requesting world.
+  // Otherwise, reject fail-closed (S18 deferred).
   if (asset.worldId !== requestingWorldId) {
-    throw new ReferenceValidationError(
-      'ASSET_WRONG_WORLD',
-      `Asset ${asset.assetId} belongs to different world`
-    );
+    const sharedWith: string[] = row.shared_with_worlds || [];
+    if (!sharedWith.includes(requestingWorldId)) {
+      throw new ReferenceValidationError(
+        'ASSET_WRONG_WORLD',
+        `Asset ${asset.assetId} belongs to different world and is not shared`
+      );
+    }
+    // Shared asset — allow the reference
   }
 
   if (asset.lifecycle !== 'active') {
