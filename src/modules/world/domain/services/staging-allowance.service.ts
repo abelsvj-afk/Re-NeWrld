@@ -33,7 +33,8 @@ export type AllowanceErrorCode =
   | 'QUOTA_EXCEEDED'
   | 'STAGING_EXPIRED'
   | 'STAGING_FILE_MISSING'
-  | 'ALLOWANCE_NOT_FOUND';
+  | 'ALLOWANCE_NOT_FOUND'
+  | 'STORAGE_WRITE_FAILED'; // API-1 §9.3: filesystem I/O error
 
 export class StagingAllowanceError extends Error {
   public readonly code: AllowanceErrorCode;
@@ -325,16 +326,39 @@ async function transferStagingToPart(
     const partFd = await open(partPath, constants.O_WRONLY, 0o644);
     try {
       // Copy bytes (staging → part). Use read/write loop for portability.
+      // API-1 §9.3: Map I/O errors to STORAGE_WRITE_FAILED (distinct from quota/capacity).
       const CHUNK = 64 * 1024;
       const buf = Buffer.alloc(CHUNK);
       let offset = 0;
       for (;;) {
-        const { bytesRead } = await stagingFd.read(buf, 0, CHUNK, offset);
+        let bytesRead: number;
+        try {
+          ({ bytesRead } = await stagingFd.read(buf, 0, CHUNK, offset));
+        } catch (err) {
+          throw new StagingAllowanceError(
+            'STORAGE_WRITE_FAILED',
+            `Failed reading staging file: ${(err as Error).message}`
+          );
+        }
         if (bytesRead === 0) break;
-        await partFd.write(buf.subarray(0, bytesRead), 0, bytesRead, offset);
+        try {
+          await partFd.write(buf.subarray(0, bytesRead), 0, bytesRead, offset);
+        } catch (err) {
+          throw new StagingAllowanceError(
+            'STORAGE_WRITE_FAILED',
+            `Failed writing part file: ${(err as Error).message}`
+          );
+        }
         offset += bytesRead;
       }
-      await partFd.sync();
+      try {
+        await partFd.sync();
+      } catch (err) {
+        throw new StagingAllowanceError(
+          'STORAGE_WRITE_FAILED',
+          `Failed syncing part file: ${(err as Error).message}`
+        );
+      }
     } finally {
       await partFd.close();
     }
