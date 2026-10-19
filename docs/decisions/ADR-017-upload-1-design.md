@@ -92,18 +92,16 @@ CREATE TABLE staging_allowances (
   world_id UUID NOT NULL REFERENCES worlds(world_id) ON DELETE CASCADE,
   max_bytes BIGINT NOT NULL CHECK (max_bytes > 0 AND max_bytes <= 10485760),
   state TEXT NOT NULL 
-    CHECK (state IN ('active', 'expiring', 'converting', 'expired', 'cancelled'))
+    CHECK (state IN ('active', 'expiring', 'expired', 'cancelled'))
     DEFAULT 'active',
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   reservation_id UUID REFERENCES storage_reservations(reservation_id),
   -- State machine constraints:
-  -- 'active' → 'expiring' (expiry detected)
-  -- 'active' → 'converting' (conversion started)
-  -- 'active' → 'cancelled' (user cancelled)
+  -- 'active' → 'expiring' (expiry detected by cleanup)
+  -- 'active' → 'cancelled' (conversion committed OR user cancelled)
   -- 'expiring' → 'expired' (cleanup deleted file)
-  -- 'expiring' → 'converting' (writer won race)
-  -- 'converting' → 'cancelled' (conversion committed)
+  -- 'expiring' → 'cancelled' (conversion won race vs cleanup)
   CONSTRAINT chk_expiring_has_expiry CHECK (
     (state != 'expiring') OR (expires_at <= now())
   )
@@ -142,10 +140,9 @@ $$ LANGUAGE SQL STABLE;
 ```
 
 **This is the authoritative definition.** It matches the state machine:
-- `active` → counted (normal)
-- `expiring` → counted (file may still exist, cleanup deferred)
-- `converting` → not counted (atomic handoff to reservation)
-- `expired`, `cancelled` → not counted (terminal states)
+- `active` → counted (normal, file streaming or staged)
+- `expiring` → counted (expiry detected, file may still exist)
+- `expired`, `cancelled` → not counted (terminal states, file deleted or converted)
 
 **Which states count (rev 6: fixes accounting gap):**
 - `'active'` AND `expires_at > now()` → COUNTED (normal case)
@@ -201,85 +198,129 @@ COALESCE((SELECT SUM(max_bytes) FROM staging_allowances
 
 #### Step 3: Atomic allowance → reservation conversion
 
-**Authoritative conversion transaction (rev 7):**
+**Authoritative conversion transaction (rev 8: file lock coordinated):**
 
-```sql
-BEGIN;
--- L1: Serialize against cleanup job, fence, backfill, other conversions
-SELECT pg_advisory_xact_lock(hashtext('media_global'));
+**Critical fix (reviewer blocker 1):** Conversion MUST hold the staging file lock during the DB transaction. Otherwise cleanup can delete the file after conversion commits.
 
--- Step 1: Claim the allowance (handles both 'active' and 'expiring')
--- This is the mutual exclusion point vs cleanup job.
-UPDATE staging_allowances 
-SET state = 'converting',
-    reservation_id = NULL  -- Will be set after reservation created
-WHERE allowance_id = $1 
-  AND state IN ('active', 'expiring');
--- If 0 rows affected:
---   → Allowance is 'expired', 'cancelled', or 'converting' (another conversion in progress)
---   → ROLLBACK, delete staged file if exists, return 500 STAGING_EXPIRED
--- The UPDATE is atomic: cleanup job cannot mark it 'expired' after we claim it,
--- because cleanup also does UPDATE ... WHERE state IN ('active', 'expiring').
+```
+CONVERSION SEQUENCE:
+1. Acquire LOCK_EX (blocking) on /data/media/.staging/{allowance_id}.tmp
+   -- If file does not exist → abort, return 500 STAGING_FILE_MISSING
+   -- This lock is held for the entire conversion (DB txn + file move)
+   -- Cleanup job uses LOCK_EX|LOCK_NB → will fail (EBUSY) → skips
 
--- Step 2: Re-check fence and backfill (could have activated during streaming)
-SELECT active FROM system_maintenance WHERE id = 1;
--- If active → ROLLBACK
---   → Allowance remains 'converting' (not 'active', not counted)
---   → Cleanup job will see 'converting' with old timestamp → mark 'expired' after timeout → delete file
---   → Return 503 FENCE_ACTIVE
+2. BEGIN DB transaction
+   -- L1: pg_advisory_xact_lock(hashtext('media_global'))
+   -- L2: pg_advisory_xact_lock(hashtext('media_quota:' || world_id))
+   -- World row: SELECT ... FOR UPDATE
+   
+3. Claim the allowance:
+   UPDATE staging_allowances 
+   SET state = 'cancelled',
+       reservation_id = $reservation_id_placeholder
+   WHERE allowance_id = $1 
+     AND state IN ('active', 'expiring');
+   -- If 0 rows → ROLLBACK, release file lock, delete staged file, 500 STAGING_EXPIRED
+   -- Note: Direct to 'cancelled', no 'converting' intermediate.
+   -- The row lock (from UPDATE) serializes vs cleanup job's UPDATE.
 
-SELECT COUNT(*) FROM backfill_runs WHERE status = 'in_progress';
--- If > 0 → ROLLBACK (same as fence), return 503 BACKFILL_IN_PROGRESS
+4. Re-check fence and backfill:
+   SELECT active FROM system_maintenance WHERE id = 1;
+   -- If active → ROLLBACK (allowance reverts to 'active'/'expiring'), release file lock, 503
+   
+5. Create reservation via reserveStorage(actual_bytes):
+   -- quota_used_bytes() does NOT count 'cancelled' allowances
+   -- The allowance was just marked 'cancelled', so no double-count
+   -- INSERT into storage_reservations (counted)
+   -- If quota exceeded → ROLLBACK (allowance reverts), release lock, 507
 
--- Step 3: Create the reservation (quota checked with allowance still 'converting')
--- reserveStorage() logic:
---   - Checks quota_used_bytes() which does NOT count 'converting' allowances
---   - INSERTs into storage_reservations (which IS counted)
---   - If quota exceeded → ROLLBACK → allowance stays 'converting' → cleanup handles
---   - Returns reservation_id
+6. UPDATE staging_allowances SET reservation_id = $actual_reservation_id
+   WHERE allowance_id = $1;
+   -- Link for audit trail
 
--- Step 4: Link allowance to reservation, mark cancelled
-UPDATE staging_allowances 
-SET state = 'cancelled',
-    reservation_id = $reservation_id
-WHERE allowance_id = $1;
--- 'cancelled' is terminal, not counted. The reservation is now counted.
+7. COMMIT
+   -- L1, L2 released
+   -- Allowance is 'cancelled' (not counted), reservation is counted
+   -- Atomic: no point where both or neither are counted
 
-COMMIT;
--- L1 released. Quota accounting: allowance (not counted) → reservation (counted). Atomic.
+8. Rename staged file to .tmp/{reservation_id}.part
+   -- Still holding LOCK_EX on the source file
+   -- rename() is atomic
+   -- If rename fails → reservation exists without file → RES-1c reaps, orphan sweep cleans
+
+9. Release LOCK_EX on staging file (now at new path, lock transfers via fd)
 ```
 
-**Mutual exclusion with cleanup job:**
+**Why this closes the race (reviewer blocker 1):**
 
-Both conversion and cleanup use the same pattern:
-```sql
-UPDATE staging_allowances SET state = $new_state
-WHERE allowance_id = $1 AND state IN ('active', 'expiring');
-```
+| Interleaving | Outcome |
+|--------------|---------|
+| Conversion acquires file lock, then cleanup tries | Cleanup's `LOCK_EX|LOCK_NB` fails (EBUSY) → cleanup skips entirely (no DB update, no delete) |
+| Cleanup acquires file lock, then conversion tries | Conversion blocks on `LOCK_EX` (step 1) → cleanup deletes file, marks 'expired', releases → conversion acquires lock, but file is gone → step 1 detects missing file → aborts |
+| Both try DB UPDATE simultaneously | PostgreSQL row lock serializes. Winner's `WHERE state IN ('active','expiring')` matches; loser's doesn't (state already changed). |
 
-- **Conversion** sets `state='converting'`
-- **Cleanup** sets `state='expired'` (after deleting file)
+**The key:** Conversion holds the FILE lock for the entire operation (DB txn + rename). Cleanup cannot delete the file while conversion holds the lock. The DB UPDATE is the mutual exclusion point for state, and the file lock is the mutual exclusion point for the filesystem.
 
-PostgreSQL row-level locking ensures exactly one wins:
-1. Conversion's UPDATE acquires row lock → cleanup's UPDATE blocks
-2. Conversion commits → row is 'converting' → cleanup's WHERE clause no longer matches → 0 rows affected → cleanup skips
-3. OR: Cleanup's UPDATE acquires lock first → row becomes 'expired' → conversion's WHERE no longer matches → 0 rows → conversion aborts with STAGING_EXPIRED
+**Rollback semantics (reviewer blocker 2 - corrected):**
 
-**Invariant:** Exactly one of (conversion succeeds) or (cleanup deletes) happens. Never both, never neither (the row always ends in a terminal state).
+If the transaction ROLLBACKs (fence active, backfill, quota exceeded):
+- The `UPDATE staging_allowances SET state='cancelled'` is undone.
+- Allowance returns to `'active'` or `'expiring'` (whatever it was before).
+- It is COUNTED again in quota (correct: the file still exists).
+- File lock is released.
+- Staged file remains (will be cleaned by expiry or retry).
+- Return the appropriate error (503/507).
 
-**Filesystem coordination:**
-- Conversion holds the DB row lock during the transaction, but does NOT hold the file lock.
-- After COMMIT, conversion moves the file (rename). This is atomic at the filesystem level.
-- Cleanup acquires `LOCK_EX|LOCK_NB` on the file BEFORE the DB UPDATE. If the file is locked (writer active), cleanup skips the DB update entirely.
-- Order for cleanup: (1) Try file lock, (2) If acquired, DB UPDATE to 'expired', (3) Delete file, (4) Release lock.
-- Order for conversion: (1) DB UPDATE to 'converting', (2) COMMIT, (3) Rename file (no lock needed, writer already finished streaming).
+The document previously said the allowance "remains converting" — this was WRONG. ROLLBACK reverts the state. Corrected here.
 
-**Transaction boundaries:**
-- Allowance creation: Single transaction (L1 held for short duration)
-- Streaming: NO transaction (filesystem only, allowance row exists)
-- Conversion: Single transaction (L1 held, allowance→reservation atomic)
+**Crash recovery (reviewer blocker 2):**
 
-**Lock order:** L1 (`media_global`) → L2 (`media_quota:{world_id}`) → world row `FOR UPDATE`. Same as RES-1a/QUOTA-1. Consistent global ordering prevents deadlock.
+| Crash point | DB state | File state | Recovery |
+|-------------|----------|------------|----------|
+| Before BEGIN | Allowance 'active'/'expiring' | Staged file exists, no lock held | Cleanup job: marks 'expiring'→'expired', deletes file |
+| During DB txn (before COMMIT) | Transaction rolls back on connection close | File locked? No (lock released on process exit) | Allowance reverts to pre-txn state. Cleanup handles. |
+| After COMMIT, before rename | Allowance 'cancelled', reservation exists | Staged file exists at old path, lock released (process died) | Orphan sweep: finds 'cancelled' allowance with no .part file → checks reservation → if reservation exists but no .part → delete staged file, log. Reservation reaped by RES-1c. |
+| During rename | Allowance 'cancelled', reservation exists | rename() is atomic: file at old OR new path | If at old path → orphan sweep cleans. If at new path → normal Phase-2 continues. |
+| After rename, before lock release | Allowance 'cancelled', reservation exists | File at new path (.part) | Normal: Phase-2 writer picks it up. Lock released on process exit (harmless). |
+
+**No stranded 'converting':** The state doesn't exist anymore. The only non-terminal states are 'active' and 'expiring', both handled by cleanup.
+
+**Transaction boundaries (rev 8):**
+- Allowance creation: Single transaction. Locks: L1 → L2 → world row FOR UPDATE.
+- Streaming: NO DB transaction. Holds: LOCK_EX on staging file.
+- Conversion: Single transaction. Holds: LOCK_EX on staging file (acquired before BEGIN).
+  Locks (in order): L1 → L2 → world row FOR UPDATE → allowance row (via UPDATE).
+- File move: After COMMIT, still holding file LOCK_EX. Then release.
+
+**Complete lock order (reviewer blocker 4):**
+
+The conversion transaction acquires, in strict order:
+1. **Filesystem:** `LOCK_EX` on `/data/media/.staging/{allowance_id}.tmp` (before BEGIN)
+2. **L1:** `pg_advisory_xact_lock(hashtext('media_global'))`
+3. **L2:** `pg_advisory_xact_lock(hashtext('media_quota:' || world_id))`
+4. **World row:** `SELECT ... FROM worlds WHERE world_id=$1 FOR UPDATE`
+5. **Allowance row:** `UPDATE staging_allowances ... WHERE allowance_id=$1` (row lock via UPDATE)
+6. **(Inside reserveStorage):** Reservation row INSERT (no additional locks beyond L1/L2/world)
+
+This matches QUOTA-1's lock order (L1→L2→world row) and adds the filesystem lock first (outermost) and the allowance row lock last (innermost).
+
+**Why filesystem first:** The file lock is held across the DB transaction. Acquiring it before BEGIN ensures no deadlock with cleanup job (which acquires file lock before DB UPDATE).
+
+**Deadlock analysis:**
+- Conversion: File LOCK_EX → L1 → L2 → world row → allowance row
+- Cleanup: File LOCK_EX|LOCK_NB (non-blocking, never waits) → allowance row UPDATE
+- Fence activation: L1 → file LOCK_EX (blocking) → DB updates
+- No cycle: All paths acquire L1 before file locks, except conversion which acquires file lock before L1.
+  
+  Potential cycle: Conversion holds file lock, wants L1. Fence holds L1, wants file lock.
+  Resolution: Fence uses blocking LOCK_EX with 30s timeout. Conversion's DB txn is short (<1s typical).
+  If fence times out waiting → aborts fence (fail-closed). No deadlock, just a failed fence activation (operator retries).
+
+**Quota race:** Two conversions for the same world:
+- Both acquire L1 (serializes).
+- First commits: allowance→'cancelled', reservation created.
+- Second: sees updated quota (first's reservation counted, first's allowance not counted).
+- No over-commit.
 
 **Concurrency guarantee:** Two simultaneous uploads:
 1. Upload A creates allowance (10 MB counted in quota)
@@ -342,16 +383,20 @@ For each file in /data/media/.staging/:
      b. If acquired → delete file, log 'staging_orphan_no_allowance'
      c. If locked → skip (writer may be active, will retry next cycle)
   4. If state = 'cancelled':
-     a. Check if reservation exists for this upload
-        (join via world_id + created_at window, or store reservation_id in allowance)
-     b. If reservation exists AND .part file exists → conversion succeeded, staged file is leftover
-        → Try LOCK_EX|LOCK_NB → delete if acquired, log 'staging_orphan_cancelled'
-     c. If no reservation → conversion failed before COMMIT → treat as orphan, delete
+     a. Check `reservation_id` column (set during conversion).
+     b. If reservation_id IS NOT NULL:
+        - Check if .part file exists at /data/media/.tmp/{reservation_id}.part
+        - If .part exists → conversion succeeded, staged file is leftover → delete staged file
+        - If .part missing → crash between COMMIT and rename → delete staged file, reservation will be reaped by RES-1c
+     c. If reservation_id IS NULL → crash before reservation created (should not happen: single transaction)
+        → Log critical, delete staged file, alert operator
+     d. In all cases: Try LOCK_EX|LOCK_NB first. If locked → skip (active writer).
   5. If state = 'expired':
-     a. File should already be deleted (cleanup did it when marking expired)
-     b. If file still exists → previous cleanup crashed mid-delete → retry delete
-  6. If state IN ('active', 'expiring', 'converting'):
-     a. Do NOT delete (handled by the main cleanup algorithm above)
+     a. File should already be deleted.
+     b. If file exists → previous cleanup crashed → retry with LOCK_EX|LOCK_NB.
+  6. If state IN ('active', 'expiring'):
+     a. Do NOT delete here (handled by main cleanup algorithm).
+     b. The main algorithm handles expiry → 'expiring' → delete → 'expired'.
 ```
 
 **Schema addition:** Add `reservation_id` to `staging_allowances` (nullable, set during conversion):
