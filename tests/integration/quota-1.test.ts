@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pkg from 'pg';
+import { randomUUID } from 'node:crypto';
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 if (!TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL required');
@@ -62,8 +63,8 @@ afterAll(async () => {
 describe('QUOTA-1: quota_used_bytes()', () => {
   it('counts registered + reservations, excludes committed', async () => {
     const worldId = '22222222-2222-2222-2222-222222222222';
-    await pool.query(`DELETE FROM storage_reservations WHERE world_id=$1`, [worldId]);
     await pool.query(`DELETE FROM world_media_assets WHERE world_id=$1`, [worldId]);
+    await pool.query(`DELETE FROM storage_reservations WHERE world_id=$1`, [worldId]);
 
     // One active asset (10 MB).
     await pool.query(
@@ -185,12 +186,13 @@ describe('QUOTA-1: atomic handoff', () => {
       metrics: noopHandoffMetrics(),
     };
 
+    const fname = `test-${randomUUID()}.png`;
     const { assetId } = await commitReservationToRegistry(
       {
         reservationId: rid,
         worldId,
-        filename: 'test.png',
-        url: '/media/test.png',
+        filename: fname,
+        url: `/media/${fname}`,
         mimetype: 'image/png',
         sizeBytes: 1048576,
         contentSha256: 'a'.repeat(64),
@@ -239,8 +241,8 @@ describe('QUOTA-1: atomic handoff', () => {
         {
           reservationId: rid,
           worldId: otherWorld, // Wrong world!
-          filename: 'x.png',
-          url: '/media/x.png',
+          filename: `x-${randomUUID()}.png`,
+          url: `/media/x-${randomUUID()}.png`,
           mimetype: 'image/png',
           sizeBytes: 1048576,
           contentSha256: 'b'.repeat(64),
@@ -278,8 +280,8 @@ describe('QUOTA-1: atomic handoff', () => {
     const input = {
       reservationId: rid,
       worldId,
-      filename: 'race.png',
-      url: '/media/race.png',
+      filename: `race-${randomUUID()}.png`,
+      url: `/media/race-${randomUUID()}.png`,
       mimetype: 'image/png',
       sizeBytes: 1048576,
       contentSha256: 'c'.repeat(64),
@@ -287,7 +289,7 @@ describe('QUOTA-1: atomic handoff', () => {
 
     const results = await Promise.allSettled([
       commitReservationToRegistry(input, deps),
-      commitReservationToRegistry({ ...input, filename: 'race2.png', url: '/media/race2.png' }, deps),
+      commitReservationToRegistry({ ...input, filename: `race2-${randomUUID()}.png`, url: `/media/race2-${randomUUID()}.png` }, deps),
     ]);
 
     const fulfilled = results.filter((r) => r.status === 'fulfilled').length;
@@ -304,6 +306,71 @@ describe('QUOTA-1: atomic handoff', () => {
   });
 });
 
+describe('QUOTA-1: handoff metrics', () => {
+  it('B4: committed metric not incremented if transaction fails to commit', async () => {
+    const { commitReservationToRegistry } = await import(
+      '../../src/modules/world/domain/services/quota-handoff.service.js'
+    );
+    const { createWorkerMetrics } = await import(
+      '../../src/shared/metrics/worker-metrics.js'
+    );
+
+    const worldId = '22222222-2222-2222-2222-222222222222';
+    const rid = (
+      await pool.query(
+        `INSERT INTO storage_reservations (world_id, size_bytes, state, expires_at)
+         VALUES ($1, 1048576, 'RESERVED', now() + interval '5 minutes')
+         RETURNING reservation_id`,
+        [worldId]
+      )
+    ).rows[0].reservation_id;
+
+    const m = createWorkerMetrics();
+    // Extend with handoff counter.
+    (m as any).handoffTotal = { inc: () => {}, get: () => 0 };
+    let handoffCount = 0;
+
+    const flakyWithTransaction = async <T>(fn: (tx: any) => Promise<T>): Promise<T> => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await fn(client);
+        await client.query('ROLLBACK'); // Simulate commit failure.
+        throw new Error('simulated commit failure');
+      } finally {
+        client.release();
+      }
+    };
+
+    const deps = {
+      withTransaction: flakyWithTransaction,
+      log: () => {},
+      metrics: {
+        handoffTotal: { inc: (_labels: { outcome: string }) => { handoffCount++; } },
+      },
+    };
+
+    await expect(
+      commitReservationToRegistry(
+        {
+          reservationId: rid,
+          worldId,
+          filename: `x-${randomUUID()}.png`,
+          url: `/media/x-${randomUUID()}.png`,
+          mimetype: 'image/png',
+          sizeBytes: 1048576,
+          contentSha256: 'd'.repeat(64),
+        },
+        deps
+      )
+    ).rejects.toThrow('simulated commit failure');
+
+    // 'committed' must NOT have been recorded (only 'error' for the failure).
+    // handoffCount should be 1 (the error outcome), not 2.
+    expect(handoffCount).toBe(1);
+  });
+});
+
 describe('QUOTA-1: schema verification', () => {
   it('passes when all eight columns exist', async () => {
     const { verifyQuotaSchema } = await import('../../src/shared/config/quota.js');
@@ -315,25 +382,28 @@ describe('QUOTA-1: schema verification', () => {
     ).resolves.not.toThrow();
   });
 
-  it('fails when a column is missing', async () => {
+  // B3: Eight individual missing-column cases, each naming the missing pair.
+  const allColumns = [
+    { table: 'world_media_assets', column: 'lifecycle' },
+    { table: 'world_media_assets', column: 'file_confirmed_present' },
+    { table: 'world_media_assets', column: 'size_bytes' },
+    { table: 'world_media_assets', column: 'publication_status' },
+    { table: 'world_media_assets', column: 'reservation_id' },
+    { table: 'world_media_assets', column: 'content_sha256' },
+    { table: 'storage_reservations', column: 'state' },
+    { table: 'storage_reservations', column: 'size_bytes' },
+  ];
+
+  it.each(allColumns)('fails when $table.$column is missing', async ({ table, column }) => {
     const { verifyQuotaSchema, QuotaConfigError } = await import(
       '../../src/shared/config/quota.js'
     );
-    // Simulate missing storage_reservations.state.
-    const fakeQuery = async () => ({
-      rows: [
-        { table_name: 'world_media_assets', column_name: 'lifecycle' },
-        { table_name: 'world_media_assets', column_name: 'file_confirmed_present' },
-        { table_name: 'world_media_assets', column_name: 'size_bytes' },
-        { table_name: 'world_media_assets', column_name: 'publication_status' },
-        { table_name: 'world_media_assets', column_name: 'reservation_id' },
-        { table_name: 'world_media_assets', column_name: 'content_sha256' },
-        // storage_reservations.state missing!
-        { table_name: 'storage_reservations', column_name: 'size_bytes' },
-      ] as Array<Record<string, unknown>>,
-    });
+    const rows = allColumns
+      .filter((c) => !(c.table === table && c.column === column))
+      .map((c) => ({ table_name: c.table, column_name: c.column }));
+    const fakeQuery = async () => ({ rows: rows as Array<Record<string, unknown>> });
     await expect(verifyQuotaSchema(fakeQuery)).rejects.toThrow(QuotaConfigError);
     await expect(verifyQuotaSchema(fakeQuery)).rejects.toThrow(/QUOTA_SCHEMA_INCOMPLETE/);
-    await expect(verifyQuotaSchema(fakeQuery)).rejects.toThrow(/storage_reservations\.state/);
+    await expect(verifyQuotaSchema(fakeQuery)).rejects.toThrow(new RegExp(`${table}\\.${column}`));
   });
 });

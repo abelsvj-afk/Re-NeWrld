@@ -76,45 +76,30 @@ export async function phaseACommit(
   deps: PublicationDeps,
   tx: pkg.PoolClient,
 ): Promise<string> {
-  // INSERT asset as PENDING.
-  const assetResult = await tx.query(
-    `INSERT INTO world_media_assets
-       (world_id, filename, url, mimetype, size_bytes, roles, publication_status, content_sha256, reservation_id)
-     VALUES ($1, $2, $3, $4, $5, '{}', 'PENDING', $6, $7)
-     RETURNING asset_id`,
-    [
-      input.worldId,
-      input.finalFilename,
-      `/media/${input.finalFilename}`,
-      input.mimetype,
-      input.sizeBytes,
-      input.contentSha256,
-      input.reservationId,
-    ],
+  // B1 (QUOTA-1): Single authoritative handoff implementation.
+  // Delegates to commitReservationToRegistry's transaction body.
+  // Note: phaseACommit takes an existing tx (caller manages transaction);
+  // commitReservationToRegistry takes withTransaction. We invoke the shared
+  // core directly with the provided tx.
+  const { doHandoffInTransaction } = await import('./quota-handoff.service.js');
+  return doHandoffInTransaction(
+    {
+      reservationId: input.reservationId,
+      worldId: input.worldId,
+      filename: input.finalFilename,
+      url: `/media/${input.finalFilename}`,
+      mimetype: input.mimetype,
+      sizeBytes: input.sizeBytes,
+      contentSha256: input.contentSha256,
+    },
+    {
+      log: deps.log,
+      metrics: {
+        handoffTotal: { inc: () => {} }, // Metrics handled by outer wrapper.
+      },
+    },
+    tx,
   );
-  const assetId: string = assetResult.rows[0].asset_id;
-
-  // Transition reservation to COMMITTED.
-  const resResult = await tx.query(
-    `UPDATE storage_reservations
-       SET state='COMMITTED', released_at=now()
-     WHERE reservation_id=$1 AND released_at IS NULL AND state IN ('RESERVED','WRITING')`,
-    [input.reservationId],
-  );
-
-  if (resResult.rowCount !== 1) {
-    throw new PublicationError(
-      'RESERVATION_NOT_COMMITTABLE',
-      `Reservation ${input.reservationId} not in committable state; Phase A aborted`,
-    );
-  }
-
-  deps.log('info', 'Phase A committed', {
-    reservationId: input.reservationId,
-    assetId,
-  });
-
-  return assetId;
 }
 
 // ---------------------------------------------------------------------------

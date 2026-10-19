@@ -154,7 +154,15 @@ export const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB per file.
 
 **Validation:** Called once at startup. Invalid values crash startup (fail-closed), not request handling.
 
-### 3.3 Admission integration
+### 3.3 File-size enforcement boundary (B5)
+
+**Decision:** The Fastify multipart `fileSize: 10 * 1024 * 1024` limit (src/app.ts:168) is the primary enforcement boundary for HTTP uploads. It rejects oversized files at the transport layer with 413 before application code runs.
+
+`checkFileSizeLimit()` exists as defense-in-depth for non-HTTP paths (e.g., programmatic file creation, future APIs that bypass multipart). It is not wired into the HTTP upload path because multipart already enforces the limit earlier with the same 413 semantics.
+
+**Test:** An HTTP integration test uploads an 11 MB file and asserts 413. A unit test verifies `checkFileSizeLimit()` throws `FILE_TOO_LARGE`/413 for programmatic callers.
+
+### 3.4 Admission integration
 
 The HTTP upload path calls RES-1a's `reserveStorage()` with `quotaBytes = getWorldQuotaBytes()`. QUOTA-1 does NOT modify the admission transaction — it provides the `quotaBytes` value and maps errors.
 

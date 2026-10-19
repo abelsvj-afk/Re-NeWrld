@@ -95,6 +95,24 @@ export async function buildApp(customLogger?: pino.Logger, deps?: AppDeps): Prom
     request.log = request.log.child({ correlationId: request.id });
   });
 
+  // QUOTA-1 B2: Fail-closed startup verification.
+  // Validates quota configuration and schema before accepting requests.
+  // Throws QuotaConfigError (crashes startup) if invalid.
+  {
+    const { getWorldQuotaBytes, verifyQuotaSchema } = await import('./shared/config/quota.js');
+    // Validate config (throws on invalid MEDIA_WORLD_QUOTA_MB).
+    const quotaBytes = getWorldQuotaBytes();
+    activeLogger.info({ quotaBytes }, 'Quota configuration validated');
+    // Verify schema (throws QUOTA_SCHEMA_INCOMPLETE if columns missing).
+    // Uses the application's database pool.
+    const { pool } = await import('./shared/database/db.js');
+    await verifyQuotaSchema(async (sql, params) => {
+      const r = await pool.query(sql, params);
+      return { rows: r.rows as Array<Record<string, unknown>> };
+    });
+    activeLogger.info('Quota schema verification passed');
+  }
+
   // Generic error handler: ZodError -> 400 with validation failed issues; typed errors -> statusCode; never return error.message for status >= 500
   app.setErrorHandler((error, request, reply) => {
     let statusCode = error.statusCode && error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 500;
