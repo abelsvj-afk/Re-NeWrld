@@ -808,40 +808,44 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 ALTER TABLE storage_reservations 
   ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT false;
 
--- Backfill verification (rev 17): Prove the assumption before applying.
--- 
--- Assumption: All existing reservations were created via RES-1a directly
--- (not via UPLOAD-1's staging transfer), so their .part files were written
--- directly by Phase-2 writers. There is no separate "transfer" step that
--- could be incomplete.
+-- Backfill preflight (rev 18): Deterministic gate with clear actions.
 --
--- Verification query (run before the backfill UPDATE):
--- This must return zero rows for the backfill to be safe.
+-- Assumption: All existing reservations were created via RES-1a directly
+-- (not via UPLOAD-1's staging transfer). UPLOAD-1 is not yet implemented,
+-- so no reservation has gone through the staging flow.
 
--- Check 1: No reservation should be in a state that implies incomplete transfer.
--- UPLOAD-1 hasn't been implemented yet, so no reservation should have
--- bytes_ready=false with a pending transfer. But verify:
-SELECT reservation_id, state, created_at
+-- PREFLIGHT CHECK (blocking): Must return zero rows, or migration FAILS.
+-- This verifies no reservation is in a state that contradicts the assumption.
+SELECT reservation_id, state, created_at, expires_at
 FROM storage_reservations
 WHERE state IN ('RESERVED', 'WRITING')
-  AND created_at < now() - interval '1 hour';
--- If any rows: these are stale (writer died long ago). They will be reaped
--- by RES-1c. Marking bytes_ready=true is harmless because RES-1c will
--- ABANDON them anyway, and Phase-2 writers check state (not just the flag).
+  AND bytes_ready = false;
+-- Action if rows returned: ABORT MIGRATION. Do not proceed.
+-- This would mean a reservation exists with bytes_ready=false in an active
+-- state, which contradicts the assumption that all existing rows used the
+-- direct-write path. Investigate manually before retrying.
+-- (Note: bytes_ready was just added with DEFAULT false, so ALL rows will
+-- have bytes_ready=false at this point. This check is vacuous on first run
+-- but protects against re-running the migration after partial application.)
 
--- Check 2: Verify no reservation type bypasses the direct-write path.
--- As of migration 020, the only reservation creator is RES-1a's
--- reserveStorage(), which creates the .part file directly (no staging).
--- UPLOAD-1 (with staging transfer) is not yet implemented.
--- Therefore: all existing rows used the direct path → bytes_ready=true is correct.
+-- INFORMATIONAL CHECK (non-blocking): Log for operator awareness.
+SELECT reservation_id, state, created_at,
+       expires_at < clock_timestamp() AS is_expired
+FROM storage_reservations
+WHERE state IN ('RESERVED', 'WRITING');
+-- If rows returned: these are active reservations from before the migration.
+-- They used RES-1a's direct-write path (no staging transfer).
+-- Setting bytes_ready=true is correct: their .part files were written directly.
+-- Expired ones will be reaped by RES-1c; the flag doesn't prevent reaping
+-- (RES-1c checks state and expires_at, not bytes_ready).
 
--- Backfill (only if checks pass):
+-- BACKFILL (only if preflight passes):
 UPDATE storage_reservations SET bytes_ready = true WHERE bytes_ready = false;
 
--- For future UPLOAD-1 conversions: the application explicitly sets
--- bytes_ready=false at reservation creation (in the conversion transaction),
--- then true after transfer. The DEFAULT false ensures any new reservation
--- type with a transfer step starts safe (not usable until flagged ready).
+-- Post-migration invariant:
+-- - All pre-existing rows: bytes_ready=true (direct-write path, no transfer step).
+-- - All new UPLOAD-1 conversions: application sets bytes_ready=false at creation,
+--   then true after transfer completes. DEFAULT false ensures safety.
 ```
 
 
@@ -878,30 +882,35 @@ SET LOCAL lock_timeout = '5s';
 
 UPDATE storage_reservations 
 SET bytes_ready = true,
-    updated_at = now()
+    updated_at = clock_timestamp()
 WHERE reservation_id = $1 
-  AND state = 'RESERVED'      -- Critical: never revive ABANDONED
-  AND bytes_ready = false     -- Idempotency: don't re-set
-  AND expires_at > now();      -- Rev 17: expiry is row-locked, not just pre-checked
+  AND state = 'RESERVED'              -- Critical: never revive ABANDONED
+  AND bytes_ready = false             -- Idempotency: don't re-set
+  AND expires_at > clock_timestamp(); -- Rev 18: wall-clock, not txn start
 
 -- Outcomes:
 --   1 row → flag set. Reservation is usable by Phase-2 (and not expired).
 --   0 rows → reservation is ABANDONED, COMMITTED, already bytes_ready=true,
---            OR EXPIRED (expires_at <= now() when row lock was acquired).
---            Do NOT retry. This transfer is terminal.
---            If expired → leave for RES-1c. Do not revive.
+--            OR EXPIRED. Do NOT retry. This transfer is terminal.
 --   55P03 → row locked. ROLLBACK. Retry up to 3 times with 1-minute intervals.
 --            After 3 failures, leave for RES-1c expiry.
 
--- Why expires_at in WHERE (rev 17):
--- The sweep's preliminary SELECT checks expiry, but the reservation can expire
--- between that check and this UPDATE. By including expires_at > now() in the
--- row-locked UPDATE, expiry is evaluated atomically with the flag change.
--- If RES-1c is concurrently reaping: both acquire the row lock. Winner's
--- WHERE clause determines the outcome. If RES-1c wins (sets ABANDONED),
--- our UPDATE finds state != 'RESERVED' → 0 rows → we abort. If we win
--- (sets bytes_ready=true while not expired), RES-1c's reap finds
--- expires_at > now() → skips (not yet expired). No race.
+-- Why clock_timestamp() (rev 18):
+-- PostgreSQL's now() returns the transaction's START time, not the current time.
+-- If this transaction starts before expiry but waits for a row lock,
+-- now() would still return the old time, and expires_at > now() could
+-- evaluate true even after actual expiry.
+-- clock_timestamp() returns the actual wall-clock time at execution,
+-- evaluated when the row lock is held. This closes the race.
+--
+-- Compatibility with RES-1c:
+-- RES-1c uses `expires_at < now() - interval '30 seconds'` (observation window).
+-- The 30s buffer means RES-1c only reaps reservations expired for >30s.
+-- Our recovery uses clock_timestamp() (no buffer). If a reservation expired
+-- 10s ago: our UPDATE sees expires_at < clock_timestamp() → 0 rows → we abort.
+-- RES-1c hasn't reaped it yet (within observation window), but we correctly
+-- refuse to revive it. The reservation will be reaped when the window passes.
+-- No window where an expired reservation becomes usable.
 
 COMMIT;
 ```
