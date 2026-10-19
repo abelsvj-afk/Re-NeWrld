@@ -1,6 +1,6 @@
 # ADR-017 REF-1 Design: Reference Validation Contract
 
-**Status:** DRAFT rev 2 — addresses ChatGPT review blockers
+**Status:** DRAFT rev 3 — addresses reference registry + role scope
 **Date:** 2026-10-18
 **Scope:** §4.2b transaction contract on every reference-setting path
 
@@ -28,7 +28,14 @@ For reference-setting on world W (scene S in world W):
 1. **L1:** `pg_advisory_xact_lock(hashtext('media_global'))` — serializes against fence, backfill, other global operations
 2. **L2:** `pg_advisory_xact_lock(hashtext('media_quota:' || W))` — serializes against quota operations on W
 3. **Row lock:** `SELECT ... FOR UPDATE` on the `worlds` row for W
-4. **Asset row lock:** `SELECT ... FOR UPDATE` on the `world_media_assets` row being referenced (if updating roles)
+4. **Asset row locks:** `SELECT ... FOR UPDATE` on BOTH affected asset rows, in consistent order:
+   - **Replacement** (URL A → URL B): Lock asset A row, then asset B row, ordered by `asset_id` (lexicographically smaller first) to prevent deadlock.
+   - **Removal** (URL A → null): Lock asset A row.
+   - **New reference** (null → URL B): Lock asset B row.
+   
+   The ordering invariant: always lock in `asset_id` ascending order. This prevents AB-BA deadlock when two concurrent transactions replace in opposite directions.
+
+**Why both rows:** Replacement affects the `roles` of both the old asset (may lose a role) and the new asset (gains a role). Both must be locked before scanning the reference graph, otherwise a concurrent transaction could interleave and corrupt `roles`.
 
 **Deletion vs reference-setting serialization:**
 
@@ -74,12 +81,28 @@ Reference-setting acquires the SAME locks in the SAME order (1→2→3). This gu
 **Solution:** `roles` represents the UNION of all active references to the asset.
 
 Algorithm (inside the validation transaction):
-1. Before the metadata update, scan ALL reference-holding fields that point to this asset URL:
-   - `worlds.metadata->>'coverArtUrl'`
-   - `scenes.metadata->>'illustrationUrl'` for all scenes in the world
-   - Any other registered reference paths
+1. Before the metadata update, scan ALL registered reference paths (see §3.4a below).
 2. Compute the set of roles still needed AFTER the proposed change.
 3. Update `world_media_assets.roles` to exactly that set.
+
+### 3.4a Reference-Path Registry (addresses review)
+
+**Authoritative list** (the ONLY fields that can hold asset URLs):
+
+| Table | Field (JSON path) | Role value |
+|-------|-------------------|------------|
+| `worlds` | `metadata->>'coverArtUrl'` | `'cover'` |
+| `scenes` | `metadata->>'illustrationUrl'` | `'illustration'` |
+
+**Adding a new reference path requires:**
+1. Add row to the table above (in this design doc)
+2. Add the field to the scan query in the validator
+3. Add a test that sets the new field and verifies `roles` includes the role
+4. Update the `roles` CHECK constraint if new role values are introduced
+
+**No other fields may hold asset URLs.** If code writes a URL to an unregistered field, the validator will not track it, and `roles` will be incorrect. This is a design invariant, enforced by code review.
+
+**Why a closed list:** An open-ended "any other reference paths" allows silent drift. Every reference path must be explicitly registered, tested, and reviewed.
 
 **Example:**
 - Asset A has `roles = ['cover', 'illustration']` (referenced by world cover + scene 5)
@@ -87,6 +110,22 @@ Algorithm (inside the validation transaction):
 - User removes scene 5 illustration → new roles = `[]`
 
 This is computed from the actual reference graph, not by blindly adding/removing. The S24 failure mode (roles corrupted) is prevented because the roles always reflect reality.
+
+### 3.4b Role Scope Invariant (addresses review)
+
+**Before SHARE-1 (current):**
+- `roles` is derived ONLY from references within the asset's owning world.
+- Cross-world references are rejected (422 `ASSET_WRONG_WORLD`), so they cannot contribute to `roles`.
+- **Invariant:** `roles` = union of roles from `worlds` (owner) + `scenes` (owner's scenes).
+
+**After SHARE-1:**
+- `roles` is derived from EVERY permitted reference to the asset, across all worlds.
+- If world W2 references asset owned by W1 (via `shared_with_worlds`), and the reference has role `'cover'`, then asset's `roles` includes `'cover'`.
+- **Invariant:** `roles` = union of roles from all worlds with valid references.
+
+**Transition:** When SHARE-1 is implemented, the validator's scan query expands to include cross-world references. The `roles` update logic is unchanged (still union semantics); only the scan scope widens.
+
+**Why this matters:** If `roles` only tracked the owning world's references, a shared asset could have `roles = []` while W2 actively uses it as cover art. Deletion logic (DEL-1) checks `roles` to determine if an asset is referenced — an incomplete `roles` would allow deletion of an in-use shared asset.
 
 ## 4. Cross-World References (S18)
 

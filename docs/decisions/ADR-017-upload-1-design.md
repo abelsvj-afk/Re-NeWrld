@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 2 — addresses ChatGPT review blockers
+**Status:** DRAFT rev 3 — addresses staging capacity + fence semantics
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -62,6 +62,7 @@ This never trusts client metadata and never buffers unboundedly (multipart cap i
 | Phase-A fails | Reservation remains RESERVED; RES-1c reaps after expiry; temp `.part` cleaned by stale-temp cleanup (§1.6e) |
 | Publication fails after Phase-A | Asset remains PENDING; reconciliation flags for operator; temp `.part` cleaned by §1.6e |
 | Compensation itself fails | Alert incident in `temp_cleanup_incidents`; operator intervention required |
+| Staging file orphaned (crash during staging) | Staging allowances expire after 2 min; cleanup job scans `/data/media/.staging/` for files without active allowances and deletes them; incidents logged |
 
 ### 3.2 Magic Bytes Validation
 
@@ -110,7 +111,52 @@ Full sequence:
 - Operator resolves via the recovery runbook (OPS-1).
 - The reservation is already COMMITTED, so quota is correctly accounted.
 
-**Client retry:** Safe to retry the entire upload. The new attempt creates a new reservation; the old PENDING asset is cleaned by reconciliation.
+**Client retry:** Each retry is a NEW attempt, not idempotent.
+- New reservation, new temp file, new asset row (if it gets that far).
+- The old PENDING asset (if Phase-A committed) is cleaned by reconciliation.
+- The old reservation (if not committed) expires via RES-1c.
+- Duplicate assets may exist temporarily; reconciliation resolves.
+
+**No idempotency key:** The design does not provide idempotent retries. If needed, add `Idempotency-Key` header support as a future enhancement (out of scope for UPLOAD-1).
+
+### 3.6 Staging Cleanup Guarantees (addresses review)
+
+**Staging files** (`/data/media/.staging/{allowance_id}.tmp`):
+
+1. **Normal path:** Deleted synchronously after move to `.tmp/{reservation_id}.part`.
+2. **Reservation failure:** Deleted synchronously before returning 507.
+3. **Process crash during staging:** 
+   - The `staging_allowances` row expires after 2 minutes.
+   - A cleanup job (runs every 5 min, part of RES-1c's expiry worker) scans `/data/media/.staging/`:
+     - For each file, check if a live allowance exists.
+     - If no live allowance → delete file, log incident.
+   - Incidents are visible in `temp_cleanup_incidents` with `failure_type='staging_orphan'`.
+4. **Synchronous deletion fails:** 
+   - Log to `temp_cleanup_incidents` immediately.
+   - The periodic cleanup job will retry.
+   - Alert fires per the incident escalation policy (5/10/15 failures).
+
+**Visibility:** All cleanup actions (success or failure) are logged with `allowance_id`, `world_id`, and `bytes_reclaimed`. Operators can audit via `temp_cleanup_incidents`.
+
+### 3.7 Fence Semantics (addresses review)
+
+**Invariant:** A fence activated AFTER a reservation is admitted does NOT abort the already-admitted upload.
+
+**Rationale:**
+- The reservation is a contract: quota was checked, capacity was allocated.
+- Aborting mid-upload would leak the reservation (or require complex rollback).
+- The fence prevents NEW admissions (Phase-1 checks `isFenceActive()` under L1).
+- In-flight uploads complete; the fence takes full effect once they finish or expire.
+
+**Fence activation invalidates:**
+- New Phase-1 reservations (503 FENCE_ACTIVE)
+- New Phase-2 writes (fenced per-chunk check fails)
+
+**Fence does NOT invalidate:**
+- Already-reserved uploads (they hold a valid reservation)
+- The reservation expiry mechanism (RES-1c still reaps expired ones)
+
+This matches the RES-1b design: "a heartbeat or lease alone must not authorize a write after its fencing authority has become invalid" — but a VALID reservation (created before the fence) remains valid until expiry.
 
 ## 4. API Contract
 
