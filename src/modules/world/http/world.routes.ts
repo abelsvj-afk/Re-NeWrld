@@ -930,6 +930,48 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     }
   });
 
+  // DEL-1: Delete a media asset (T1/T2 state machine).
+  app.delete('/worlds/:id/media/:assetId', { preHandler: creatorOnly }, async (request, reply) => {
+    const params = WorldParams.parse(request.params);
+    const { assetId } = z.object({ assetId: z.string().uuid() }).parse(request.params);
+    const worldId = params.id;
+    const mediaRoot = deps.mediaStoragePath;
+
+    // Verify world ownership
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(worldId), request.user!.userId);
+
+    const { deleteAsset, DeletionError } = await import(
+      '../domain/services/asset-deletion.service.js'
+    );
+
+    try {
+      await deleteAsset(assetId, worldId, {
+        mediaRoot,
+        isFenceActive: async (tx) => {
+          const r = await tx.query(`SELECT active FROM system_maintenance WHERE id = 1`);
+          return r.rows.length > 0 && r.rows[0].active === true;
+        },
+        isBackfillActive: async (tx) => {
+          const r = await tx.query(
+            `SELECT 1 FROM backfill_runs WHERE state = 'in_progress' LIMIT 1`
+          );
+          return r.rows.length > 0;
+        },
+        log: (l, m, d) => request.log[l as 'info'](d, m),
+      });
+      return reply.code(204).send();
+    } catch (err) {
+      if (err instanceof DeletionError) {
+        return reply.code(err.httpStatus).send({
+          error: err.code,
+          message: err.message,
+          ...(err.references ? { references: err.references } : {}),
+        });
+      }
+      throw err;
+    }
+  });
+
   app.get('/worlds/:id/choices', { preHandler: creatorOnly }, async (request) => {
     const params = WorldParams.parse(request.params);
     await requireWorldOwnership(deps.worldRepository, parseWorldId(params.id), request.user!.userId);
