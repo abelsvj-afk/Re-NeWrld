@@ -306,15 +306,31 @@ This matches QUOTA-1's lock order (L1→L2→world row) and adds the filesystem 
 
 **Why filesystem first:** The file lock is held across the DB transaction. Acquiring it before BEGIN ensures no deadlock with cleanup job (which acquires file lock before DB UPDATE).
 
-**Deadlock analysis:**
-- Conversion: File LOCK_EX → L1 → L2 → world row → allowance row
-- Cleanup: File LOCK_EX|LOCK_NB (non-blocking, never waits) → allowance row UPDATE
-- Fence activation: L1 → file LOCK_EX (blocking) → DB updates
-- No cycle: All paths acquire L1 before file locks, except conversion which acquires file lock before L1.
-  
-  Potential cycle: Conversion holds file lock, wants L1. Fence holds L1, wants file lock.
-  Resolution: Fence uses blocking LOCK_EX with 30s timeout. Conversion's DB txn is short (<1s typical).
-  If fence times out waiting → aborts fence (fail-closed). No deadlock, just a failed fence activation (operator retries).
+**Deadlock prevention (rev 9: provably bounded):**
+
+The cycle: Conversion holds staging file LOCK_EX, wants L1. Fence holds L1, wants staging file LOCK_EX.
+
+**Solution:** Fence activation uses non-blocking lock acquisition with bounded retry. No indefinite blocking syscalls.
+
+Fence acquires each file lock via:
+1. Open the file
+2. Try `flock(LOCK_EX | LOCK_NB)` — returns immediately, never blocks
+3. If success → hold the lock, proceed to next file
+4. If EWOULDBLOCK (contention) → sleep 50ms (interruptible), retry
+5. Repeat until 30 second deadline
+6. On deadline → release all held locks, ROLLBACK DB, abort fence (fail-closed)
+
+**Why bounded:** Each flock syscall returns immediately. The sleep is interruptible. Total time is capped at 30s. On timeout, all state is rolled back. No single operation blocks forever.
+
+**Conversion** acquires the staging file lock with blocking `flock(LOCK_EX)` before BEGIN. This is safe because:
+- Cleanup job (the only other contender for staging files) uses `LOCK_NB` and never holds the lock while waiting for DB locks.
+- No deadlock: conversion waits for file lock (brief, cleanup holds <100ms), then acquires L1. Cleanup never waits for L1 while holding a file lock.
+
+**Fence timeout behavior:**
+1. Release all acquired file locks
+2. ROLLBACK (no reservations invalidated, fence flag not set)  
+3. Log error, alert operator, return 500
+4. Operator retries. A writer stuck >30s is likely dead; RES-1c reaps it.
 
 **Quota race:** Two conversions for the same world:
 - Both acquire L1 (serializes).
@@ -534,11 +550,15 @@ FENCE ACTIVATION SEQUENCE:
    WHERE state IN ('RESERVED', 'WRITING') AND expires_at > now();
    
 3. For EACH active reservation:
-   a. Path = /data/media/.tmp/{reservation_id}.part
-   b. Acquire LOCK_EX on Path (blocking)
-      -- This waits for any writer holding LOCK_SH to finish its chunk
-      -- Kernel flock() works cross-process
-   c. Hold the LOCK_EX (do not release yet)
+   a. PartPath = /data/media/.tmp/{reservation_id}.part
+   b. Check if PartPath exists:
+      - If yes → acquire LOCK_EX on PartPath (see deadlock prevention below)
+      - If no → query staging_allowances for cancelled allowance with this reservation_id
+        - If found → StagingPath = /data/media/.staging/{allowance_id}.tmp
+          → acquire LOCK_EX on StagingPath
+          → This blocks the in-flight conversion's rename
+        - If not found → no file to lock, proceed (DB invalidation suffices)
+   c. Hold all acquired LOCK_EX locks (do not release yet)
 
 4. With all writer locks held (LOCK_EX):
    a. UPDATE storage_reservations SET state = 'ABANDONED' 
@@ -595,13 +615,35 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 For EACH active reservation:
   Path = /data/media/.tmp/{reservation_id}.part
   
-  Case 1: File does not exist
-    → This is SAFE to skip. Reason: If the file doesn't exist, no writer
-      is currently holding LOCK_SH on it (writers create the file before
-      acquiring the lock). The reservation exists in DB but has no active
-      filesystem writer. Invalidating the DB reservation is sufficient.
-    → Log at DEBUG level, continue.
-    → The DB invalidation (step 4a) will still mark this reservation ABANDONED.
+  Case 1: File does not exist at .part path
+    → DO NOT SKIP. Check for in-flight conversion:
+    
+    ```sql
+    SELECT allowance_id, state FROM staging_allowances
+    WHERE reservation_id = $1 AND state = 'cancelled';
+    ```
+    
+    If a 'cancelled' allowance exists with this reservation_id:
+      → Conversion committed the DB but hasn't finished the rename yet.
+      → The staging file is at /data/media/.staging/{allowance_id}.tmp
+      → Acquire LOCK_EX on the STAGING file (not the .part path)
+      → Hold it through DB invalidation
+      → After fence commits, the conversion's rename will proceed,
+         but the reservation is already ABANDONED → Phase-2 writer
+         will see ABANDONED on next chunk → aborts
+      → The renamed .part file will be cleaned by RES-1c (reservation expired)
+         and stale-temp cleanup.
+    
+    If NO 'cancelled' allowance exists:
+      → Truly no file yet (reservation created, Phase-2 not started)
+      → OR file was already cleaned up
+      → Safe to skip file lock; DB invalidation is sufficient.
+      → Log at DEBUG level.
+    
+    **Why this works:** The `reservation_id` column in `staging_allowances`
+    (added in rev 6) provides the link. Fence activation can discover
+    in-flight conversions by querying for cancelled allowances pointing
+    to reservations without .part files.
   
   Case 2: flock(LOCK_EX) fails with error (not EBUSY, not ENOENT)
     → Log error with errno, ABORT fence activation
