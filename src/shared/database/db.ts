@@ -39,9 +39,7 @@ export function setPool(connectionString: string): void {
       );
     }
   }
-  try {
-    pool.end();
-  } catch {}
+  const oldPool = pool;
   pool = new Pool({
     connectionString,
     max: 20,
@@ -51,6 +49,21 @@ export function setPool(connectionString: string): void {
   pool.on('error', (err) => {
     logger.error({ err }, 'Unexpected database error on idle PostgreSQL client');
   });
+  // Close the old pool asynchronously (don't block the swap).
+  // QUOTA-1: Ensures clean handoff during test pool swaps.
+  oldPool.end().catch(() => {});
+}
+
+/**
+ * Async version that awaits closure of the old pool.
+ * Use in tests where deterministic cleanup matters.
+ */
+export async function setPoolAndWait(connectionString: string): Promise<void> {
+  const oldPool = pool;
+  setPool(connectionString);
+  try {
+    await oldPool.end();
+  } catch {}
 }
 
 export async function query<R extends pkg.QueryResultRow = any>(text: string, params?: any[]): Promise<pkg.QueryResult<R>> {

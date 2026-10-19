@@ -490,6 +490,68 @@ describe('QUOTA-1: HTTP file-size enforcement (B5)', () => {
       await app.close();
     }
   });
+
+  it('rejects 11 MB upload through the real /worlds/:id/media path with exactly 413', async () => {
+    // B5 production-path: 11 MB through the INTENDED upload route.
+    // Auth is arranged (valid creator session) so it cannot mask the result —
+    // if auth failed we'd get 401, not 413.
+    const { buildApp } = await import('../../src/app.js');
+    const { setPool } = await import('../../src/shared/database/db.js');
+    setPool(process.env.TEST_DATABASE_URL!);
+
+    const app = await buildApp();
+    try {
+      const userId = 'c3d4e5f6-a7b8-4c9d-8e0f-a1b2c3d4e5f6';
+      const testEmail = `boundary2-${userId.substring(0, 8)}@test.com`;
+      await pool.query(
+        `INSERT INTO users (user_id, email, password_hash, role)
+         VALUES ($1, $2, 'hash', 'creator')
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId, testEmail]
+      );
+      const { SessionService } = await import(
+        '../../src/modules/auth/infrastructure/services/session.service.js'
+      );
+      const { UserId } = await import(
+        '../../src/modules/auth/domain/value-objects/user-id.value-object.js'
+      );
+      const sessionService = new SessionService();
+      const { sessionId } = await sessionService.createSession(new UserId(userId));
+
+      const worldId = 'd4e5f6a7-b8c9-4d0e-8f1a-b2c3d4e5f6a7';
+      await pool.query(
+        `INSERT INTO worlds (world_id, title, creator_id)
+         VALUES ($1, 'Oversize Test', $2)
+         ON CONFLICT (world_id) DO NOTHING`,
+        [worldId, userId]
+      );
+
+      const bigFile = Buffer.alloc(11 * 1024 * 1024, 0);
+      const boundary = 'testboundary456';
+      const header = Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="big.png"\r\n` +
+        `Content-Type: image/png\r\n\r\n`
+      );
+      const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+      const payload = Buffer.concat([header, bigFile, footer]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/worlds/${worldId}/media`,
+        headers: {
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+          cookie: `rene_session_id=${sessionId}`,
+        },
+        payload,
+      });
+
+      // Must be exactly 413 from the file-size limit (not 401 from auth).
+      expect(res.statusCode).toBe(413);
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe('QUOTA-1: startup integration (B2)', () => {
@@ -526,10 +588,10 @@ describe('QUOTA-1: startup integration (B2)', () => {
       // Drop a required column to simulate incomplete schema.
       await scratchPool.query(`ALTER TABLE storage_reservations DROP COLUMN state`);
 
-      // Point buildApp at the scratch DB via setPool.
-      const { setPool } = await import('../../src/shared/database/db.js');
+      // Point buildApp at the scratch DB via setPoolAndWait (deterministic cleanup).
+      const { setPoolAndWait } = await import('../../src/shared/database/db.js');
       const origUrl = process.env.TEST_DATABASE_URL;
-      setPool(scratchUrl);
+      await setPoolAndWait(scratchUrl);
 
       const { buildApp } = await import('../../src/app.js');
       try {
@@ -537,9 +599,10 @@ describe('QUOTA-1: startup integration (B2)', () => {
       } finally {
         // Always restore the pool, even if the assertion threw.
         // Use TEST_DATABASE_URL if set, else the default test DB.
+        // Await closure for deterministic cleanup (reviewer caveat).
         const restoreUrl =
           origUrl || 'postgresql://postgres:postgres@127.0.0.1:5432/renewrld_test';
-        setPool(restoreUrl);
+        await setPoolAndWait(restoreUrl);
       }
     } finally {
       await scratchPool.end();
