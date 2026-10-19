@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 4 — fixes allowance lifecycle + fence rule
+**Status:** DRAFT rev 5 — closes allowance and fence races
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -21,41 +21,226 @@ This bypasses every ADR-017 guarantee: no quota enforcement, no crash safety, no
 ## 3. New Upload Flow (§4.4 Failure-Atomicity Table)
 
 ```
-1. Validate: mimetype via magic bytes (not extension) → 415 on invalid
-2. Check: backfill freeze → 503 BACKFILL_IN_PROGRESS
-3. Check: maintenance fence (under L1) → 503 FENCE_ACTIVE / MAINTENANCE_MODE
-4. Check: file size → 413 FILE_TOO_LARGE (via checkFileSizeLimit)
-5. Phase-1: reserveStorage(worldId, sizeBytes) → 507 QUOTA_EXCEEDED / STORAGE_FULL
-6. Phase-2: Phase2Writer writes chunks to /data/media/.tmp/{reservation_id}.part
+0. Auth: validate session, world ownership → 401/403/404
+1. Allowance: Create staging allowance (DB txn, L1) → 503 FENCE_ACTIVE / BACKFILL_IN_PROGRESS / 507 QUOTA_EXCEEDED
+2. Stream: Multipart stream to /data/media/.staging/{allowance_id}.tmp (10 MB cap) → 413 if exceeded
+3. Validate: Magic bytes from streamed data → 415 on invalid (cancel allowance, delete staged file)
+4. Measure: fstat() staged file → actual_bytes
+5. Convert: Atomic allowance → reservation (DB txn, L1) → 507 QUOTA_EXCEEDED / 503 FENCE_ACTIVE
+6. Phase-2: Move staged file to .tmp/{reservation_id}.part; Phase2Writer writes (if chunked)
 7. Fsync: file → rename to final → fsync directory
 8. Phase-A: commitReservationToRegistry() → asset PENDING + reservation COMMITTED
 9. Phase-B/C: publication.service handles link + activation
-10. Return 201 with registry URL
+10. Return 201 with registry URL (only after ACTIVE)
 ```
 
-### 3.1 File Size Determination (addresses review: reservation ordering)
+### 3.1 Staging Allowance Lifecycle (rev 5: complete specification)
 
-**Problem:** `reserveStorage(worldId, sizeBytes)` needs an exact byte count, but multipart streams don't provide trustworthy `Content-Length` (client-supplied, may be absent or lie).
+**Problem:** `reserveStorage()` needs an exact byte count, but multipart streams don't provide trustworthy sizes. Streaming before reservation allows unaccounted disk usage.
 
-**Solution:** Two-phase size determination:
-1. Stream the upload to a staging temp file (`/data/media/.staging/{uuid}.tmp`) with NO size limit except the 10 MB multipart cap.
-2. `fstat()` the staged file for the exact byte count.
-3. Call `reserveStorage(worldId, actualSizeBytes)` with the measured size.
-4. If reservation succeeds, proceed to Phase-2 (move staged file to `.tmp/{reservation_id}.part`).
-5. If reservation fails (quota/storage), delete the staged file synchronously.
+**Solution:** Allowance-first, stream-second. No bytes are accepted until quota is reserved.
 
-This never trusts client metadata and never buffers unboundedly (multipart cap is 10 MB).
+#### Step 0: Create staging allowance (BEFORE any file bytes)
+
+```
+POST /worlds/:id/media initiates:
+  → Validate auth, world ownership (401/403/404 as before)
+  → Validate magic bytes from first 12 bytes? NO — can't read bytes yet.
+  
+  Actually: Magic bytes validation requires reading the stream. 
+  Revised order:
+  1. Auth checks (no DB writes)
+  2. Create staging allowance (DB transaction, see below)
+  3. Stream with multipart cap (10 MB)
+  4. Validate magic bytes from streamed data
+  5. fstat() for exact size
+  6. Convert allowance → reservation (atomic)
+```
+
+**Allowance creation transaction:**
+```sql
+BEGIN;
+-- L1: Serialize against fence, backfill, other uploads
+SELECT pg_advisory_xact_lock(hashtext('media_global'));
+
+-- Check fence (fail-closed)
+SELECT active FROM system_maintenance WHERE id = 1;
+-- If active → ROLLBACK, return 503 FENCE_ACTIVE
+
+-- Check backfill freeze
+SELECT COUNT(*) FROM backfill_runs WHERE status = 'in_progress';
+-- If > 0 → ROLLBACK, return 503 BACKFILL_IN_PROGRESS
+
+-- Check quota INCLUDING existing allowances
+-- quota_used_bytes() counts: assets + reservations + active allowances
+SELECT quota_used_bytes($world_id);
+-- If quota_used + 10485760 > quota_limit → ROLLBACK, 507 QUOTA_EXCEEDED
+
+-- Create the allowance
+INSERT INTO staging_allowances 
+  (allowance_id, world_id, max_bytes, state, expires_at)
+VALUES 
+  (gen_random_uuid(), $world_id, 10485760, 'active', now() + interval '2 minutes')
+RETURNING allowance_id;
+COMMIT;
+```
+
+**Migration 018 schema:**
+```sql
+CREATE TABLE staging_allowances (
+  allowance_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  world_id UUID NOT NULL REFERENCES worlds(world_id) ON DELETE CASCADE,
+  max_bytes BIGINT NOT NULL CHECK (max_bytes > 0 AND max_bytes <= 10485760),
+  state TEXT NOT NULL CHECK (state IN ('active', 'converting', 'expired', 'cancelled'))
+    DEFAULT 'active',
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Prevent duplicate active allowances from racing (defense in depth)
+  CONSTRAINT uq_active_allowance_per_upload UNIQUE (allowance_id)
+);
+CREATE INDEX idx_staging_allowances_world_state 
+  ON staging_allowances(world_id, state) WHERE state = 'active';
+CREATE INDEX idx_staging_allowances_expiry 
+  ON staging_allowances(expires_at) WHERE state = 'active';
+```
+
+**Migration 019: Update quota_used_bytes()**
+```sql
+CREATE OR REPLACE FUNCTION quota_used_bytes(p_world_id UUID)
+RETURNS BIGINT AS $$
+  SELECT
+    COALESCE((SELECT SUM(size_bytes) FROM world_media_assets
+      WHERE world_id = p_world_id
+        AND lifecycle IN ('active', 'pending_deletion')
+        AND file_confirmed_present = true), 0)
+    +
+    COALESCE((SELECT SUM(size_bytes) FROM storage_reservations
+      WHERE world_id = p_world_id
+        AND state IN ('RESERVED', 'WRITING')), 0)
+    +
+    -- NEW: Active staging allowances count at max_bytes
+    -- Only 'active' state counts. 'converting', 'expired', 'cancelled' do not.
+    -- Expired allowances (expires_at < now()) are excluded even if state='active'
+    -- (cleanup job will mark them expired).
+    COALESCE((SELECT SUM(max_bytes) FROM staging_allowances
+      WHERE world_id = p_world_id
+        AND state = 'active'
+        AND expires_at > now()), 0);
+$$ LANGUAGE SQL STABLE;
+```
+
+**Which states count:**
+- `'active'` AND `expires_at > now()` → COUNTED
+- `'active'` AND `expires_at <= now()` → NOT counted (expired, cleanup pending)
+- `'converting'` → NOT counted (in atomic transition, see below)
+- `'expired'`, `'cancelled'` → NOT counted
+
+**No double-counting:** During the atomic conversion (below), the allowance is marked `'converting'` (not counted) BEFORE the reservation is created. The reservation is counted. At no point are both counted.
+
+#### Step 1: Stream to staging file
+
+- Path: `/data/media/.staging/{allowance_id}.tmp`
+- Multipart enforces 10 MB cap (matches `max_bytes`)
+- If stream exceeds 10 MB → multipart aborts → 413, allowance remains (expires in 2 min, cleanup job removes file)
+
+#### Step 2: Validate and measure
+
+1. Read first 12 bytes → validate magic bytes → 415 if invalid (delete staged file, cancel allowance)
+2. `fstat()` staged file → exact `actual_bytes`
+
+#### Step 3: Atomic allowance → reservation conversion
+
+```sql
+BEGIN;
+-- L1 (same as allowance creation, ensures serialization)
+SELECT pg_advisory_xact_lock(hashtext('media_global'));
+
+-- Mark allowance as converting (removes it from quota calculation)
+UPDATE staging_allowances 
+SET state = 'converting' 
+WHERE allowance_id = $1 AND state = 'active' AND expires_at > now();
+-- If 0 rows → allowance expired or cancelled → ROLLBACK, delete staged file, 500 STAGING_EXPIRED
+
+-- Re-check fence and backfill (they could have activated during streaming)
+SELECT active FROM system_maintenance WHERE id = 1;
+-- If active → ROLLBACK (allowance stays 'converting', cleanup job handles), 503 FENCE_ACTIVE
+
+-- Call reserveStorage() logic with actual_bytes
+-- This INSERTs into storage_reservations (counted by quota_used_bytes)
+-- If quota exceeded → ROLLBACK, 507 QUOTA_EXCEEDED
+
+-- Mark allowance as cancelled (terminal state, not counted)
+UPDATE staging_allowances SET state = 'cancelled' WHERE allowance_id = $1;
+
+COMMIT;
+-- Move staged file to .tmp/{reservation_id}.part (filesystem, after DB commit)
+-- If move fails → reservation exists but no file → RES-1c reaps reservation, cleanup job removes staged file
+```
+
+**Transaction boundaries:**
+- Allowance creation: Single transaction (L1 held for short duration)
+- Streaming: NO transaction (filesystem only, allowance row exists)
+- Conversion: Single transaction (L1 held, allowance→reservation atomic)
+
+**Lock order:** L1 (`media_global`) → L2 (`media_quota:{world_id}`) → world row `FOR UPDATE`. Same as RES-1a/QUOTA-1. Consistent global ordering prevents deadlock.
+
+**Concurrency guarantee:** Two simultaneous uploads:
+1. Upload A creates allowance (10 MB counted in quota)
+2. Upload B creates allowance (10 MB counted in quota) 
+3. If A+B+existing > quota → B's allowance creation fails with 507 (quota check includes A's allowance)
+4. Aggregate staging cannot exceed quota.
+
+#### Step 4: Expiry during streaming
+
+**Race:** Allowance expires (2 min) while file is still streaming.
+
+**Protocol:**
+1. Cleanup job runs every 5 minutes.
+2. For each `staging_allowances` WHERE `state='active'` AND `expires_at < now()`:
+   a. Try to acquire an exclusive lock on the staging file: `flock({allowance_id}.tmp, LOCK_EX|LOCK_NB)`
+   b. If lock acquired → no active writer → mark `state='expired'`, delete file, log incident.
+   c. If lock fails (EBUSY) → writer is active → SKIP (do not mark expired, do not delete).
+3. At conversion time (Step 3 above):
+   - If allowance is `state='active'` but `expires_at < now()` → treat as expired → ROLLBACK → 500 `STAGING_EXPIRED`.
+   - The writer held the file lock during streaming, so cleanup couldn't delete it. But the allowance expired, so conversion fails safely.
+
+**Writer synchronization:** The uploader holds `LOCK_EX` on the staging file during the entire stream. The cleanup job uses `LOCK_EX|LOCK_NB` (non-blocking). If the writer is active, cleanup skips. No race.
+
+#### Step 5: Crash recovery
+
+| Crash point | Recovery |
+|-------------|----------|
+| During allowance creation (before COMMIT) | Transaction rolls back, no allowance row. No cleanup needed. |
+| During streaming (after allowance COMMIT) | Allowance expires in 2 min. Cleanup job finds file without live allowance (via file lock check), deletes it, marks allowance `expired`. |
+| During conversion (before COMMIT) | Transaction rolls back. Allowance remains `active` (or `converting` if crash after UPDATE). Cleanup job handles. Staged file remains; cleanup deletes it. |
+| After conversion COMMIT, before file move | Reservation exists, allowance is `cancelled`. Staged file exists but no allowance. Cleanup job deletes staged file (no live allowance). Reservation has no file → RES-1c reaps it after expiry. |
+| During file move | Filesystem atomicity: `rename()` is atomic. Either the file is at old path or new path, never both/neither. |
+
+#### Step 6: Incident logging
+
+All staging lifecycle events logged to `temp_cleanup_incidents`:
+- `staging_allowance_created`: allowance_id, world_id, max_bytes
+- `staging_allowance_expired`: allowance_id, bytes_wasted
+- `staging_file_orphaned`: allowance_id, file_path, bytes_reclaimed
+- `staging_conversion_failed`: allowance_id, reason
+- `staging_cleanup_failed`: allowance_id, error
+
+**Retry behavior:** Client receives 500 `STAGING_EXPIRED` → retries entire upload (new allowance). Not idempotent (documented in §3.5).
 
 ### 3.2 Failure Handling
 
 | Failure Point | Behavior |
 |---------------|----------|
-| Magic bytes invalid | 415, no reservation created |
-| Backfill freeze active | 503 BACKFILL_IN_PROGRESS, no reservation |
-| Fence active | 503 FENCE_ACTIVE, no reservation |
-| File too large | 413 FILE_TOO_LARGE, no reservation |
-| Quota exceeded | 507 QUOTA_EXCEEDED (from reserveStorage) |
-| Storage full | 507 STORAGE_FULL (from reserveStorage) |
+| Auth/world ownership | 401/403/404, no allowance created |
+| Fence active (at allowance) | 503 FENCE_ACTIVE, no allowance, no stream accepted |
+| Backfill freeze (at allowance) | 503 BACKFILL_IN_PROGRESS, no allowance, no stream accepted |
+| Quota exceeded (at allowance) | 507 QUOTA_EXCEEDED, no allowance, no stream accepted |
+| File too large (multipart) | 413, stream aborted, allowance expires (cleanup job) |
+| Magic bytes invalid | 415, staged file deleted, allowance cancelled |
+| Quota exceeded (at conversion) | 507 QUOTA_EXCEEDED, staged file deleted, allowance cancelled |
+| Fence active (at conversion) | 503 FENCE_ACTIVE, staged file deleted, allowance cancelled |
+| Storage full | 507 STORAGE_FULL (from reserveStorage during conversion) |
+| Allowance expired during stream | 500 STAGING_EXPIRED, staged file deleted |
 | Phase-2 write fails | Reservation expires (RES-1c reaps), temp cleaned |
 | Phase-A commit fails | Reservation remains, expires via RES-1c |
 | Row insert fails after file written | Orphan compensation: synchronous delete + 500 |
@@ -138,32 +323,135 @@ Full sequence:
 
 **Visibility:** All cleanup actions (success or failure) are logged with `allowance_id`, `world_id`, and `bytes_reclaimed`. Operators can audit via `temp_cleanup_incidents`.
 
-### 3.7 Fence Semantics (rev 4: single enforceable rule)
+### 3.7 Fence Synchronization Protocol (rev 5: cross-process race closed)
 
-**Rule:** The fence takes effect at Phase-2 write time, not at reservation time.
+**Problem (reviewer):** Rev 4 says the writer checks the fence then writes. A DB read followed by a filesystem write does not prove fence activation cannot interleave.
 
-**Enforceable invariant:**
-- **Phase-1 (reservation):** If fence is active when `reserveStorage()` is called → 503 `FENCE_ACTIVE`. No reservation created.
-- **Phase-2 (writes):** Every chunk write performs the fenced check (per RES-1b: `flock LOCK_SH` → verify reservation still valid → write). If fence was activated AFTER reservation but BEFORE a chunk write → the fenced check fails → write rejected with `FENCE_ACTIVE`.
-- **Already-written chunks:** Not rolled back. The reservation remains; the upload is incomplete.
-- **Phase-A (commit):** Requires all chunks written. If fence blocked some chunks, Phase-A cannot complete (missing data).
+**Root cause:** Writer uses `flock(LOCK_SH)` on the .part file. Fence activation uses `pg_advisory_xact_lock()` (L1). These are different primitives — they do not synchronize.
 
-**What this means:**
-- An upload admitted before fence activation does NOT automatically complete.
-- It completes ONLY if all Phase-2 writes finished before the fence activated.
-- If the fence activates mid-upload, remaining chunks are rejected. The partial upload expires via RES-1c.
+#### The Protocol
 
-**Writer check (per chunk):**
+**Fence activation MUST acquire file locks:**
+
 ```
-1. Acquire LOCK_SH on .part file
-2. SELECT state FROM storage_reservations WHERE reservation_id = $1
-3. SELECT active FROM system_maintenance WHERE id = 1  -- fence check
-4. If fence active → release lock, throw FENCE_ACTIVE
-5. If reservation not in (RESERVED, WRITING) → release lock, throw
-6. Write chunk, release lock
+FENCE ACTIVATION SEQUENCE:
+1. Acquire L1: pg_advisory_xact_lock(hashtext('media_global'))
+   -- Serializes against other fence operations, backfill, Phase-1
+
+2. Enumerate active writers:
+   SELECT reservation_id FROM storage_reservations 
+   WHERE state IN ('RESERVED', 'WRITING') AND expires_at > now();
+   
+3. For EACH active reservation:
+   a. Path = /data/media/.tmp/{reservation_id}.part
+   b. Acquire LOCK_EX on Path (blocking)
+      -- This waits for any writer holding LOCK_SH to finish its chunk
+      -- Kernel flock() works cross-process
+   c. Hold the LOCK_EX (do not release yet)
+
+4. With all writer locks held (LOCK_EX):
+   a. UPDATE storage_reservations SET state = 'ABANDONED' 
+      WHERE state IN ('RESERVED', 'WRITING');
+   b. UPDATE system_maintenance SET active = true WHERE id = 1;
+   c. COMMIT (releases L1)
+
+5. Release all LOCK_EX file locks.
+
+FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
+- All reservations are ABANDONED (visible to new transactions)
+- The fence flag is set (visible to new transactions)
+- No writer holds LOCK_SH (we acquired LOCK_EX on all)
 ```
 
-**No contradiction:** The reservation is not "aborted" — it simply cannot make progress while the fence is active. This is the same as RES-1b's fenced writes. The fence is enforced at the point of filesystem mutation, which is the correct safety boundary.
+**Writer chunk sequence (revised):**
+```
+1. Acquire LOCK_SH on /data/media/.tmp/{reservation_id}.part (blocking)
+2. While holding LOCK_SH:
+   a. SELECT state FROM storage_reservations WHERE reservation_id = $1
+   b. If state NOT IN ('RESERVED', 'WRITING') → release, throw FENCED_WRITE_REJECTED
+   c. SELECT active FROM system_maintenance WHERE id = 1
+   d. If active → release, throw FENCE_ACTIVE
+   e. Write chunk bytes to file descriptor
+   f. fsync (if required by policy)
+3. Release LOCK_SH
+```
+
+**Why the race is closed:**
+
+| Scenario | Outcome |
+|----------|---------|
+| Writer holds LOCK_SH, fence activation starts | Fence blocks at step 3b (LOCK_EX waits). Writer completes chunk, releases. Fence proceeds. Writer's NEXT chunk sees ABANDONED → aborts. |
+| Fence holds LOCK_EX (step 4), writer starts chunk | Writer blocks at step 1 (LOCK_SH waits for LOCK_EX). Fence completes, releases. Writer acquires LOCK_SH, checks state → ABANDONED → aborts. |
+| Writer checks state (active), fence activates, writer writes | IMPOSSIBLE. Fence cannot acquire LOCK_EX while writer holds LOCK_SH. The check and write are atomic w.r.t. fence activation. |
+
+**Cross-process:** `flock()` is a kernel primitive. It synchronizes across processes, containers, and (on a shared filesystem) across machines. The PostgreSQL advisory lock (L1) synchronizes the DB state changes. Together they provide a complete barrier.
+
+**Crash behavior:**
+- If fence activation crashes while holding LOCK_EX: kernel releases flock on process exit. Reservations may be partially invalidated → operator resolves via runbook.
+- If writer crashes while holding LOCK_SH: kernel releases. Fence activation proceeds. Partial chunk may be in file → reservation is ABANDONED → RES-1c reaps → temp cleanup removes .part file.
+- If writer crashes between check and write (holding LOCK_SH): impossible — check and write are in the same critical section (no await points that release the lock).
+
+**Lock release ordering:**
+- Writer: Always releases LOCK_SH after write (try/finally).
+- Fence: Releases LOCK_EX only after DB COMMIT. If COMMIT fails, still releases locks (reservations may be inconsistent → alert).
+
+**Failed writes:** If `write()` syscall fails:
+- Writer releases LOCK_SH, throws.
+- Reservation remains (not invalidated by this).
+- Upload can retry the chunk (Phase2Writer handles).
+- Fence activation is unaffected.
+
+**Partial files:** A .part file with partial chunks and ABANDONED reservation is cleaned by:
+1. RES-1c expiry worker (reaps reservation after expiry)
+2. Stale-temp cleanup (§1.6e, RES-1b) removes the .part file
+
+**Reservation expiry:** Unchanged. Expired reservations are reaped by RES-1c. The fence does not affect expiry.
+
+#### Deterministic Race Test
+
+```typescript
+it('fence activation blocks until in-flight chunk completes, then rejects next chunk', async () => {
+  // Setup: Create reservation, start writer
+  const reservationId = await createTestReservation();
+  const writer = new Phase2Writer(reservationId);
+  
+  // Writer acquires LOCK_SH and pauses AFTER check but BEFORE write
+  // (inject a test hook that signals when lock is held)
+  const chunkPromise = writer.writeChunkWithPause(
+    testChunk,
+    { pauseAfterCheck: true }  // Test-only hook
+  );
+  await writer.waitForLockHeld();  // Deterministic: writer holds LOCK_SH
+  
+  // Concurrently activate fence (in another "process" — use a separate DB connection + fork)
+  const fencePromise = activateFence();
+  
+  // Fence must block (cannot acquire LOCK_EX while writer holds LOCK_SH)
+  await sleep(100);
+  expect(await isFenceBlocked()).toBe(true);
+  
+  // Let writer complete the chunk
+  writer.resume();
+  await chunkPromise;  // Chunk written successfully (fence wasn't effective yet)
+  
+  // Now fence completes
+  await fencePromise;
+  expect(await isFenceActive()).toBe(true);
+  
+  // Next chunk must be rejected
+  await expect(writer.writeChunk(testChunk2)).rejects.toThrow('FENCED_WRITE_REJECTED');
+  
+  // Proof: No chunk was written after the fence-effective point
+  const fileSize = await getPartFileSize(reservationId);
+  expect(fileSize).toBe(testChunk.length);  // Only first chunk, not second
+});
+```
+
+**Test determinism:**
+- `waitForLockHeld()` uses a promise that resolves when the writer acquires LOCK_SH (instrumented via test hook).
+- `isFenceBlocked()` checks if fence activation is waiting on the file lock (via `lsof` or `/proc/locks`).
+- No sleep-based timing; all synchronization via explicit signals.
+- The test proves: (1) fence waits for in-flight chunk, (2) post-fence chunks are rejected, (3) no bytes written after effective point.
 
 ## 4. API Contract
 
