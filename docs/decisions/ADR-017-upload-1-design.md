@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 6 — fixes accounting gap, topology, orphan sweep, deterministic test
+**Status:** DRAFT rev 7 — fixes schema, quota fn, conversion SQL, fence consistency
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -91,20 +91,32 @@ CREATE TABLE staging_allowances (
   allowance_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   world_id UUID NOT NULL REFERENCES worlds(world_id) ON DELETE CASCADE,
   max_bytes BIGINT NOT NULL CHECK (max_bytes > 0 AND max_bytes <= 10485760),
-  state TEXT NOT NULL CHECK (state IN ('active', 'converting', 'expired', 'cancelled'))
+  state TEXT NOT NULL 
+    CHECK (state IN ('active', 'expiring', 'converting', 'expired', 'cancelled'))
     DEFAULT 'active',
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  -- Prevent duplicate active allowances from racing (defense in depth)
-  CONSTRAINT uq_active_allowance_per_upload UNIQUE (allowance_id)
+  reservation_id UUID REFERENCES storage_reservations(reservation_id),
+  -- State machine constraints:
+  -- 'active' → 'expiring' (expiry detected)
+  -- 'active' → 'converting' (conversion started)
+  -- 'active' → 'cancelled' (user cancelled)
+  -- 'expiring' → 'expired' (cleanup deleted file)
+  -- 'expiring' → 'converting' (writer won race)
+  -- 'converting' → 'cancelled' (conversion committed)
+  CONSTRAINT chk_expiring_has_expiry CHECK (
+    (state != 'expiring') OR (expires_at <= now())
+  )
 );
 CREATE INDEX idx_staging_allowances_world_state 
-  ON staging_allowances(world_id, state) WHERE state = 'active';
+  ON staging_allowances(world_id, state) WHERE state IN ('active', 'expiring');
 CREATE INDEX idx_staging_allowances_expiry 
   ON staging_allowances(expires_at) WHERE state = 'active';
+CREATE INDEX idx_staging_allowances_expiring 
+  ON staging_allowances(allowance_id) WHERE state = 'expiring';
 ```
 
-**Migration 019: Update quota_used_bytes()**
+**Migration 019: Update quota_used_bytes() (rev 7: authoritative definition)**
 ```sql
 CREATE OR REPLACE FUNCTION quota_used_bytes(p_world_id UUID)
 RETURNS BIGINT AS $$
@@ -118,16 +130,22 @@ RETURNS BIGINT AS $$
       WHERE world_id = p_world_id
         AND state IN ('RESERVED', 'WRITING')), 0)
     +
-    -- NEW: Active staging allowances count at max_bytes
-    -- Only 'active' state counts. 'converting', 'expired', 'cancelled' do not.
-    -- Expired allowances (expires_at < now()) are excluded even if state='active'
-    -- (cleanup job will mark them expired).
+    -- Staging allowances: 'active' and 'expiring' both count.
+    -- 'expiring' means the file may still exist on disk (cleanup deferred).
+    -- 'converting' does NOT count (reservation will be counted instead).
+    -- 'expired' and 'cancelled' do NOT count (file deleted or converted).
+    -- No expires_at check: state machine is authoritative, not the timestamp.
     COALESCE((SELECT SUM(max_bytes) FROM staging_allowances
       WHERE world_id = p_world_id
-        AND state = 'active'
-        AND expires_at > now()), 0);
+        AND state IN ('active', 'expiring')), 0);
 $$ LANGUAGE SQL STABLE;
 ```
+
+**This is the authoritative definition.** It matches the state machine:
+- `active` → counted (normal)
+- `expiring` → counted (file may still exist, cleanup deferred)
+- `converting` → not counted (atomic handoff to reservation)
+- `expired`, `cancelled` → not counted (terminal states)
 
 **Which states count (rev 6: fixes accounting gap):**
 - `'active'` AND `expires_at > now()` → COUNTED (normal case)
@@ -183,32 +201,78 @@ COALESCE((SELECT SUM(max_bytes) FROM staging_allowances
 
 #### Step 3: Atomic allowance → reservation conversion
 
+**Authoritative conversion transaction (rev 7):**
+
 ```sql
 BEGIN;
--- L1 (same as allowance creation, ensures serialization)
+-- L1: Serialize against cleanup job, fence, backfill, other conversions
 SELECT pg_advisory_xact_lock(hashtext('media_global'));
 
--- Mark allowance as converting (removes it from quota calculation)
+-- Step 1: Claim the allowance (handles both 'active' and 'expiring')
+-- This is the mutual exclusion point vs cleanup job.
 UPDATE staging_allowances 
-SET state = 'converting' 
-WHERE allowance_id = $1 AND state = 'active' AND expires_at > now();
--- If 0 rows → allowance expired or cancelled → ROLLBACK, delete staged file, 500 STAGING_EXPIRED
+SET state = 'converting',
+    reservation_id = NULL  -- Will be set after reservation created
+WHERE allowance_id = $1 
+  AND state IN ('active', 'expiring');
+-- If 0 rows affected:
+--   → Allowance is 'expired', 'cancelled', or 'converting' (another conversion in progress)
+--   → ROLLBACK, delete staged file if exists, return 500 STAGING_EXPIRED
+-- The UPDATE is atomic: cleanup job cannot mark it 'expired' after we claim it,
+-- because cleanup also does UPDATE ... WHERE state IN ('active', 'expiring').
 
--- Re-check fence and backfill (they could have activated during streaming)
+-- Step 2: Re-check fence and backfill (could have activated during streaming)
 SELECT active FROM system_maintenance WHERE id = 1;
--- If active → ROLLBACK (allowance stays 'converting', cleanup job handles), 503 FENCE_ACTIVE
+-- If active → ROLLBACK
+--   → Allowance remains 'converting' (not 'active', not counted)
+--   → Cleanup job will see 'converting' with old timestamp → mark 'expired' after timeout → delete file
+--   → Return 503 FENCE_ACTIVE
 
--- Call reserveStorage() logic with actual_bytes
--- This INSERTs into storage_reservations (counted by quota_used_bytes)
--- If quota exceeded → ROLLBACK, 507 QUOTA_EXCEEDED
+SELECT COUNT(*) FROM backfill_runs WHERE status = 'in_progress';
+-- If > 0 → ROLLBACK (same as fence), return 503 BACKFILL_IN_PROGRESS
 
--- Mark allowance as cancelled (terminal state, not counted)
-UPDATE staging_allowances SET state = 'cancelled' WHERE allowance_id = $1;
+-- Step 3: Create the reservation (quota checked with allowance still 'converting')
+-- reserveStorage() logic:
+--   - Checks quota_used_bytes() which does NOT count 'converting' allowances
+--   - INSERTs into storage_reservations (which IS counted)
+--   - If quota exceeded → ROLLBACK → allowance stays 'converting' → cleanup handles
+--   - Returns reservation_id
+
+-- Step 4: Link allowance to reservation, mark cancelled
+UPDATE staging_allowances 
+SET state = 'cancelled',
+    reservation_id = $reservation_id
+WHERE allowance_id = $1;
+-- 'cancelled' is terminal, not counted. The reservation is now counted.
 
 COMMIT;
--- Move staged file to .tmp/{reservation_id}.part (filesystem, after DB commit)
--- If move fails → reservation exists but no file → RES-1c reaps reservation, cleanup job removes staged file
+-- L1 released. Quota accounting: allowance (not counted) → reservation (counted). Atomic.
 ```
+
+**Mutual exclusion with cleanup job:**
+
+Both conversion and cleanup use the same pattern:
+```sql
+UPDATE staging_allowances SET state = $new_state
+WHERE allowance_id = $1 AND state IN ('active', 'expiring');
+```
+
+- **Conversion** sets `state='converting'`
+- **Cleanup** sets `state='expired'` (after deleting file)
+
+PostgreSQL row-level locking ensures exactly one wins:
+1. Conversion's UPDATE acquires row lock → cleanup's UPDATE blocks
+2. Conversion commits → row is 'converting' → cleanup's WHERE clause no longer matches → 0 rows affected → cleanup skips
+3. OR: Cleanup's UPDATE acquires lock first → row becomes 'expired' → conversion's WHERE no longer matches → 0 rows → conversion aborts with STAGING_EXPIRED
+
+**Invariant:** Exactly one of (conversion succeeds) or (cleanup deletes) happens. Never both, never neither (the row always ends in a terminal state).
+
+**Filesystem coordination:**
+- Conversion holds the DB row lock during the transaction, but does NOT hold the file lock.
+- After COMMIT, conversion moves the file (rename). This is atomic at the filesystem level.
+- Cleanup acquires `LOCK_EX|LOCK_NB` on the file BEFORE the DB UPDATE. If the file is locked (writer active), cleanup skips the DB update entirely.
+- Order for cleanup: (1) Try file lock, (2) If acquired, DB UPDATE to 'expired', (3) Delete file, (4) Release lock.
+- Order for conversion: (1) DB UPDATE to 'converting', (2) COMMIT, (3) Rename file (no lock needed, writer already finished streaming).
 
 **Transaction boundaries:**
 - Allowance creation: Single transaction (L1 held for short duration)
@@ -480,58 +544,69 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 
 **Topology invariant:** UPLOAD-1 assumes single-writer-host. This matches the current Fly.io single-machine constraint (ADR-017 §9.2).
 
-**Fence activation failure handling:**
+**Fence activation failure handling (rev 7: consistent contract):**
 
 ```
 For EACH active reservation:
   Path = /data/media/.tmp/{reservation_id}.part
   
   Case 1: File does not exist
-    → Log warning, skip (no writer to block)
-    → Continue to next reservation
-    → The reservation will be invalidated via DB anyway
+    → This is SAFE to skip. Reason: If the file doesn't exist, no writer
+      is currently holding LOCK_SH on it (writers create the file before
+      acquiring the lock). The reservation exists in DB but has no active
+      filesystem writer. Invalidating the DB reservation is sufficient.
+    → Log at DEBUG level, continue.
+    → The DB invalidation (step 4a) will still mark this reservation ABANDONED.
   
-  Case 2: flock(LOCK_EX) fails with error (not EBUSY)
-    → Log error, ABORT fence activation
-    → ROLLBACK the DB transaction (do not commit partial invalidation)
+  Case 2: flock(LOCK_EX) fails with error (not EBUSY, not ENOENT)
+    → Log error with errno, ABORT fence activation
+    → ROLLBACK the DB transaction
+    → Release any already-acquired file locks
     → Return 500, alert operator
-    → Fence is NOT active (fail-closed: better to not fence than to fence partially)
+    → Fence is NOT active (fail-closed)
   
   Case 3: flock(LOCK_EX) blocks beyond timeout (30 seconds)
     → Log error, ABORT fence activation
-    → ROLLBACK, return 500, alert
-    → Rationale: A writer holding LOCK_SH for >30s is stuck; fence cannot wait forever.
+    → ROLLBACK, release locks, return 500, alert
+    → Rationale: Writer stuck holding LOCK_SH; cannot safely fence.
   
-  Case 4: Success
-    → Hold LOCK_EX, proceed to DB invalidation
+  Case 4: Success → hold LOCK_EX, proceed
 ```
 
-**Partial barrier prevention:**
-- Fence activation is ALL-OR-NOTHING.
-- Either all active writers are blocked (LOCK_EX acquired) AND all reservations invalidated, OR the fence is not activated.
-- If any lock fails → ROLLBACK → no state change → operator intervenes.
-- This prevents the "partial barrier" where some writers are fenced and others aren't.
+**Why missing file is safe to skip (addresses reviewer):**
 
-**Rollback behavior:**
-```sql
-BEGIN;
--- Acquire L1
--- Enumerate reservations
--- Acquire file locks (outside DB txn, before DB writes)
--- If any lock fails → ROLLBACK, release acquired locks, abort
+The race the reviewer is concerned about: reservation created, but file not yet created, fence activates, then writer creates file and writes.
 
--- All locks held:
-UPDATE storage_reservations SET state='ABANDONED' WHERE ...;
-UPDATE system_maintenance SET active=true WHERE id=1;
-COMMIT;  -- Releases L1
--- Release file locks
-```
+This cannot happen because:
+1. The writer creates the `.part` file BEFORE acquiring LOCK_SH (file creation is step 0 of Phase-2).
+2. Fence activation enumerates reservations from the DB, then tries to lock each file.
+3. If the file doesn't exist at enumeration time, either:
+   a. The writer hasn't created it yet → writer will create it, then try LOCK_SH → but fence holds L1 and is in the process of invalidating → writer's reservation check (under LOCK_SH) will see ABANDONED (if fence committed) or block (if fence holds LOCK_EX on a different file — no, different file).
+   
+   Actually, the precise guarantee: Fence activation holds L1 during the entire enumeration + lock acquisition + DB invalidation. A new writer trying to start Phase-2 must first have a reservation (created via Phase-1, which requires L1). If fence holds L1, Phase-1 blocks. Therefore no new writers can start during fence activation.
+   
+   b. The writer created the file but crashed before acquiring LOCK_SH → file exists but no writer → safe to skip (no active writer to block).
 
-If COMMIT fails after locks acquired:
-- Release file locks
-- Log critical alert: "Fence activation DB commit failed, locks released, state uncertain"
-- Operator must manually verify and re-run
-- This is a rare path (DB commit failure); the alternative (holding locks forever) is worse.
+**All-or-nothing clarified:**
+
+"All active writers are blocked" means: all writers that were active at enumeration time AND had created their files. Writers that haven't created files yet cannot exist (see above: Phase-1 requires L1, which fence holds).
+
+**Crash during fence activation:**
+
+The reviewer asked about "partially invalidated" reservations vs atomic transaction.
+
+Clarification: The DB updates (steps 4a, 4b) are in a SINGLE PostgreSQL transaction. If the process crashes:
+- Before COMMIT → transaction rolls back → NO reservations invalidated, fence NOT active. Atomic.
+- After COMMIT → all reservations invalidated, fence active. Atomic.
+- There is NO "partially invalidated" state from the DB perspective.
+
+The "partial" concern was about file locks: if we acquire LOCK_EX on 5 files, then crash before DB COMMIT:
+- Kernel releases the flock() locks on process exit.
+- DB transaction rolls back (connection closed).
+- Result: No fence, no invalidation. Clean.
+- Writers that were blocked on LOCK_EX will now acquire it and proceed normally.
+
+The document previously said "may leave reservations partially invalidated" — this was incorrect. The single-transaction guarantee holds. Corrected here.
 
 **Crash behavior:**
 - If fence activation crashes while holding LOCK_EX: kernel releases flock on process exit. Reservations may be partially invalidated → operator resolves via runbook.
