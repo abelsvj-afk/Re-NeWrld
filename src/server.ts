@@ -91,6 +91,33 @@ function startExpiryClaimWorker(app: {
 }
 
 /**
+ * Starts the world deletion recovery worker (DEL-2).
+ *
+ * Polls world_deletion_jobs for stuck jobs and resumes them.
+ * Uses session-level advisory lock for single-instance guarantee.
+ */
+function startWorldDeletionRecovery(app: {
+  log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void; error: (o: object, m: string) => void };
+}): void {
+  const { startDeletionRecoveryWorker } = require('./modules/world/domain/services/world-deletion-recovery.service.js');
+  const { env } = require('./shared/config/env.js');
+  startDeletionRecoveryWorker({
+    mediaRoot: env.MEDIA_STORAGE_PATH,
+    isFenceActive: async (tx: any) => {
+      const r = await tx.query(`SELECT active FROM system_maintenance WHERE id = 1`);
+      return r.rows.length > 0 && r.rows[0].active === true;
+    },
+    isBackfillActive: async (tx: any) => {
+      const r = await tx.query(`SELECT 1 FROM backfill_runs WHERE state = 'in_progress' LIMIT 1`);
+      return r.rows.length > 0;
+    },
+    log: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => {
+      app.log[level]({ ...data, worker: 'world-deletion-recovery' }, msg);
+    },
+  });
+}
+
+/**
  * Starts the temp-cleanup alert delivery worker.
  *
  * Polls the delivery outbox every 30 seconds, claims pending events,
@@ -165,6 +192,7 @@ async function start() {
     startSessionJanitor(app);
     startDeliveryWorker(app);
     startExpiryClaimWorker(app);
+    startWorldDeletionRecovery(app);
 
     // Graceful shutdown on SIGTERM/SIGINT (Fly.io scale-to-zero)
     const shutdown = async (signal: string) => {

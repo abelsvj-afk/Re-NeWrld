@@ -340,13 +340,40 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     return toWorldJson(world);
   });
 
+  // DEL-2: World deletion via T1-T5 state machine (replaces simple delete).
   app.delete('/worlds/:id', { preHandler: creatorOnly }, async (request, reply) => {
     const params = WorldParams.parse(request.params);
-    await deleteWorld.execute({
-      worldId: parseWorldId(params.id),
-      creatorId: request.user!.userId,
-    });
-    return reply.code(204).send();
+    const worldId = params.id;
+
+    // Verify ownership
+    await requireWorldOwnership(deps.worldRepository, parseWorldId(worldId), request.user!.userId);
+
+    const { deleteWorld, WorldDeletionError } = await import(
+      '../domain/services/world-deletion.service.js'
+    );
+
+    try {
+      await deleteWorld(worldId, {
+        mediaRoot: deps.mediaStoragePath,
+        isFenceActive: async (tx) => {
+          const r = await tx.query(`SELECT active FROM system_maintenance WHERE id = 1`);
+          return r.rows.length > 0 && r.rows[0].active === true;
+        },
+        isBackfillActive: async (tx) => {
+          const r = await tx.query(
+            `SELECT 1 FROM backfill_runs WHERE state = 'in_progress' LIMIT 1`
+          );
+          return r.rows.length > 0;
+        },
+        log: (l, m, d) => request.log[l as 'info'](d, m),
+      });
+      return reply.code(204).send();
+    } catch (err) {
+      if (err instanceof WorldDeletionError) {
+        return reply.code(err.httpStatus).send({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
   });
 
   app.post('/worlds/:id/validate', { preHandler: creatorOnly }, async (request) => {
