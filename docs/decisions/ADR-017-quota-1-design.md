@@ -1,6 +1,6 @@
 # ADR-017 QUOTA-1 Design — Quota Admission + Atomic Handoff
 
-**Status:** DRAFT rev 6 — filesystem-mutation boundary documented (Phase A/B/C)
+**Status:** DRAFT rev 7 — Phase A SQL matches Phase A/B/C contract
 **Date:** 2026-10-18
 **Slice order:** After RES-1c (complete). Before UPLOAD-1 + REF-1.
 **Change classification:** Level 2 CONFIRMED — schema verified (see §9.4). No migration needed.
@@ -184,7 +184,7 @@ export interface RegistryHandoffInput {
   url: string;
   mimetype: string;
   sizeBytes: number;
-  // ... other asset fields
+  contentSha256: string; // For Phase B EEXIST identity verification.
 }
 
 export async function commitReservationToRegistry(
@@ -235,15 +235,23 @@ export async function commitReservationToRegistry(
       throw new Error('Size mismatch between reservation and handoff input');
     }
 
-    // 2. Insert registry row.
+    // 2. Insert registry row as PENDING (Phase A).
+    // publication_status='PENDING' signals "DB committed, filesystem publication
+    // in progress" — reconciliation does not alert on missing final file for
+    // PENDING rows. reservation_id links back for stale-temp cleanup (§1.6e).
+    // content_sha256 enables EEXIST identity verification in Phase B.
+    // Schema: migration 016 (publication_status, reservation_id, content_sha256).
     const asset = await tx.query(
       `INSERT INTO world_media_assets
          (world_id, filename, url, mimetype, size_bytes,
-          lifecycle, file_confirmed_present, roles)
-       VALUES ($1, $2, $3, $4, $5, 'active', true, '{}')
+          lifecycle, file_confirmed_present, roles,
+          publication_status, reservation_id, content_sha256)
+       VALUES ($1, $2, $3, $4, $5, 'active', true, '{}',
+               'PENDING', $6, $7)
        RETURNING asset_id`,
       [input.worldId, input.filename, input.url,
-       input.mimetype, input.sizeBytes],
+       input.mimetype, input.sizeBytes,
+       input.reservationId, input.contentSha256],
     );
 
     // Both commit together. No double-count, no gap.
@@ -400,9 +408,12 @@ If any are missing, QUOTA-1 requires a migration (escalates to Level 3).
 
 | Required column | Present? | Definition |
 |----------------|----------|------------|
-| `world_media_assets.lifecycle` | ✅ Yes | `TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active','pending_deletion'))` (line 54-55) |
-| `world_media_assets.file_confirmed_present` | ✅ Yes | `BOOLEAN NOT NULL DEFAULT true` (line 58) |
-| `world_media_assets.size_bytes` | ✅ Yes | `BIGINT NOT NULL` (line 32) |
+| `world_media_assets.lifecycle` | ✅ Yes | `TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active','pending_deletion'))` (015 line 54-55) |
+| `world_media_assets.file_confirmed_present` | ✅ Yes | `BOOLEAN NOT NULL DEFAULT true` (015 line 58) |
+| `world_media_assets.size_bytes` | ✅ Yes | `BIGINT NOT NULL` (015 line 32) |
+| `world_media_assets.publication_status` | ✅ Yes | `TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (... IN ('PENDING','ACTIVE',...))` (016 line 31-32) |
+| `world_media_assets.reservation_id` | ✅ Yes | `UUID REFERENCES storage_reservations(reservation_id)` (016 line 41-42) |
+| `world_media_assets.content_sha256` | ✅ Yes | `CHAR(64)` (016 line 36) |
 | `storage_reservations.state` | ✅ Yes | (migration 015, reservation states) |
 | `storage_reservations.size_bytes` | ✅ Yes | (migration 015) |
 
@@ -415,12 +426,14 @@ FROM information_schema.columns
 WHERE table_schema = current_schema()
   AND (
     (table_name = 'world_media_assets'
-     AND column_name IN ('lifecycle', 'file_confirmed_present', 'size_bytes'))
+     AND column_name IN ('lifecycle', 'file_confirmed_present', 'size_bytes',
+                         'publication_status', 'reservation_id', 'content_sha256'))
     OR
     (table_name = 'storage_reservations'
      AND column_name IN ('state', 'size_bytes'))
   );
 ```
+Eight `(table, column)` pairs verified; any missing → `QUOTA_SCHEMA_INCOMPLETE`.
 `current_schema()` resolves to the application's `search_path` schema (typically `public`). A same-named table in another schema cannot satisfy the check. The application verifies all five `(table, column)` pairs are present; if any are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` naming the missing pair (fail-closed). This is defense-in-depth; the migration is the primary guarantee.
 
 **Test:** A test creates the schema without one required column (e.g., drops `storage_reservations.state` in a scratch database) and asserts startup throws `QUOTA_SCHEMA_INCOMPLETE`. A second case drops `world_media_assets.lifecycle`. Both must fail startup; the happy path (all five present) must not.
