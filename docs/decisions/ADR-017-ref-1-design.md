@@ -1,6 +1,6 @@
 # ADR-017 REF-1 Design: Reference Validation Contract
 
-**Status:** DRAFT rev 4 — resolves cross-world + lock ordering
+**Status:** DRAFT rev 5 — clarifies cross-world scope, adds SQL, specifies endpoints
 **Date:** 2026-10-18
 **Scope:** §4.2b transaction contract on every reference-setting path
 
@@ -10,12 +10,16 @@ Implement the authoritative reference validation contract that ensures every URL
 
 ## 2. Reference-Setting Paths (§4.2 Canonical Paths Table)
 
-| Path | Operation | Validation Point |
-|------|-----------|------------------|
-| Scene metadata update | `scene.metadata.illustrationUrl` set | Before metadata commit |
-| World metadata update | `world.metadata.coverArtUrl` set | Before metadata commit |
-| Publish (validation only) | Validate URLs before snapshot creation | During publish transaction |
+| Path | Endpoint | Validation Point |
+|------|----------|------------------|
+| Scene metadata update | `PATCH /worlds/:id/scenes/:sceneId` | Before metadata commit, if `metadata.illustrationUrl` in body |
+| World metadata update | `PATCH /worlds/:id` | Before metadata commit, if `metadata.coverArtUrl` in body |
+| Publish (validation only) | Publish flow | Validate all URLs before snapshot creation |
 | Replacement T2 | Metadata switch to new URL | During T2 transaction |
+
+**Note:** The metadata updates are generic PATCH endpoints. The validator triggers ONLY
+when the request body contains `metadata.coverArtUrl` (worlds) or
+`metadata.illustrationUrl` (scenes). Other metadata changes skip validation.
 
 ## 3. Validation Contract (§4.2b)
 
@@ -92,6 +96,7 @@ Reference-setting acquires the SAME locks in the SAME order (1→2→3). This gu
 | Active deletion job exists | `ASSET_DELETED` | 422 |
 | World deletion in progress | `WORLD_DELETION_IN_PROGRESS` | 409 |
 | Backfill freeze active | `BACKFILL_IN_PROGRESS` | 503 |
+| Asset belongs to different world | `ASSET_WRONG_WORLD` | 422 |
 
 ### 3.4 Roles Atomicity (addresses review: reference-aware semantics)
 
@@ -103,6 +108,26 @@ Algorithm (inside the validation transaction):
 1. Before the metadata update, scan ALL registered reference paths (see §3.4a below).
 2. Compute the set of roles still needed AFTER the proposed change.
 3. Update `world_media_assets.roles` to exactly that set.
+
+**Reference scan SQL** (for world W, asset URL U):
+```sql
+-- Returns all roles that reference this URL in world W
+SELECT 'cover' AS role FROM worlds
+WHERE world_id = $1 AND metadata->>'coverArtUrl' = $2
+UNION
+SELECT 'illustration' AS role FROM scenes
+WHERE world_id = $1 AND metadata->>'illustrationUrl' = $2;
+```
+
+**Asset ID resolution:**
+```sql
+SELECT asset_id, world_id, lifecycle, file_confirmed_present
+FROM world_media_assets WHERE url = $1;
+```
+- 0 rows → 422 `ASSET_UNKNOWN` (no lock needed, nothing to lock)
+- `world_id != $requesting_world_id` → 422 `ASSET_WRONG_WORLD` (REF-1 fail-closed)
+- `lifecycle != 'active'` → 422 `ASSET_DELETED`
+- `file_confirmed_present = false` → 422 `ASSET_FILE_MISSING`
 
 ### 3.4a Reference-Path Registry (addresses review)
 
@@ -148,15 +173,18 @@ This is computed from the actual reference graph, not by blindly adding/removing
 
 ## 4. Cross-World References (S18)
 
-Per §4.7c: a world may reference an asset owned by another world if:
-1. The asset's `shared_with_worlds` array contains the referencing world's ID, OR
-2. The asset is being shared via the SHARE-1 flow
+**REF-1 behavior (current):** All cross-world references are REJECTED with 422 `ASSET_WRONG_WORLD`.
+The validator checks `world_media_assets.world_id = $requesting_world_id`. If the asset
+exists but belongs to a different world → 422. This is fail-closed until SHARE-1.
 
-Validation must NOT return 422 `ASSET_WRONG_WORLD` for valid shared references. The check is:
+**Post-SHARE-1 behavior (deferred):** Per §4.7c, a world may reference an asset owned by
+another world if the asset's `shared_with_worlds` array contains the referencing world's ID.
+The check becomes:
 ```sql
 WHERE (world_id = $requesting_world_id 
    OR $requesting_world_id = ANY(shared_with_worlds))
 ```
+This section is documented here for continuity but MUST NOT be implemented in REF-1.
 
 ## 5. Backfill Freeze (addresses review: atomicity contract)
 
