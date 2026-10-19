@@ -799,55 +799,60 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 - Otherwise → write chunk, release lock.
 
 **Schema: `bytes_ready` column (rev 13):**
-**Migration 020: Add `bytes_ready` to `storage_reservations` (definitive)**
+**Migration 020: Add `bytes_ready` to `storage_reservations` (rev 19: single-transaction)**
 
 ```sql
 -- Migration 020 (new file: db/migrations/020_reservation_bytes_ready.sql)
--- Applied after 019. Does NOT amend 014 (014 is already applied in production
--- via the release_command; amending applied migrations is forbidden).
-ALTER TABLE storage_reservations 
-  ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT false;
-
--- Backfill preflight (rev 18): Deterministic gate with clear actions.
+-- Applied after 019. Does NOT amend 014/015 (already applied in production).
 --
--- Assumption: All existing reservations were created via RES-1a directly
--- (not via UPLOAD-1's staging transfer). UPLOAD-1 is not yet implemented,
--- so no reservation has gone through the staging flow.
+-- Strategy (rev 19): Single transaction, no broken preflight.
+-- The previous rev 18 preflight checked `bytes_ready = false` AFTER the column
+-- was added with DEFAULT false — a tautology that would abort on first run.
+-- Fixed by using DEFAULT true and documenting the assumption.
 
--- PREFLIGHT CHECK (blocking): Must return zero rows, or migration FAILS.
--- This verifies no reservation is in a state that contradicts the assumption.
-SELECT reservation_id, state, created_at, expires_at
-FROM storage_reservations
-WHERE state IN ('RESERVED', 'WRITING')
-  AND bytes_ready = false;
--- Action if rows returned: ABORT MIGRATION. Do not proceed.
--- This would mean a reservation exists with bytes_ready=false in an active
--- state, which contradicts the assumption that all existing rows used the
--- direct-write path. Investigate manually before retrying.
--- (Note: bytes_ready was just added with DEFAULT false, so ALL rows will
--- have bytes_ready=false at this point. This check is vacuous on first run
--- but protects against re-running the migration after partial application.)
+BEGIN;
 
--- INFORMATIONAL CHECK (non-blocking): Log for operator awareness.
-SELECT reservation_id, state, created_at,
-       expires_at < clock_timestamp() AS is_expired
-FROM storage_reservations
-WHERE state IN ('RESERVED', 'WRITING');
--- If rows returned: these are active reservations from before the migration.
--- They used RES-1a's direct-write path (no staging transfer).
--- Setting bytes_ready=true is correct: their .part files were written directly.
--- Expired ones will be reaped by RES-1c; the flag doesn't prevent reaping
--- (RES-1c checks state and expires_at, not bytes_ready).
+-- Add the column with DEFAULT true.
+-- Rationale: All existing reservations were created by RES-1a's reserveStorage()
+-- via the direct-write path (Phase-2 writes chunks directly to .part).
+-- UPLOAD-1 (with staging transfer) is NOT YET IMPLEMENTED, so no existing
+-- reservation has a pending transfer. DEFAULT true is correct for all existing rows.
+--
+-- For NEW reservations created by UPLOAD-1's conversion: the application
+-- explicitly inserts with bytes_ready=false, then sets true after transfer.
+-- The DEFAULT true does not affect them (explicit value overrides default).
+--
+-- Safety: If a future code path creates reservations with a transfer step
+-- but forgets to set bytes_ready=false, the reservation would be usable
+-- before transfer completes. This is a code-review concern, not a migration
+-- concern. The UPLOAD-1 implementation MUST set bytes_ready=false explicitly.
+ALTER TABLE storage_reservations
+  ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT true;
 
--- BACKFILL (only if preflight passes):
-UPDATE storage_reservations SET bytes_ready = true WHERE bytes_ready = false;
+-- No backfill UPDATE needed: DEFAULT true applies to all existing rows.
+-- No preflight needed: the assumption (UPLOAD-1 not implemented) is verified
+-- by code review, not by a SQL check that can't distinguish default from anomaly.
 
--- Post-migration invariant:
--- - All pre-existing rows: bytes_ready=true (direct-write path, no transfer step).
--- - All new UPLOAD-1 conversions: application sets bytes_ready=false at creation,
---   then true after transfer completes. DEFAULT false ensures safety.
+COMMIT;
+
+-- Transaction behavior:
+-- If ALTER fails (e.g., column already exists from partial run):
+--   → Entire transaction rolls back. No partial state.
+--   → Operator can safely re-run (IF NOT EXISTS variant below for idempotency).
+--
+-- Idempotent variant (for safe re-runs):
+-- ALTER TABLE storage_reservations
+--   ADD COLUMN IF NOT EXISTS bytes_ready BOOLEAN NOT NULL DEFAULT true;
 ```
 
+**Why DEFAULT true (not false):**
+- Rev 18 used DEFAULT false + backfill UPDATE + broken preflight.
+- The preflight couldn't work: it checked for `bytes_ready=false` on rows that
+  just received that default.
+- DEFAULT true is simpler and correct: existing rows used direct-write (no transfer),
+  so they ARE ready. New UPLOAD-1 rows explicitly set false.
+- The risk (future code forgetting to set false) is mitigated by code review
+  and by the UPLOAD-1 design explicitly specifying the INSERT with bytes_ready=false.
 
 **Crash recovery for `bytes_ready=false` (rev 15):**
 | Scenario | Recovery |
@@ -915,8 +920,26 @@ WHERE reservation_id = $1
 COMMIT;
 ```
 
-**Coordination with RES-1c (rev 17):**
-- RES-1c reaps reservations with `expires_at < now()` by setting state='ABANDONED'.
+**Coordination with RES-1c (rev 19: authoritative predicate):**
+- RES-1c's authoritative expiry condition (from `expiry-claim.service.ts:75`):
+  ```sql
+  WHERE state IN ('RESERVED', 'WRITING')
+    AND expires_at < now() - interval '30 seconds'
+  ```
+  The 30-second observation window is an operational buffer (not a correctness
+  requirement). RES-1c sets state='ABANDONED' for matching rows.
+- UPLOAD-1's recovery uses `expires_at > clock_timestamp()` (no buffer).
+  This is stricter: recovery refuses to revive anything expired at all,
+  while RES-1c waits 30s past expiry before reaping.
+- The predicates are compatible:
+  - If `expires_at < clock_timestamp()` (recovery sees expired):
+    Recovery aborts. RES-1c will reap within 30s (when observation window passes).
+  - If `clock_timestamp() < expires_at < now()` (edge case, clock skew):
+    Extremely unlikely (clock_timestamp and now differ by microseconds within a txn).
+    Recovery might proceed; RES-1c won't reap yet (within window). Safe.
+  - No case where recovery revives and RES-1c concurrently reaps:
+    Both use row locks. Recovery's WHERE includes `state='RESERVED'`.
+    If RES-1c wins the race (sets ABANDONED), recovery finds 0 rows.
 - The sweep's retry UPDATE includes `expires_at > now()` in its WHERE clause.
 - Serialization: both the sweep and RES-1c acquire the row lock via UPDATE.
   - If sweep wins: row has bytes_ready=true, expires_at > now(). RES-1c's
