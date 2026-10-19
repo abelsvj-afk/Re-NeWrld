@@ -1,6 +1,6 @@
 # ADR-017 QUOTA-1 Design — Quota Admission + Atomic Handoff
 
-**Status:** DRAFT rev 4 — expands schema guard to all five columns
+**Status:** DRAFT rev 5 — handoff follows §4.3c lock contract (1 → 2 → 3)
 **Date:** 2026-10-18
 **Slice order:** After RES-1c (complete). Before UPLOAD-1 + REF-1.
 **Change classification:** Level 2 CONFIRMED — schema verified (see §9.4). No migration needed.
@@ -192,6 +192,14 @@ export async function commitReservationToRegistry(
   deps: { withTransaction: ... },
 ): Promise<{ assetId: string }> {
   return deps.withTransaction(async (tx) => {
+    // Lock sequence per ADR-017 §4.3c (file-mutating class: 1 → 2 → 3 → ...).
+    // Level 1: global media advisory lock (serializes against reconciliation).
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_global'))`);
+    // Level 2: per-world quota advisory lock (serializes quota for this world).
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtext('media_quota:' || $1))`, [input.worldId]);
+    // Position 3: world row FOR UPDATE (FK1 FOR KEY SHARE becomes self-held per E2).
+    await tx.query(`SELECT 1 FROM worlds WHERE world_id = $1 FOR UPDATE`, [input.worldId]);
+
     // 1. Transition reservation to COMMITTED.
     // B2: Verify world ownership — the reservation's world_id must match
     // input.worldId. A mismatch indicates a caller bug or confused-deputy
@@ -246,6 +254,8 @@ export async function commitReservationToRegistry(
 
 **Why this is atomic:** The `UPDATE` removes bytes from `outstanding_reservations` (state no longer `RESERVED`/`WRITING`) and the `INSERT` adds bytes to `registered_usage` in the same commit. Per §5.1, there is no window where `quota_used_bytes()` double-counts or misses the bytes.
 
+**Why the lock sequence matters:** Without level 1, a concurrent reconciliation `diagnose` (which holds level 1 per §4.3c read-only class) could observe the filesystem mid-handoff. Without level 2, two handoffs for different reservations in the same world could interleave their quota accounting. The world-row lock (position 3) makes the asset INSERT's FK validation self-held (E2), preventing a downward lock edge.
+
 **Failure modes:**
 - Reservation not in `RESERVED`/`WRITING` → 409 `RESERVATION_NOT_ACTIVE` (already claimed, abandoned, or committed).
 - Size mismatch → hard error (500), indicates caller bug.
@@ -256,7 +266,8 @@ export async function commitReservationToRegistry(
 ## 4. Transaction / Concurrency Rules
 
 1. **Admission** uses RES-1a's transaction unchanged (L1 global lock → L2 world lock → L3 row lock). QUOTA-1 does not add locks.
-2. **Handoff** runs in a single transaction with no advisory locks. The `UPDATE ... WHERE state IN (...)` is the concurrency control — only one handoff can win per reservation (first-writer-wins via row lock).
+2. **Handoff follows §4.3c file-mutating lock order: 1 → 2 → 3 → (reservation UPDATE, asset INSERT).**
+   Per ADR-017 §4.3c and Lemma C, the Phase-2 commit (rename + asset INSERT + reservation→COMMITTED) is a file-mutating operation. It MUST hold level 1 (global media advisory lock) and level 2 (per-world quota advisory lock), then the world row `FOR UPDATE` (position 3), before the reservation UPDATE and asset INSERT. The `UPDATE ... WHERE state IN (...)` provides first-writer-wins *within* the serialized section — it is not a substitute for the advisory locks. Omitting level 1 would allow the handoff to interleave with reconciliation (§4.3c: level 1 serializes all file-mutating operations against reconciliation) and void Lemma C's speculative-insert guarantee.
 3. **No nested transactions:** `commitReservationToRegistry()` takes a `withTransaction` dependency; callers must not wrap it in another transaction.
 4. **`quota_used_bytes()` is `STABLE`:** safe to call multiple times in a transaction with consistent results.
 
@@ -337,6 +348,7 @@ If any are missing, QUOTA-1 requires a migration (escalates to Level 3).
 | **S34:** Disk exhausted | 507 `STORAGE_FULL` (distinct from `QUOTA_EXCEEDED`) |
 | **S37:** Stale capacity metric | 503 `STORAGE_METRIC_STALE` (fail-closed) |
 | Handoff atomicity | Reservation→COMMITTED + asset INSERT in one commit; concurrent handoffs → exactly one wins |
+| Handoff vs competing file-mutating op | Handoff racing asset-delete T1 on same world → serializes via level 1+2 without deadlock; quota accounting has no gap or double-count |
 | Handoff idempotency | Second handoff on same reservation → 409, no duplicate asset |
 
 ### 8.3 Failure injection
@@ -400,6 +412,7 @@ WHERE table_schema = current_schema()
 - [ ] Schema verified pre-gate; Level 2 confirmed, no conditional classification (B4).
 - [ ] Startup guard covers all five required columns across both tables; missing column → QUOTA_SCHEMA_INCOMPLETE.
 - [ ] Atomic handoff has no double-count or gap window (reviewer verifies transaction logic).
+- [ ] Handoff follows §4.3c lock order (1 → 2 → 3 → reservation UPDATE → asset INSERT); no lock-order inversion.
 - [ ] All failure modes have defined behavior (table in §3.4).
 - [ ] Test strategy covers S5, S6, S15, S34, S37 + handoff atomicity + failure injection.
 - [ ] Open questions (§9) are resolved or explicitly deferred.
