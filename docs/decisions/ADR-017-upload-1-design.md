@@ -97,14 +97,18 @@ CREATE TABLE staging_allowances (
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   reservation_id UUID REFERENCES storage_reservations(reservation_id),
-  -- State machine constraints:
-  -- 'active' → 'expiring' (expiry detected by cleanup)
-  -- 'active' → 'cancelled' (conversion committed OR user cancelled)
-  -- 'expiring' → 'expired' (cleanup deleted file)
-  -- 'expiring' → 'cancelled' (conversion won race vs cleanup)
-  CONSTRAINT chk_expiring_has_expiry CHECK (
-    (state != 'expiring') OR (expires_at <= now())
-  )
+  -- State machine (enforced by application transaction logic, not CHECK constraints):
+  -- 'active' → 'expiring': cleanup job sets this when expires_at < now()
+  -- 'active' → 'cancelled': conversion commits OR user cancels
+  -- 'expiring' → 'expired': cleanup deletes file, then updates state
+  -- 'expiring' → 'cancelled': conversion wins race (UPDATE ... WHERE state IN ('active','expiring'))
+  --
+  -- NOTE (rev 10): PostgreSQL CHECK constraints must use immutable expressions.
+  -- now() is not immutable, so the expiry invariant cannot be a CHECK constraint.
+  -- Instead:
+  --   1. Cleanup job only sets 'expiring' where expires_at < now() (in its UPDATE WHERE clause)
+  --   2. Conversion accepts 'expiring' regardless of timestamp (writer may be slow)
+  --   3. Application code validates state transitions; invalid transitions are bugs, caught by tests.
 );
 CREATE INDEX idx_staging_allowances_world_state 
   ON staging_allowances(world_id, state) WHERE state IN ('active', 'expiring');
@@ -545,9 +549,14 @@ FENCE ACTIVATION SEQUENCE:
 1. Acquire L1: pg_advisory_xact_lock(hashtext('media_global'))
    -- Serializes against other fence operations, backfill, Phase-1
 
-2. Enumerate active writers:
-   SELECT reservation_id FROM storage_reservations 
-   WHERE state IN ('RESERVED', 'WRITING') AND expires_at > now();
+2. Enumerate ALL potentially-active writers (rev 10: no expiry filter):
+   ```sql
+   SELECT reservation_id, expires_at FROM storage_reservations 
+   WHERE state IN ('RESERVED', 'WRITING');
+   -- NOTE: No expires_at filter. An expired reservation may still have
+   -- a writer holding LOCK_SH (e.g., slow network, long chunk).
+   -- The fence must wait for it, not skip it.
+   ```
    
 3. For EACH active reservation:
    a. PartPath = /data/media/.tmp/{reservation_id}.part
@@ -563,6 +572,10 @@ FENCE ACTIVATION SEQUENCE:
 4. With all writer locks held (LOCK_EX):
    a. UPDATE storage_reservations SET state = 'ABANDONED' 
       WHERE state IN ('RESERVED', 'WRITING');
+      -- Same set as enumeration (no expiry filter).
+      -- Expired reservations with active writers are invalidated.
+      -- Truly stale reservations (expired, no file, no writer) are also
+      -- marked ABANDONED — harmless, as RES-1c would reap them anyway.
    b. UPDATE system_maintenance SET active = true WHERE id = 1;
    c. COMMIT (releases L1)
 
@@ -635,10 +648,19 @@ For EACH active reservation:
          and stale-temp cleanup.
     
     If NO 'cancelled' allowance exists:
-      → Truly no file yet (reservation created, Phase-2 not started)
-      → OR file was already cleaned up
-      → Safe to skip file lock; DB invalidation is sufficient.
-      → Log at DEBUG level.
+      → Check if .part file exists:
+        - If yes → acquire LOCK_EX (normal writer case)
+        - If no → check if reservation is expired:
+          ```sql
+          SELECT expires_at < now() AS is_expired FROM storage_reservations 
+          WHERE reservation_id = $1;
+          ```
+          - If expired AND no file → truly stale (writer died, cleanup pending)
+            → Safe to skip file lock; DB invalidation suffices.
+            → RES-1c will reap the reservation; stale-temp cleanup removes any orphan.
+          - If NOT expired AND no file → Phase-2 not started yet
+            → Safe to skip; DB invalidation prevents future writes.
+      → Log at DEBUG level with reason.
     
     **Why this works:** The `reservation_id` column in `staging_allowances`
     (added in rev 6) provides the link. Fence activation can discover
