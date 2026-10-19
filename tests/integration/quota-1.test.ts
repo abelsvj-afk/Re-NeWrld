@@ -377,47 +377,115 @@ describe('QUOTA-1: handoff metrics', () => {
 });
 
 describe('QUOTA-1: HTTP file-size enforcement (B5)', () => {
-  it('rejects 11 MB multipart upload with 413', async () => {
-    // B5: Verifies Fastify's actual multipart limit behavior via HTTP.
-    const { buildApp } = await import('../../src/app.js');
+  it('rejects 11 MB multipart upload with exactly 413', async () => {
+    // B5: Verifies Fastify's multipart fileSize limit with the EXACT
+    // configuration from src/app.ts (fileSize: 10 * 1024 * 1024).
+    // Uses an isolated Fastify instance with the same multipart config
+    // but no auth, so the test proves the 413 comes from the file limit
+    // (not from 401 auth failure or 400 malformed request).
+    // Setup failures throw (fail the test), never silently return.
+    const { default: Fastify } = await import('fastify');
+    const { default: multipart } = await import('@fastify/multipart');
 
-    // buildApp requires DB for quota verification; use the test DB.
-    // If buildApp fails due to missing test setup, skip (unit test covers the helper).
-    let app;
-    try {
-      app = await buildApp();
-    } catch (err) {
-      console.log('Skipping HTTP test (buildApp setup):', (err as Error).message);
-      return;
-    }
+    const app = Fastify();
+    // Same config as src/app.ts:167-168.
+    await app.register(multipart, {
+      limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+    });
+    // Same pattern as production: request.file() + toBuffer().
+    // The fileSize limit is enforced when the stream is read.
+    app.post('/upload', async (request, reply) => {
+      const file = await request.file();
+      if (!file) return reply.code(400).send({ error: 'No file' });
+      await file.toBuffer(); // Triggers fileSize limit check.
+      return reply.code(201).send({ ok: true });
+    });
 
     try {
-      // Create an 11 MB buffer.
       const bigFile = Buffer.alloc(11 * 1024 * 1024, 0);
-
-      // Build multipart payload manually.
-      const boundary = '----testboundary123';
+      const boundary = 'testboundary123';
       const header = Buffer.from(
-        `------testboundary123\r\n` +
+        `--${boundary}\r\n` +
         `Content-Disposition: form-data; name="file"; filename="big.png"\r\n` +
         `Content-Type: image/png\r\n\r\n`
       );
-      const footer = Buffer.from(`\r\n------testboundary123--\r\n`);
+      const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
       const payload = Buffer.concat([header, bigFile, footer]);
 
       const res = await app.inject({
         method: 'POST',
-        url: '/worlds/22222222-2222-2222-2222-222222222222/media',
+        url: '/upload',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload,
+      });
+
+      // Must be exactly 413 (not 401, not 400, not 201).
+      expect(res.statusCode).toBe(413);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('accepts 9 MB upload through the real /worlds/:id/media path with 201', async () => {
+    // B5 boundary: 9 MB goes through the INTENDED upload path
+    // (POST /worlds/:id/media with auth), proving the 10 MB limit
+    // is the boundary — not a lower limit, not a mock.
+    // Setup failures throw (fail the test), never silently return.
+    const { buildApp } = await import('../../src/app.js');
+    const { setPool } = await import('../../src/shared/database/db.js');
+    setPool(process.env.TEST_DATABASE_URL!);
+
+    const app = await buildApp();
+    try {
+      // Create creator user and session.
+      const userId = 'a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5';
+      const testEmail = `boundary-${userId.substring(0, 8)}@test.com`;
+      await pool.query(
+        `INSERT INTO users (user_id, email, password_hash, role)
+         VALUES ($1, $2, 'hash', 'creator')
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId, testEmail]
+      );
+      // Create session via the session service (stores token_hash, returns raw token).
+      const { SessionService } = await import(
+        '../../src/modules/auth/infrastructure/services/session.service.js'
+      );
+      const { UserId } = await import(
+        '../../src/modules/auth/domain/value-objects/user-id.value-object.js'
+      );
+      const sessionService = new SessionService();
+      const { sessionId } = await sessionService.createSession(new UserId(userId));
+
+      const worldId = 'b2c3d4e5-f6a7-4b8c-9d0e-f1a2b3c4d5e6';
+      await pool.query(
+        `INSERT INTO worlds (world_id, title, creator_id)
+         VALUES ($1, 'Boundary Test', $2)
+         ON CONFLICT (world_id) DO NOTHING`,
+        [worldId, userId]
+      );
+
+      const okFile = Buffer.alloc(9 * 1024 * 1024, 0);
+      const boundary = 'testboundary123';
+      const header = Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="file"; filename="ok.png"\r\n` +
+        `Content-Type: image/png\r\n\r\n`
+      );
+      const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+      const payload = Buffer.concat([header, okFile, footer]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/worlds/${worldId}/media`,
         headers: {
-          'content-type': `multipart/form-data; boundary=--testboundary123`,
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+          cookie: `rene_session_id=${sessionId}`,
         },
         payload,
       });
 
-      // Fastify multipart should reject with 413 before reaching the handler.
-      // (Auth may return 401 first; either proves the file didn't get through as 201.)
-      expect([413, 401, 400]).toContain(res.statusCode);
-      expect(res.statusCode).not.toBe(201);
+      // Must be 201 (proves 9 MB passes through the real path).
+      expect(res.statusCode).toBe(201);
     } finally {
       await app.close();
     }
@@ -428,7 +496,9 @@ describe('QUOTA-1: startup integration (B2)', () => {
   it('buildApp fails when a required quota column is missing', async () => {
     // Creates a scratch DB without storage_reservations.state,
     // then verifies buildApp() refuses to start.
-    const scratchDb = 'renewrld_quota_scratch_test';
+    // Uses a unique DB name per run for parallel safety.
+    const { randomUUID } = await import('node:crypto');
+    const scratchDb = `renewrld_quota_${randomUUID().replace(/-/g, '').slice(0, 12)}_test`;
     const adminPool = new pkg.Pool({
       connectionString: 'postgresql://postgres:postgres@127.0.0.1:5432/postgres',
     });
@@ -465,8 +535,11 @@ describe('QUOTA-1: startup integration (B2)', () => {
       try {
         await expect(buildApp()).rejects.toThrow(/QUOTA_SCHEMA_INCOMPLETE/);
       } finally {
-        // Restore original pool immediately (before cleanup DB ops).
-        if (origUrl) setPool(origUrl);
+        // Always restore the pool, even if the assertion threw.
+        // Use TEST_DATABASE_URL if set, else the default test DB.
+        const restoreUrl =
+          origUrl || 'postgresql://postgres:postgres@127.0.0.1:5432/renewrld_test';
+        setPool(restoreUrl);
       }
     } finally {
       await scratchPool.end();
