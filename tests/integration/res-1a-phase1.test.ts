@@ -121,9 +121,10 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
   });
 
   beforeEach(async () => {
+    // Delete assets before reservations (FK constraint).
+    await query(`DELETE FROM world_media_assets`);
     await query(`DELETE FROM storage_reservations`);
     await query(`DELETE FROM storage_capacity_metrics`);
-    await query(`DELETE FROM world_media_assets`);
     await query(`UPDATE system_maintenance SET active = false WHERE id = 1`);
     await seedMetric();
   });
