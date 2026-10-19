@@ -1,6 +1,6 @@
 # ADR-017 DEL-1 Design: Asset Deletion State Machine T1/T2
 
-**Status:** DRAFT rev 1 — initial design for review
+**Status:** DRAFT rev 2 — bug fixes from self-review (fence checks, world filter, T2 rollback, lock timeout)
 **Date:** 2026-10-19
 **Scope:** `DELETE /worlds/:id/media/:assetId` implementing ADR-017 §4.3b
 
@@ -18,20 +18,24 @@ Implement the two-transaction asset deletion state machine that ensures an asset
 3. **Asset row:** `SELECT ... FOR UPDATE` on `world_media_assets`
 
 **Steps:**
-1. Acquire L1, L2, asset row lock (in order)
-2. Verify asset exists and belongs to world → 404 if not
-3. Check `lifecycle`: if already `pending_deletion` → idempotent retry (proceed to T2 logic)
-4. **Authoritative reference scan:** Query all registered reference paths for this asset's URL
+1. Acquire L1 (set `lock_timeout = '5s'`)
+2. Check fence → 503 `FENCE_ACTIVE` if active
+3. Check backfill → 503 `BACKFILL_IN_PROGRESS` if in progress
+4. Acquire L2, asset row lock (in order)
+5. Verify asset exists and belongs to world → 404 if not
+6. Check `lifecycle`: if already `pending_deletion` → COMMIT T1 immediately, proceed to T2
+7. **Authoritative reference scan:** Query registered paths in OWNING world only (pre-SHARE-1 same-world invariant)
    ```sql
-   SELECT 'cover' AS role, world_id FROM worlds
-   WHERE metadata->>'coverArtUrl' = $1
+   SELECT 'cover' AS role FROM worlds
+   WHERE world_id = $2 AND metadata->>'coverArtUrl' = $1
    UNION
-   SELECT 'illustration' AS role, world_id FROM scenes
-   WHERE metadata->>'illustrationUrl' = $1;
+   SELECT 'illustration' AS role FROM scenes
+   WHERE world_id = $2 AND metadata->>'illustrationUrl' = $1;
    ```
-5. If any references found → 409 `ASSET_REFERENCED` with reference list
-6. If no references → `UPDATE world_media_assets SET lifecycle = 'pending_deletion' WHERE asset_id = $1`
-7. COMMIT (releases locks)
+   ($1 = asset URL, $2 = owning world_id)
+8. If any references found → 409 `ASSET_REFERENCED` with reference list (ROLLBACK, no state change)
+9. If no references → `UPDATE world_media_assets SET lifecycle = 'pending_deletion' WHERE asset_id = $1`
+10. COMMIT (releases locks)
 
 **Error codes:**
 | Condition | Code | HTTP |
@@ -43,24 +47,28 @@ Implement the two-transaction asset deletion state machine that ensures an asset
 
 ### T2: Execution Transaction (reacquire → verify → delete)
 
-**Lock sequence:** Same as T1 (L1 → L2 → asset row)
+**Lock sequence:** Same as T1 (L1 → L2 → asset row), with `SET LOCAL lock_timeout = '5s'`
 
 **Steps:**
-1. Acquire L1, L2, asset row lock
+1. Acquire L1, L2, asset row lock (in order)
 2. Re-verify `lifecycle = 'pending_deletion'` (if not, abort — another transaction changed it)
-3. Re-run reference scan (defense in depth — references could have been added between T1 and T2)
-4. If references found → 409 `ASSET_REFERENCED` (rollback lifecycle change)
-5. **Filesystem:** `stat()` the file path
-   - If exists → `unlink()` the file
-   - If not exists → log warning (crash recovery case: file already gone)
+3. Re-run reference scan (defense in depth — see note below)
+4. If references found → revert `lifecycle` to `'active'`, COMMIT, return 409 `ASSET_REFERENCED`
+   - This handles the race where REF-1 validation was bypassed or a reference was added via direct DB write
+   - The asset returns to fully active state; deletion must be retried after removing references
+5. **Filesystem:** Derive path from asset URL (`/media/{filename}` → `{mediaRoot}/{filename}`), then `stat()`
+   - If exists → `unlink()` the file, then `fsync()` the parent directory
+   - If not exists → log warning (crash recovery case: file already gone), proceed
 6. `UPDATE world_media_assets SET file_confirmed_present = false WHERE asset_id = $1`
 7. `DELETE FROM world_media_assets WHERE asset_id = $1`
 8. COMMIT
 9. Return 204
 
-**Idempotency:** If T1 marked `pending_deletion` but T2 crashed before completion, retrying DELETE will:
-- Find `lifecycle = 'pending_deletion'` in T1 → skip to T2 logic
-- T2 will complete the deletion
+**Idempotency and control flow:**
+- The DELETE handler runs T1 first. If T1 returns 409/503/404, the handler returns that response.
+- If T1 succeeds (marked `pending_deletion` or already was), the handler immediately runs T2 in a NEW transaction.
+- If T2 crashes, retrying DELETE will run T1 again → find `pending_deletion` → COMMIT T1 (no-op) → run T2 → complete deletion.
+- There is no background worker; retry is client-driven. The `pending_deletion` state is visible to operators.
 
 **Crash recovery:**
 - **File without row:** Orphaned file in `/data/media/`. Detected by DRIFT-1 reconciliation (not DEL-1 scope).
