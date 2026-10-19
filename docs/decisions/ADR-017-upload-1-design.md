@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 5 — closes allowance and fence races
+**Status:** DRAFT rev 6 — fixes accounting gap, topology, orphan sweep, deterministic test
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -129,13 +129,46 @@ RETURNS BIGINT AS $$
 $$ LANGUAGE SQL STABLE;
 ```
 
-**Which states count:**
-- `'active'` AND `expires_at > now()` → COUNTED
-- `'active'` AND `expires_at <= now()` → NOT counted (expired, cleanup pending)
-- `'converting'` → NOT counted (in atomic transition, see below)
-- `'expired'`, `'cancelled'` → NOT counted
+**Which states count (rev 6: fixes accounting gap):**
+- `'active'` AND `expires_at > now()` → COUNTED (normal case)
+- `'active'` AND `expires_at <= now()` → COUNTED (expired but file may still exist!)
+- `'expiring'` → COUNTED (cleanup is attempting to reclaim, but file still on disk)
+- `'converting'` → NOT counted (in atomic transition, reservation will be counted)
+- `'expired'` → NOT counted (file deleted, accounting released)
+- `'cancelled'` → NOT counted (converted to reservation, which is counted)
 
-**No double-counting:** During the atomic conversion (below), the allowance is marked `'converting'` (not counted) BEFORE the reservation is created. The reservation is counted. At no point are both counted.
+**New state: `'expiring'`**
+
+The accounting gap (reviewer blocker 1): An expired allowance stops counting, but the file may still occupy disk (cleanup skipped it because writer holds the lock). This allows over-commit.
+
+**Fix:** Expiry does NOT release accounting. New lifecycle:
+```
+'active' → (expires_at passes) → 'expiring' (still counted!)
+  → cleanup acquires file lock → deletes file → 'expired' (not counted)
+  → cleanup cannot acquire lock (writer active) → remains 'expiring' (still counted)
+  → writer finishes, releases lock → next cleanup cycle deletes → 'expired'
+```
+
+**State transition table:**
+| From | To | Trigger | Accounting |
+|------|----|---------|------------|
+| `active` | `expiring` | `expires_at < now()` (detected by cleanup job or conversion attempt) | COUNTED (both) |
+| `expiring` | `expired` | Cleanup acquires `LOCK_EX`, deletes file | NOT counted |
+| `expiring` | `active` | Writer completes conversion before cleanup (race won by writer) | COUNTED |
+| `active` | `converting` | Conversion transaction starts | NOT counted (reservation will count) |
+| `converting` | `cancelled` | Conversion commits | NOT counted |
+| `active` | `cancelled` | User cancels upload | NOT counted (file deleted synchronously) |
+
+**quota_used_bytes() (rev 6):**
+```sql
+COALESCE((SELECT SUM(max_bytes) FROM staging_allowances
+  WHERE world_id = p_world_id
+    AND state IN ('active', 'expiring')), 0)
+-- Note: No expires_at check! 'expiring' counts even after expiry.
+-- 'expired' and 'cancelled' are excluded by state.
+```
+
+**Invariant:** Bytes on disk are always counted until the file is deleted. No gap.
 
 #### Step 1: Stream to staging file
 
@@ -190,21 +223,35 @@ COMMIT;
 3. If A+B+existing > quota → B's allowance creation fails with 507 (quota check includes A's allowance)
 4. Aggregate staging cannot exceed quota.
 
-#### Step 4: Expiry during streaming
+#### Step 4: Expiry during streaming (rev 6: accounting preserved)
 
 **Race:** Allowance expires (2 min) while file is still streaming.
 
 **Protocol:**
 1. Cleanup job runs every 5 minutes.
 2. For each `staging_allowances` WHERE `state='active'` AND `expires_at < now()`:
-   a. Try to acquire an exclusive lock on the staging file: `flock({allowance_id}.tmp, LOCK_EX|LOCK_NB)`
-   b. If lock acquired → no active writer → mark `state='expired'`, delete file, log incident.
-   c. If lock fails (EBUSY) → writer is active → SKIP (do not mark expired, do not delete).
-3. At conversion time (Step 3 above):
-   - If allowance is `state='active'` but `expires_at < now()` → treat as expired → ROLLBACK → 500 `STAGING_EXPIRED`.
-   - The writer held the file lock during streaming, so cleanup couldn't delete it. But the allowance expired, so conversion fails safely.
+   a. `UPDATE staging_allowances SET state='expiring' WHERE allowance_id=$1 AND state='active'`
+      -- Now counted as 'expiring' (still in quota)
+   b. Try to acquire exclusive lock: `flock({allowance_id}.tmp, LOCK_EX|LOCK_NB)`
+   c. If lock acquired → no active writer:
+      - Delete file
+      - `UPDATE staging_allowances SET state='expired' WHERE allowance_id=$1`
+      - Log incident (accounting released)
+   d. If lock fails (EBUSY) → writer is active:
+      - Leave as `'expiring'` (STILL COUNTED in quota)
+      - Log: "deferred cleanup, writer active"
+      - Next cleanup cycle retries
+3. At conversion time:
+   - If allowance is `state='expiring'` → writer won the race (still holds file lock)
+     → Allow conversion to proceed (UPDATE to 'converting')
+     → Accounting transitions atomically (expiring→converting, then reservation created)
+   - If allowance is `state='expired'` → cleanup won → ROLLBACK → 500 `STAGING_EXPIRED`
 
-**Writer synchronization:** The uploader holds `LOCK_EX` on the staging file during the entire stream. The cleanup job uses `LOCK_EX|LOCK_NB` (non-blocking). If the writer is active, cleanup skips. No race.
+**Accounting invariant:** The 10 MB is counted from allowance creation until either:
+- File deleted + state='expired', OR
+- Converted to reservation (allowance→'cancelled', reservation counted)
+
+There is no point where bytes exist on disk but are uncounted.
 
 #### Step 5: Crash recovery
 
@@ -213,8 +260,43 @@ COMMIT;
 | During allowance creation (before COMMIT) | Transaction rolls back, no allowance row. No cleanup needed. |
 | During streaming (after allowance COMMIT) | Allowance expires in 2 min. Cleanup job finds file without live allowance (via file lock check), deletes it, marks allowance `expired`. |
 | During conversion (before COMMIT) | Transaction rolls back. Allowance remains `active` (or `converting` if crash after UPDATE). Cleanup job handles. Staged file remains; cleanup deletes it. |
-| After conversion COMMIT, before file move | Reservation exists, allowance is `cancelled`. Staged file exists but no allowance. Cleanup job deletes staged file (no live allowance). Reservation has no file → RES-1c reaps it after expiry. |
+| After conversion COMMIT, before file move | Reservation exists, allowance is `cancelled`. Staged file exists. See "Orphan Sweep" below. |
 | During file move | Filesystem atomicity: `rename()` is atomic. Either the file is at old path or new path, never both/neither. |
+
+#### Step 5b: Orphan Staging File Sweep (rev 6: addresses blocker 3)
+
+**Problem:** After conversion commits, the allowance is `cancelled`. If the process crashes before moving the file, the staged file exists but the cleanup algorithm (which only checks `active`/`expiring` allowances) won't find it.
+
+**Solution:** Periodic orphan sweep (runs with the cleanup job, every 5 min):
+
+```
+For each file in /data/media/.staging/:
+  1. Extract allowance_id from filename ({allowance_id}.tmp)
+  2. SELECT state FROM staging_allowances WHERE allowance_id = $1
+  3. If no row → orphan (allowance deleted or never created):
+     a. Try LOCK_EX|LOCK_NB on the file
+     b. If acquired → delete file, log 'staging_orphan_no_allowance'
+     c. If locked → skip (writer may be active, will retry next cycle)
+  4. If state = 'cancelled':
+     a. Check if reservation exists for this upload
+        (join via world_id + created_at window, or store reservation_id in allowance)
+     b. If reservation exists AND .part file exists → conversion succeeded, staged file is leftover
+        → Try LOCK_EX|LOCK_NB → delete if acquired, log 'staging_orphan_cancelled'
+     c. If no reservation → conversion failed before COMMIT → treat as orphan, delete
+  5. If state = 'expired':
+     a. File should already be deleted (cleanup did it when marking expired)
+     b. If file still exists → previous cleanup crashed mid-delete → retry delete
+  6. If state IN ('active', 'expiring', 'converting'):
+     a. Do NOT delete (handled by the main cleanup algorithm above)
+```
+
+**Schema addition:** Add `reservation_id` to `staging_allowances` (nullable, set during conversion):
+```sql
+ALTER TABLE staging_allowances ADD COLUMN reservation_id UUID REFERENCES storage_reservations(reservation_id);
+```
+This allows the orphan sweep to correlate staged files with reservations.
+
+**Safety:** The sweep NEVER deletes a file without first acquiring `LOCK_EX|LOCK_NB`. If a writer holds the lock (during streaming or conversion), the sweep skips. No race.
 
 #### Step 6: Incident logging
 
@@ -384,7 +466,72 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 | Fence holds LOCK_EX (step 4), writer starts chunk | Writer blocks at step 1 (LOCK_SH waits for LOCK_EX). Fence completes, releases. Writer acquires LOCK_SH, checks state → ABANDONED → aborts. |
 | Writer checks state (active), fence activates, writer writes | IMPOSSIBLE. Fence cannot acquire LOCK_EX while writer holds LOCK_SH. The check and write are atomic w.r.t. fence activation. |
 
-**Cross-process:** `flock()` is a kernel primitive. It synchronizes across processes, containers, and (on a shared filesystem) across machines. The PostgreSQL advisory lock (L1) synchronizes the DB state changes. Together they provide a complete barrier.
+**Deployment topology (rev 6: explicit):**
+
+**Supported:** Single-machine deployment (current Fly.io topology).
+- One machine (`83d1299cdd1258`) runs the application.
+- Volume `/data` is attached to that machine only.
+- All writers are processes on that single machine.
+- `flock()` on `/data/media/.tmp/*.part` synchronizes correctly (kernel-level, same filesystem).
+
+**NOT supported (explicitly out of scope):**
+- Multi-machine writers on a shared network filesystem (NFS, etc.). `flock()` semantics on NFS are unreliable (may not propagate, may deadlock).
+- If the deployment ever scales to multiple machines with shared storage, the fence protocol MUST be redesigned (e.g., using PostgreSQL advisory locks per-file instead of flock).
+
+**Topology invariant:** UPLOAD-1 assumes single-writer-host. This matches the current Fly.io single-machine constraint (ADR-017 §9.2).
+
+**Fence activation failure handling:**
+
+```
+For EACH active reservation:
+  Path = /data/media/.tmp/{reservation_id}.part
+  
+  Case 1: File does not exist
+    → Log warning, skip (no writer to block)
+    → Continue to next reservation
+    → The reservation will be invalidated via DB anyway
+  
+  Case 2: flock(LOCK_EX) fails with error (not EBUSY)
+    → Log error, ABORT fence activation
+    → ROLLBACK the DB transaction (do not commit partial invalidation)
+    → Return 500, alert operator
+    → Fence is NOT active (fail-closed: better to not fence than to fence partially)
+  
+  Case 3: flock(LOCK_EX) blocks beyond timeout (30 seconds)
+    → Log error, ABORT fence activation
+    → ROLLBACK, return 500, alert
+    → Rationale: A writer holding LOCK_SH for >30s is stuck; fence cannot wait forever.
+  
+  Case 4: Success
+    → Hold LOCK_EX, proceed to DB invalidation
+```
+
+**Partial barrier prevention:**
+- Fence activation is ALL-OR-NOTHING.
+- Either all active writers are blocked (LOCK_EX acquired) AND all reservations invalidated, OR the fence is not activated.
+- If any lock fails → ROLLBACK → no state change → operator intervenes.
+- This prevents the "partial barrier" where some writers are fenced and others aren't.
+
+**Rollback behavior:**
+```sql
+BEGIN;
+-- Acquire L1
+-- Enumerate reservations
+-- Acquire file locks (outside DB txn, before DB writes)
+-- If any lock fails → ROLLBACK, release acquired locks, abort
+
+-- All locks held:
+UPDATE storage_reservations SET state='ABANDONED' WHERE ...;
+UPDATE system_maintenance SET active=true WHERE id=1;
+COMMIT;  -- Releases L1
+-- Release file locks
+```
+
+If COMMIT fails after locks acquired:
+- Release file locks
+- Log critical alert: "Fence activation DB commit failed, locks released, state uncertain"
+- Operator must manually verify and re-run
+- This is a rare path (DB commit failure); the alternative (holding locks forever) is worse.
 
 **Crash behavior:**
 - If fence activation crashes while holding LOCK_EX: kernel releases flock on process exit. Reservations may be partially invalidated → operator resolves via runbook.
@@ -427,8 +574,11 @@ it('fence activation blocks until in-flight chunk completes, then rejects next c
   const fencePromise = activateFence();
   
   // Fence must block (cannot acquire LOCK_EX while writer holds LOCK_SH)
-  await sleep(100);
-  expect(await isFenceBlocked()).toBe(true);
+  // Deterministic: poll /proc/locks with bounded timeout (not fixed sleep)
+  await waitForCondition(
+    async () => await isFenceBlocked(),
+    { timeoutMs: 5000, intervalMs: 50, message: 'Fence did not block on writer lock' }
+  );
   
   // Let writer complete the chunk
   writer.resume();
@@ -449,9 +599,24 @@ it('fence activation blocks until in-flight chunk completes, then rejects next c
 
 **Test determinism:**
 - `waitForLockHeld()` uses a promise that resolves when the writer acquires LOCK_SH (instrumented via test hook).
-- `isFenceBlocked()` checks if fence activation is waiting on the file lock (via `lsof` or `/proc/locks`).
-- No sleep-based timing; all synchronization via explicit signals.
+- `isFenceBlocked()` checks `/proc/locks` for a BLOCKED flock request on the .part file.
+- `waitForCondition()` polls with 50ms interval, 5s timeout. Fails the test on timeout (does not pass silently).
+- No fixed `sleep()` for ordering; only bounded polling for failure detection.
 - The test proves: (1) fence waits for in-flight chunk, (2) post-fence chunks are rejected, (3) no bytes written after effective point.
+
+```typescript
+async function waitForCondition(
+  check: () => Promise<boolean>,
+  opts: { timeoutMs: number; intervalMs: number; message: string }
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < opts.timeoutMs) {
+    if (await check()) return;
+    await new Promise(r => setTimeout(r, opts.intervalMs));
+  }
+  throw new Error(`Timeout: ${opts.message}`);
+}
+```
 
 ## 4. API Contract
 
