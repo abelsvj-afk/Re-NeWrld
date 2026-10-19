@@ -347,13 +347,37 @@ export async function worldDeletionT5(
 // Combined handler
 // ---------------------------------------------------------------------------
 
+/**
+ * Full deletion flow with resume support.
+ * If T1 returns an existing job, resumes from the correct transaction.
+ */
 export async function deleteWorld(
   worldId: string,
   deps: WorldDeletionDeps
 ): Promise<void> {
   const jobId = await worldDeletionT1(worldId, deps);
-  await worldDeletionT2(jobId, worldId, deps);
-  await worldDeletionT3(jobId, worldId, deps);
-  await worldDeletionT4(jobId, worldId, deps);
-  await worldDeletionT5(jobId, worldId, deps);
+
+  // Check job state to determine resume point
+  const { query } = await import('../../../../shared/database/db.js');
+  const jobResult = await query(`SELECT state FROM world_deletion_jobs WHERE job_id = $1`, [jobId]);
+  const state = jobResult.rows[0]?.state as JobState | undefined;
+
+  switch (state) {
+    case 't1_complete':
+      await worldDeletionT2(jobId, worldId, deps);
+    // fallthrough intentional
+    case 't2_complete':
+      await worldDeletionT3(jobId, worldId, deps);
+    // fallthrough intentional
+    case 't3_complete':
+      await worldDeletionT4(jobId, worldId, deps);
+    // fallthrough intentional
+    case 't4_complete':
+      await worldDeletionT5(jobId, worldId, deps);
+      break;
+    case 'complete':
+      break; // Already done (idempotent)
+    default:
+      throw new Error(`Cannot resume job ${jobId} from state: ${state}`);
+  }
 }

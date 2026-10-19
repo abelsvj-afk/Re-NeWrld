@@ -96,11 +96,13 @@ function startExpiryClaimWorker(app: {
  * Polls world_deletion_jobs for stuck jobs and resumes them.
  * Uses session-level advisory lock for single-instance guarantee.
  */
-function startWorldDeletionRecovery(app: {
+async function startWorldDeletionRecovery(app: {
   log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void; error: (o: object, m: string) => void };
-}): void {
-  const { startDeletionRecoveryWorker } = require('./modules/world/domain/services/world-deletion-recovery.service.js');
-  const { env } = require('./shared/config/env.js');
+}): Promise<void> {
+  const { startDeletionRecoveryWorker } = await import(
+    './modules/world/domain/services/world-deletion-recovery.service.js'
+  );
+  const { env } = await import('./config/env.js');
   startDeletionRecoveryWorker({
     mediaRoot: env.MEDIA_STORAGE_PATH,
     isFenceActive: async (tx: any) => {
@@ -192,7 +194,7 @@ async function start() {
     startSessionJanitor(app);
     startDeliveryWorker(app);
     startExpiryClaimWorker(app);
-    startWorldDeletionRecovery(app);
+    await startWorldDeletionRecovery(app);
 
     // Graceful shutdown on SIGTERM/SIGINT (Fly.io scale-to-zero)
     const shutdown = async (signal: string) => {
