@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 1 — awaiting design review
+**Status:** DRAFT rev 2 — addresses ChatGPT review blockers
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -33,7 +33,20 @@ This bypasses every ADR-017 guarantee: no quota enforcement, no crash safety, no
 10. Return 201 with registry URL
 ```
 
-### 3.1 Failure Handling
+### 3.1 File Size Determination (addresses review: reservation ordering)
+
+**Problem:** `reserveStorage(worldId, sizeBytes)` needs an exact byte count, but multipart streams don't provide trustworthy `Content-Length` (client-supplied, may be absent or lie).
+
+**Solution:** Two-phase size determination:
+1. Stream the upload to a staging temp file (`/data/media/.staging/{uuid}.tmp`) with NO size limit except the 10 MB multipart cap.
+2. `fstat()` the staged file for the exact byte count.
+3. Call `reserveStorage(worldId, actualSizeBytes)` with the measured size.
+4. If reservation succeeds, proceed to Phase-2 (move staged file to `.tmp/{reservation_id}.part`).
+5. If reservation fails (quota/storage), delete the staged file synchronously.
+
+This never trusts client metadata and never buffers unboundedly (multipart cap is 10 MB).
+
+### 3.2 Failure Handling
 
 | Failure Point | Behavior |
 |---------------|----------|
@@ -46,6 +59,9 @@ This bypasses every ADR-017 guarantee: no quota enforcement, no crash safety, no
 | Phase-2 write fails | Reservation expires (RES-1c reaps), temp cleaned |
 | Phase-A commit fails | Reservation remains, expires via RES-1c |
 | Row insert fails after file written | Orphan compensation: synchronous delete + 500 |
+| Phase-A fails | Reservation remains RESERVED; RES-1c reaps after expiry; temp `.part` cleaned by stale-temp cleanup (§1.6e) |
+| Publication fails after Phase-A | Asset remains PENDING; reconciliation flags for operator; temp `.part` cleaned by §1.6e |
+| Compensation itself fails | Alert incident in `temp_cleanup_incidents`; operator intervention required |
 
 ### 3.2 Magic Bytes Validation
 
@@ -57,9 +73,21 @@ Replace extension-based mimetype check with magic bytes:
 
 Read first 12 bytes, validate before Phase-1. Returns 415 on mismatch.
 
-### 3.3 Backfill Freeze Check
+### 3.3 Backfill Freeze Check (addresses review: race protection)
 
-Per §4.7: when backfill is `in_progress`, new uploads that would create registry rows must be rejected with 503 `BACKFILL_IN_PROGRESS`. Check via `backfill_runs` table (single-active-run constraint).
+**Problem:** Checking for `in_progress` backfill, then proceeding, allows a backfill to start between the check and the commit.
+
+**Solution:** The freeze check is performed INSIDE the Phase-1 reservation transaction, under L1 (`pg_advisory_xact_lock(hashtext('media_global'))`).
+
+Per ADR-017 §4.3c, backfill start also acquires L1. The lock ordering guarantees:
+- If backfill holds L1, the upload's Phase-1 blocks until backfill completes or releases.
+- If upload holds L1 (in Phase-1), backfill start blocks until Phase-1 commits.
+
+The check is not a separate query — it's part of the atomic reservation transaction. No TOCTOU.
+
+### 3.4 Fence Check (addresses review: race protection)
+
+Same pattern: `isFenceActive()` is called INSIDE the Phase-1 transaction (already implemented in `reserve-storage.service.ts:115`). Fence activation also acquires L1 per §4.3d. The lock serializes fence activation against new reservations.
 
 ### 3.4 Integration with Existing Slices
 
@@ -67,6 +95,22 @@ Per §4.7: when backfill is `in_progress`, new uploads that would create registr
 - **RES-1b:** `Phase2Writer` for chunked writes, `phaseACommit` → `commitReservationToRegistry` for Phase-A
 - **QUOTA-1:** `checkFileSizeLimit()`, `quotaUsedBytes()` (via reserveStorage), `commitReservationToRegistry()`
 - **FENCE-1:** `isFenceActive()` check (already wired in reserveStorage)
+
+### 3.5 Success Semantics (addresses review)
+
+**201 is returned only after the asset is ACTIVE.**
+
+Full sequence:
+1. Phase-1 reservation → Phase-2 write → Phase-A commit (PENDING) → Phase-B link → Phase-C ACTIVE → 201.
+
+**If publication cannot complete after Phase-A commits:**
+- Asset remains `PENDING` in registry.
+- Reconciliation (RECOV-1) detects PENDING assets with no final file and alerts.
+- The upload returns 500 (not 201) — the client knows it didn't succeed.
+- Operator resolves via the recovery runbook (OPS-1).
+- The reservation is already COMMITTED, so quota is correctly accounted.
+
+**Client retry:** Safe to retry the entire upload. The new attempt creates a new reservation; the old PENDING asset is cleaned by reconciliation.
 
 ## 4. API Contract
 
@@ -85,19 +129,36 @@ Per §4.7: when backfill is `in_progress`, new uploads that would create registr
 - `503`: `BACKFILL_IN_PROGRESS` or `FENCE_ACTIVE`
 - `507`: `QUOTA_EXCEEDED` or `STORAGE_FULL`
 
-### Backward Compatibility
+### Legacy Path Retirement (addresses review: fallback contradiction)
 
-Per breakdown: "Existing route behavior preserved for the pre-backfill grace period." The old direct-write path remains as fallback until backfill completes. Feature flag `USE_ADR017_UPLOAD` controls which path executes.
+**Decision:** The old direct-write path is REMOVED, not feature-flagged.
+
+**Rationale:** A `USE_ADR017_UPLOAD` flag that falls back to the unsafe path silently restores every bypass the ADR was written to eliminate (no quota, no registry, no crash safety). A flag that can be flipped to "unsafe mode" is not a safety mechanism.
+
+**Migration:** The old route handler is deleted. All uploads go through the ADR-017 path. There is no grace period because:
+1. The old path never created registry rows, so there's nothing to backfill from it.
+2. Files uploaded via the old path remain servable via `/media/` (filesystem unchanged).
+3. New uploads must meet the new guarantees; no exception.
+
+**If rollback is needed:** Deploy the previous release (git revert), don't add a runtime flag.
 
 ## 5. Acceptance Criteria
 
-- [ ] S8: Failed metadata switch → orphan recovery path exercised
+### Independent (UPLOAD-1 must satisfy alone)
 - [ ] S23: Same bytes, different filenames → two rows, never merged
-- [ ] S24: Failed replacement does not corrupt roles
 - [ ] Magic bytes validation rejects mismatched content with 415
-- [ ] Backfill freeze returns 503 before Phase-1
-- [ ] All existing quota/reservation error codes preserved
-- [ ] 201 response includes both `url` and `assetId`
+- [ ] Backfill freeze returns 503 (via L1-serialized check in Phase-1)
+- [ ] Fence active returns 503 (via L1-serialized check in Phase-1)
+- [ ] All existing quota/reservation error codes preserved (507 QUOTA_EXCEEDED, etc.)
+- [ ] 201 returned only after asset is ACTIVE, includes both `url` and `assetId`
+- [ ] Staged temp file deleted on reservation failure
+- [ ] 11 MB upload → 413 through production path (already tested in QUOTA-1)
+
+### Gated on REF-1 (deferred until REF-1 is implemented)
+- [ ] S8: Failed metadata switch → orphan recovery path (needs REF-1's atomic roles update)
+- [ ] S24: Failed replacement does not corrupt roles (needs REF-1's reference-aware roles)
+
+UPLOAD-1 implements the upload flow; REF-1 implements the reference validation. The replacement T2 path (which needs both) is deferred until REF-1 passes.
 
 ## 6. Out of Scope
 
