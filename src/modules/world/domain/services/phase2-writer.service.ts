@@ -29,7 +29,8 @@ export type WriterErrorCode =
   | 'HEARTBEAT_FAILED'     // Heartbeat updated 0 rows; reservation no longer active
   | 'FENCED_WRITE_REJECTED' // State changed under lock; write aborted
   | 'TRANSFER_INCOMPLETE'  // bytes_ready=false; initial transfer not done (UPLOAD-1)
-  | 'FENCE_ACTIVE';         // Maintenance fence active; writes rejected (UPLOAD-1)
+  | 'FENCE_ACTIVE'         // Maintenance fence active; writes rejected (UPLOAD-1)
+  | 'STORAGE_WRITE_FAILED'; // Filesystem I/O error during write (API-1 §9.3)
 
 export class Phase2WriterError extends Error {
   public readonly code: WriterErrorCode;
@@ -42,7 +43,8 @@ export class Phase2WriterError extends Error {
     this.httpStatus =
       code === 'WRITER_CONFLICT' ? 409 :
       code === 'FENCE_ACTIVE' ? 503 :
-      code === 'TRANSFER_INCOMPLETE' ? 500 : 410;
+      code === 'TRANSFER_INCOMPLETE' ? 500 :
+      code === 'STORAGE_WRITE_FAILED' ? 500 : 410;
   }
 }
 
@@ -221,7 +223,15 @@ export async function writeChunkFenced(
     }
 
     // Step 4: Write (single syscall).
-    await dataFd.write(chunk);
+    // API-1 §9.3: Map I/O errors to STORAGE_WRITE_FAILED (distinct from quota/capacity).
+    try {
+      await dataFd.write(chunk);
+    } catch (err) {
+      throw new Phase2WriterError(
+        'STORAGE_WRITE_FAILED',
+        `Filesystem write failed for ${session.reservationId}: ${(err as Error).message}`,
+      );
+    }
     session.bytesWritten += chunk.length;
     session.digest.update(chunk);
   } finally {
