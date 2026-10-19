@@ -28,7 +28,11 @@ pool.on('error', (err) => {
   logger.error({ err }, 'Unexpected database error on idle PostgreSQL client');
 });
 
-export function setPool(connectionString: string): void {
+/**
+ * Validates the connection string and creates a new pool.
+ * Returns the old pool for the caller to close.
+ */
+function swapPool(connectionString: string): pkg.Pool {
   // STOP-2: same guard for runtime pool swaps (integration tests use setPool
   // with TEST_DATABASE_URL or a Testcontainers URI).
   if (env.APP_ENV === 'test') {
@@ -49,8 +53,12 @@ export function setPool(connectionString: string): void {
   pool.on('error', (err) => {
     logger.error({ err }, 'Unexpected database error on idle PostgreSQL client');
   });
+  return oldPool;
+}
+
+export function setPool(connectionString: string): void {
+  const oldPool = swapPool(connectionString);
   // Close the old pool asynchronously (don't block the swap).
-  // QUOTA-1: Ensures clean handoff during test pool swaps.
   oldPool.end().catch(() => {});
 }
 
@@ -59,11 +67,9 @@ export function setPool(connectionString: string): void {
  * Use in tests where deterministic cleanup matters.
  */
 export async function setPoolAndWait(connectionString: string): Promise<void> {
-  const oldPool = pool;
-  setPool(connectionString);
-  try {
-    await oldPool.end();
-  } catch {}
+  const oldPool = swapPool(connectionString);
+  // Single close — no duplicate end() call.
+  await oldPool.end().catch(() => {});
 }
 
 export async function query<R extends pkg.QueryResultRow = any>(text: string, params?: any[]): Promise<pkg.QueryResult<R>> {
