@@ -1,9 +1,9 @@
 # ADR-017 QUOTA-1 Design — Quota Admission + Atomic Handoff
 
-**Status:** DRAFT rev 1 — submitted for design review
+**Status:** DRAFT rev 2 — addresses reviewer blockers from rev 1
 **Date:** 2026-10-18
 **Slice order:** After RES-1c (complete). Before UPLOAD-1 + REF-1.
-**Change classification:** Level 2 (new shared functions, config wiring, no schema changes)
+**Change classification:** Level 2 CONFIRMED — schema verified (see §9.4). No migration needed.
 **Design gate:** REQUIRED before implementation. No implementation code until explicit DESIGN PASS.
 
 ---
@@ -53,6 +53,20 @@ Per-world storage quota (50 MB, owner-confirmed) must be enforced consistently a
 ### 2.3 Invariants
 
 1. **Single definition:** `quota_used_bytes()` is the ONLY implementation of §5.1. Every path (admission, delete verification, reconciliation, error responses) calls it. No inline reimplementation.
+
+**B1 resolution — RES-1a integration:** RES-1a's `reserve-storage.service.ts` currently computes `registeredBytes + reservedBytes` inline (lines 143–146). QUOTA-1 extracts this to the shared SQL function. RES-1a's transaction is NOT reimplemented; only the quota-input computation is replaced:
+
+```typescript
+// Before (RES-1a inline):
+const registeredBytes = await getRegisteredBytes(worldId, tx);
+const reservedBytes = await getReservedBytes(worldId, tx);
+
+// After (QUOTA-1):
+const usedBytes = await quotaUsedBytes(worldId, tx); // Single SQL function.
+if (usedBytes + sizeBytes > deps.quotaBytes) { /* QUOTA_EXCEEDED */ }
+```
+
+The admission transaction (locks, fence check, capacity check, INSERT, COMMIT) is unchanged. Only the two inline SUM queries are replaced by one function call. **Regression tests:** RES-1a's existing 14 tests must pass unchanged (they verify the transaction behavior, not the SUM implementation). QUOTA-1 adds a test verifying `quotaUsedBytes()` returns identical results to the old inline computation for a fixture dataset.
 2. **Atomic handoff:** The reservation→COMMITTED transition and the registry INSERT commit together. No window where bytes are double-counted or uncounted.
 3. **No silent truncation:** If `world_media_assets` lacks `lifecycle` or `file_confirmed_present`, QUOTA-1 fails closed at startup (schema verification), not at request time.
 4. **Config immutability:** `MEDIA_WORLD_QUOTA_MB` is read once at startup. Runtime changes require restart (no dynamic reconfiguration).
@@ -97,14 +111,43 @@ $$ LANGUAGE SQL STABLE;
 // src/shared/config/quota.ts
 const DEFAULT_QUOTA_MB = 50; // Owner-confirmed 2026-10-18.
 
+/**
+ * B3: Strict whole-value validation.
+ * - Rejects "50abc", "1.5", "", whitespace-only.
+ * - Upper bound: 1,000,000 MB (~1 TB). Prevents safe-integer overflow
+ *   when converting to bytes (1M * 1024 * 1024 = ~1.05e12, well under 2^53).
+ * - Empty string is NOT treated as unset (explicit empty = error).
+ */
+const MAX_QUOTA_MB = 1_000_000;
+
 export function getWorldQuotaBytes(): number {
   const raw = process.env.MEDIA_WORLD_QUOTA_MB;
-  if (!raw) return DEFAULT_QUOTA_MB * 1024 * 1024;
-  const mb = parseInt(raw, 10);
-  if (!Number.isInteger(mb) || mb <= 0) {
-    throw new Error(`Invalid MEDIA_WORLD_QUOTA_MB: ${raw} (must be positive integer)`);
+  // Unset (undefined) → default. Empty string → error (explicit misconfiguration).
+  if (raw === undefined) return DEFAULT_QUOTA_MB * 1024 * 1024;
+  if (raw === '') {
+    throw new Error('MEDIA_WORLD_QUOTA_MB is set but empty (must be positive integer or unset)');
   }
-  return mb * 1024 * 1024;
+  // Strict: must be all digits, no decimal, no trailing garbage.
+  if (!/^[0-9]+$/.test(raw.trim())) {
+    throw new Error(
+      `Invalid MEDIA_WORLD_QUOTA_MB: "${raw}" (must be a positive whole number, e.g. "50")`
+    );
+  }
+  const mb = Number(raw.trim());
+  if (mb <= 0) {
+    throw new Error(`Invalid MEDIA_WORLD_QUOTA_MB: "${raw}" (must be > 0)`);
+  }
+  if (mb > MAX_QUOTA_MB) {
+    throw new Error(
+      `Invalid MEDIA_WORLD_QUOTA_MB: "${raw}" (exceeds maximum ${MAX_QUOTA_MB} MB)`
+    );
+  }
+  const bytes = mb * 1024 * 1024;
+  // Defense-in-depth: verify safe integer (should be guaranteed by the bound above).
+  if (!Number.isSafeInteger(bytes)) {
+    throw new Error(`MEDIA_WORLD_QUOTA_MB "${raw}" produces unsafe byte value`);
+  }
+  return bytes;
 }
 
 export const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB per file.
@@ -151,17 +194,34 @@ export async function commitReservationToRegistry(
 ): Promise<{ assetId: string }> {
   return deps.withTransaction(async (tx) => {
     // 1. Transition reservation to COMMITTED.
+    // B2: Verify world ownership — the reservation's world_id must match
+    // input.worldId. A mismatch indicates a caller bug or confused-deputy
+    // attempt to move quota between worlds.
     const res = await tx.query(
       `UPDATE storage_reservations
          SET state = 'COMMITTED', released_at = now()
        WHERE reservation_id = $1
+         AND world_id = $2
          AND state IN ('RESERVED', 'WRITING')
-       RETURNING reservation_id, size_bytes`,
-      [input.reservationId],
+       RETURNING reservation_id, world_id, size_bytes`,
+      [input.reservationId, input.worldId],
     );
     if (res.rowCount === 0) {
+      // Distinguish "not found/wrong world" from "wrong state" for debuggability.
+      const check = await tx.query(
+        `SELECT world_id, state FROM storage_reservations WHERE reservation_id = $1`,
+        [input.reservationId],
+      );
+      if (check.rowCount === 0) {
+        throw new QuotaError('RESERVATION_NOT_FOUND',
+          'Reservation does not exist.', 404);
+      }
+      if (check.rows[0].world_id !== input.worldId) {
+        throw new QuotaError('WORLD_MISMATCH',
+          'Reservation belongs to a different world.', 403);
+      }
       throw new QuotaError('RESERVATION_NOT_ACTIVE',
-        'Reservation is not in a committable state.', 409);
+        `Reservation is in state ${check.rows[0].state}, not committable.`, 409);
     }
     // Verify size matches (defense against caller bugs).
     if (Number(res.rows[0].size_bytes) !== input.sizeBytes) {
@@ -265,7 +325,7 @@ If any are missing, QUOTA-1 requires a migration (escalates to Level 3).
 | Test | Verifies |
 |------|----------|
 | `quota_used_bytes` SQL | Registered + reservations = total; excludes committed/abandoned; `pending_deletion` counts; missing file doesn't count |
-| Config parsing | Default 50 MB; valid override; invalid (0, negative, non-numeric) throws at startup |
+| Config parsing | Default 50 MB; valid override; invalid (0, negative, "50abc", "1.5", "", >1M) throws at startup |
 | `checkFileSizeLimit` | 10 MB exactly → pass; 10 MB + 1 → 413 |
 
 ### 8.2 Integration tests
@@ -292,19 +352,44 @@ If any are missing, QUOTA-1 requires a migration (escalates to Level 3).
 
 ---
 
-## 9. Open Questions for Review
+## 9. Schema Verification (B4 — resolved pre-gate)
+
+**Verified 2026-10-18 against `db/migrations/015_media_registry.sql`:**
+
+| Required column | Present? | Definition |
+|----------------|----------|------------|
+| `world_media_assets.lifecycle` | ✅ Yes | `TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active','pending_deletion'))` (line 54-55) |
+| `world_media_assets.file_confirmed_present` | ✅ Yes | `BOOLEAN NOT NULL DEFAULT true` (line 58) |
+| `world_media_assets.size_bytes` | ✅ Yes | `BIGINT NOT NULL` (line 32) |
+| `storage_reservations.state` | ✅ Yes | (migration 015, reservation states) |
+| `storage_reservations.size_bytes` | ✅ Yes | (migration 015) |
+
+**Decision:** No schema changes required. QUOTA-1 is confirmed **Level 2**. The `quota_used_bytes()` SQL function is created via application migration (not a schema change to existing tables).
+
+**Startup verification:** On boot, QUOTA-1 executes:
+```sql
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'world_media_assets'
+  AND column_name IN ('lifecycle', 'file_confirmed_present', 'size_bytes');
+```
+If any are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` (fail-closed). This is defense-in-depth; the migration is the primary guarantee.
+
+## 10. Open Questions for Review
 
 1. **Schema:** Does `world_media_assets` already have `lifecycle` and `file_confirmed_present`? (Must verify before implementation.)
 2. **Migration:** If schema is incomplete, does QUOTA-1 include the migration or is it a separate slice?
-3. **API surface:** Should `quota_used_bytes()` be exposed via a `GET /worlds/:id/quota` endpoint, or internal only?
-4. **Metric granularity:** Are per-world labels on quota metrics a cardinality risk? (Recommend: no per-world labels, aggregate only.)
+3. **API surface:** DECIDED — `quota_used_bytes()` is internal only. No user-facing quota endpoint in QUOTA-1. If a future slice needs it, that's a separate design.
+4. **Metric granularity:** DECIDED — aggregate labels only (`reason`, `outcome`). No `world_id` labels (cardinality risk).
 
 ---
 
-## 10. Acceptance Criteria (for DESIGN PASS)
+## 11. Acceptance Criteria (for DESIGN PASS)
 
 - [ ] `quota_used_bytes()` SQL matches §5.1 exactly (reviewer verifies against ADR text).
-- [ ] Boundary with RES-1a is respected (no reimplementation of admission).
+- [ ] Boundary with RES-1a is respected: only the SUM computation is extracted, transaction unchanged (B1).
+- [ ] Handoff verifies world ownership with distinct 403/404/409 errors (B2).
+- [ ] Config parsing rejects "50abc", "1.5", "", and >1M MB (B3).
+- [ ] Schema verified pre-gate; Level 2 confirmed, no conditional classification (B4).
 - [ ] Atomic handoff has no double-count or gap window (reviewer verifies transaction logic).
 - [ ] All failure modes have defined behavior (table in §3.4).
 - [ ] Test strategy covers S5, S6, S15, S34, S37 + handoff atomicity + failure injection.
