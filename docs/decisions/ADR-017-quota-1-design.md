@@ -1,6 +1,6 @@
 # ADR-017 QUOTA-1 Design — Quota Admission + Atomic Handoff
 
-**Status:** DRAFT rev 3 — addresses 2 precision issues from rev 2 review
+**Status:** DRAFT rev 4 — expands schema guard to all five columns
 **Date:** 2026-10-18
 **Slice order:** After RES-1c (complete). Before UPLOAD-1 + REF-1.
 **Change classification:** Level 2 CONFIRMED — schema verified (see §9.4). No migration needed.
@@ -367,12 +367,20 @@ If any are missing, QUOTA-1 requires a migration (escalates to Level 3).
 
 **Startup verification:** On boot, QUOTA-1 executes (scoped to the application's schema):
 ```sql
-SELECT column_name FROM information_schema.columns
+SELECT table_name, column_name
+FROM information_schema.columns
 WHERE table_schema = current_schema()
-  AND table_name = 'world_media_assets'
-  AND column_name IN ('lifecycle', 'file_confirmed_present', 'size_bytes');
+  AND (
+    (table_name = 'world_media_assets'
+     AND column_name IN ('lifecycle', 'file_confirmed_present', 'size_bytes'))
+    OR
+    (table_name = 'storage_reservations'
+     AND column_name IN ('state', 'size_bytes'))
+  );
 ```
-`current_schema()` resolves to the application's `search_path` schema (typically `public`). A same-named table in another schema cannot satisfy the check. If any of the three columns are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` (fail-closed). This is defense-in-depth; the migration is the primary guarantee.
+`current_schema()` resolves to the application's `search_path` schema (typically `public`). A same-named table in another schema cannot satisfy the check. The application verifies all five `(table, column)` pairs are present; if any are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` naming the missing pair (fail-closed). This is defense-in-depth; the migration is the primary guarantee.
+
+**Test:** A test creates the schema without one required column (e.g., drops `storage_reservations.state` in a scratch database) and asserts startup throws `QUOTA_SCHEMA_INCOMPLETE`. A second case drops `world_media_assets.lifecycle`. Both must fail startup; the happy path (all five present) must not.
 
 ## 10. Open Questions for Review
 
@@ -390,6 +398,7 @@ WHERE table_schema = current_schema()
 - [ ] Handoff verifies world ownership with distinct 403/404/409 errors (B2).
 - [ ] Config parsing rejects "50abc", "1.5", "", " 50 ", and >1M MB (B3).
 - [ ] Schema verified pre-gate; Level 2 confirmed, no conditional classification (B4).
+- [ ] Startup guard covers all five required columns across both tables; missing column → QUOTA_SCHEMA_INCOMPLETE.
 - [ ] Atomic handoff has no double-count or gap window (reviewer verifies transaction logic).
 - [ ] All failure modes have defined behavior (table in §3.4).
 - [ ] Test strategy covers S5, S6, S15, S34, S37 + handoff atomicity + failure injection.
