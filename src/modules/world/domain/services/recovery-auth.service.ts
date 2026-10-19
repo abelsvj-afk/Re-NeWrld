@@ -17,11 +17,10 @@ export type RecoveryScope = 'repair' | 'restore-reconcile';
 
 export type RecoveryErrorCode =
   | 'FENCE_NOT_ACTIVE'        // 400 - auth only meaningful under fence
+  | 'INVALID_DURATION'        // 400 - duration out of range
   | 'AUTHORIZATION_EXISTS'    // 409 - exclusivity guard
   | 'RECOVERY_EXPIRED'        // 403 - auth expired or not found
-  | 'RECOVERY_SCOPE_DENIED'   // 403 - wrong scope for operation
-  | 'FENCE_ACTIVE'            // 503
-  | 'BACKFILL_IN_PROGRESS';   // 503
+  | 'RECOVERY_SCOPE_DENIED';  // 403 - wrong scope for operation
 
 export class RecoveryError extends Error {
   public readonly code: RecoveryErrorCode;
@@ -32,9 +31,8 @@ export class RecoveryError extends Error {
     this.name = 'RecoveryError';
     this.code = code;
     this.httpStatus =
-      code === 'FENCE_NOT_ACTIVE' ? 400 :
-      code === 'RECOVERY_EXPIRED' || code === 'RECOVERY_SCOPE_DENIED' ? 403 :
-      code === 'FENCE_ACTIVE' || code === 'BACKFILL_IN_PROGRESS' ? 503 : 409;
+      code === 'FENCE_NOT_ACTIVE' || code === 'INVALID_DURATION' ? 400 :
+      code === 'RECOVERY_EXPIRED' || code === 'RECOVERY_SCOPE_DENIED' ? 403 : 409;
   }
 }
 
@@ -65,7 +63,7 @@ export async function establishRecoveryAuth(
   deps: RecoveryDeps
 ): Promise<RecoveryAuth> {
   if (durationSeconds <= 0 || durationSeconds > 86400) {
-    throw new RecoveryError('FENCE_NOT_ACTIVE', 'Duration must be 1-86400 seconds');
+    throw new RecoveryError('INVALID_DURATION', 'Duration must be 1-86400 seconds');
   }
 
   return withTransaction(async (tx) => {
@@ -168,8 +166,8 @@ export async function verifyRecoveryAuth(
   }
 
   const actualScope = result.rows[0].scope as RecoveryScope;
-  // 'restore-reconcile' is a superset of 'repair' for verification purposes?
-  // No — strict matching per design. Each operation declares its required scope.
+  // Strict scope matching: each operation declares its required scope.
+  // No implicit superset relationship.
   if (actualScope !== requiredScope) {
     throw new RecoveryError(
       'RECOVERY_SCOPE_DENIED',
