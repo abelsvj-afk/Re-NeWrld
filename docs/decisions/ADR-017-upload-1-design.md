@@ -252,8 +252,15 @@ CONVERSION SEQUENCE:
    -- DO NOT rename over it (that would replace the inode).
    -- Instead:
    a. Acquire LOCK_EX on /data/media/.tmp/{reservation_id}.part
+      using BOUNDED RETRY (rev 13: fixes deadlock with fence):
       -- We already hold LOCK_EX on the staging file (step 1).
-      -- Lock order: staging file → .part file (consistent everywhere).
+      -- Fence may hold LOCK_EX on .part while waiting for staging file.
+      -- Use LOCK_EX|LOCK_NB with 50ms sleep, 30s deadline (same as fence).
+      -- On timeout: unlink staging file (cleanup), ROLLBACK? No — already committed.
+      --   Instead: mark reservation ABANDONED, release locks, return 500.
+      --   The .part file (empty) will be cleaned by stale-temp cleanup.
+      --   The staging file is deleted (we hold its lock).
+      -- This ensures no indefinite wait while holding the staging lock.
    b. Copy bytes: staging file → .part file
       -- Use copy_file_range() or read/write loop (not rename)
       -- The .part file grows from 0 bytes to actual_bytes
@@ -263,15 +270,30 @@ CONVERSION SEQUENCE:
    d. fsync() the parent directory (/data/media/.tmp/)
       -- Ensures the file size update is durable
    e. Delete the staging file: unlink(/data/media/.staging/{allowance_id}.tmp)
-   f. Release LOCK_EX on .part file
-   g. Release LOCK_EX on staging file (already unlinked, just close fd)
+   
+   f. Mark transfer complete (rev 13: prevents Phase-2 race):
+      ```sql
+      BEGIN;
+      SELECT pg_advisory_xact_lock(hashtext('media_global'));  -- L1 (brief)
+      UPDATE storage_reservations 
+      SET bytes_ready = true 
+      WHERE reservation_id = $1 AND state = 'RESERVED';
+      -- If 0 rows → reservation was ABANDONED (fence) or reaped → abort
+      COMMIT;
+      ```
+      -- Still holding LOCK_EX on .part file during this UPDATE.
+      -- The flag is set AFTER fsync, so bytes are durable.
+   
+   g. Release LOCK_EX on .part file
+   h. Release LOCK_EX on staging file (already unlinked, just close fd)
 
-   -- If copy fails partway → .part file has partial bytes
-   -- → Reservation exists, file has partial data
-   -- → Return 500; RES-1c reaps reservation; stale-temp cleanup deletes .part
+   -- If copy fails partway → .part file has partial bytes, bytes_ready=false
+   -- → Return 500; reservation remains with bytes_ready=false
+   -- → Phase-2 writer will refuse (checks flag)
+   -- → RES-1c reaps reservation after expiry; stale-temp cleanup deletes .part
    -- → Staging file remains (orphan sweep cleans it)
 
-9. Done. Locks released. Reservation COMMITTED, .part file has bytes, inode preserved.
+9. Done. Locks released. Reservation has bytes_ready=true, .part file complete.
 ```
 
 **Why this closes the race (reviewer blocker 1):**
@@ -340,11 +362,36 @@ The conversion acquires locks in strict order:
 
 **Inode preservation proof:**
 - Step 6 creates `.part` with inode I.
-- Step 8 acquires LOCK_EX on inode I (via path).
+- Step 8 acquires LOCK_EX on inode I (via path, bounded retry).
 - Step 9 writes bytes into inode I (no rename, no replacement).
 - Fence acquiring LOCK_EX on the `.part` path always gets inode I.
 - Writer acquiring LOCK_SH on the `.part` path always gets inode I.
 - No inode replacement → no lock splitting.
+
+**Coherent bounded protocol (rev 13: no indefinite waits):**
+
+| Participant | Locks held | Waits for | Bounded? |
+|-------------|------------|-----------|----------|
+| Conversion | Staging LOCK_EX | .part LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
+| Conversion | (none after COMMIT) | L1 (in txn) | Yes: PG lock queue (fair) |
+| Fence | L1 | .part LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
+| Fence | L1 + .part LOCK_EX | Staging LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
+| Cleanup | (none) | Staging LOCK_EX | Yes: single LOCK_NB attempt |
+| Phase-2 writer | (none) | .part LOCK_SH | Yes: blocks briefly (chunk is fast) |
+
+**Deadlock freedom:** Every blocking wait is either:
+- A PostgreSQL advisory lock (fair queue, no cycle: L1 → L2 → row), OR
+- A bounded file-lock retry (30s max, then abort fail-closed).
+
+The conversion↔fence cycle is broken because BOTH sides use bounded retry for the second lock. If they contend:
+- One wins within 30s (the other’s txn/lock is brief), OR
+- Both timeout → both abort → operator retries. No deadlock, just a failed operation.
+
+**Phase-2 writer blocking:** Writers use blocking `LOCK_SH` (not bounded). This is safe because:
+- Chunk writes are fast (<100ms).
+- Fence holds `LOCK_EX` briefly (just for DB invalidation).
+- Conversion holds `.part` `LOCK_EX` during transfer (bounded by file size / 10 MB max).
+- No writer holds `LOCK_SH` while waiting for another lock (check-then-write is atomic under the lock).
 
 **Deadlock prevention (rev 9: provably bounded):**
 
@@ -679,9 +726,35 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 - Before rev 11: Fence could enumerate a reservation with no `.part` file (Phase-2 not started). Writer could then create the file and start writing while fence holds L1 but hasn't locked the file.
 - After rev 11: The `.part` file exists from reservation creation. Fence always finds it. Writer and fence always lock the same inode. No missing-file interleaving.
 
-**Writer protocol (unchanged):**
-- Writer acquires `LOCK_SH` on the existing `.part` file for each chunk.
-- File is empty initially; chunks append.
+**Writer protocol (rev 13: bytes_ready gate):**
+- Writer acquires `LOCK_SH` on the `.part` file for each chunk.
+- Under the lock, check BOTH:
+  ```sql
+  SELECT state, bytes_ready FROM storage_reservations WHERE reservation_id = $1;
+  ```
+- If `bytes_ready = false` → release lock, throw `TRANSFER_INCOMPLETE`
+  -- The initial byte transfer hasn't finished. Do not write chunks.
+  -- This prevents Phase-2 from racing conversion.
+- If `state NOT IN ('RESERVED', 'WRITING')` → release lock, throw (fence/expiry)
+- Otherwise → write chunk, release lock.
+
+**Schema: `bytes_ready` column (rev 13):**
+```sql
+-- Added to storage_reservations (migration 020, or amended into 014):
+ALTER TABLE storage_reservations 
+  ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT false;
+-- For UPLOAD-1 conversions: set to true after initial transfer.
+-- For RES-1a direct reservations (non-upload paths): set to true at creation
+--   (they don't have a separate transfer step).
+```
+
+**Crash recovery for `bytes_ready=false`:**
+| Scenario | Recovery |
+|----------|----------|
+| Crash during transfer, `bytes_ready=false` | Reservation visible but unusable. Phase-2 refuses. RES-1c reaps after expiry. Stale-temp cleanup deletes partial `.part`. |
+| Crash after transfer, before `bytes_ready=true` | Same as above. The bytes are on disk but flag not set. Safe: treated as incomplete. |
+| Crash after `bytes_ready=true` | Normal. Phase-2 proceeds. |
+| Fence activates during transfer | Fence marks ABANDONED. The `bytes_ready` UPDATE affects 0 rows (state changed). Transfer aborts. Partial file cleaned. |
 
 **Cleanup on reservation end:**
 | Reservation end state | .part file handling |
