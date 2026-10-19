@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 23 — explicit schema scoping
+**Status:** DRAFT rev 24 — exact default validation
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -916,14 +916,28 @@ BEGIN
       RAISE EXCEPTION 'Migration 020: bytes_ready must be NOT NULL';
     END IF;
 
-    -- Check default: NULL or anything not containing 'false' needs correction.
-    -- (NULL NOT LIKE '%false%' is NULL, not TRUE — must check IS NULL explicitly.)
-    IF v_default IS NULL OR v_default NOT LIKE '%false%' THEN
+    -- Validate default: must be exactly boolean false (rev 24).
+    -- PostgreSQL stores a BOOLEAN DEFAULT false as 'false'::boolean in
+    -- information_schema.columns.column_default. We accept only the exact
+    -- known representations. Anything else is corrected.
+    --
+    -- Why not substring matching: an expression like 'false OR true' contains
+    -- 'false' but evaluates to true. Substring matching would accept it incorrectly.
+    IF v_default IS NULL THEN
+      -- No default: needs correction.
       ALTER TABLE public.storage_reservations
         ALTER COLUMN bytes_ready SET DEFAULT false;
-      RAISE NOTICE 'Migration 020: default corrected to false (was: %)', COALESCE(v_default, 'NULL');
-    ELSE
+      RAISE NOTICE 'Migration 020: default was NULL, corrected to false';
+    ELSIF v_default IN ('false', 'false::boolean', '''false''::boolean') THEN
+      -- Exact match for boolean false. Already correct.
       RAISE NOTICE 'Migration 020: already applied, no changes needed';
+    ELSE
+      -- Unrecognized default expression. Don't try to parse it —
+      -- just set it to the known-correct value. SET DEFAULT is idempotent
+      -- and safe: it only affects future INSERTs, not existing rows.
+      ALTER TABLE public.storage_reservations
+        ALTER COLUMN bytes_ready SET DEFAULT false;
+      RAISE NOTICE 'Migration 020: unrecognized default (%), corrected to false', v_default;
     END IF;
   END IF;
 END $$;
