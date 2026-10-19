@@ -256,11 +256,31 @@ CONVERSION SEQUENCE:
       -- We already hold LOCK_EX on the staging file (step 1).
       -- Fence may hold LOCK_EX on .part while waiting for staging file.
       -- Use LOCK_EX|LOCK_NB with 50ms sleep, 30s deadline (same as fence).
-      -- On timeout: unlink staging file (cleanup), ROLLBACK? No — already committed.
-      --   Instead: mark reservation ABANDONED, release locks, return 500.
-      --   The .part file (empty) will be cleaned by stale-temp cleanup.
-      --   The staging file is deleted (we hold its lock).
-      -- This ensures no indefinite wait while holding the staging lock.
+      -- On timeout (rev 14: fail-closed without L1):
+      --   1. Mark reservation ABANDONED (single UPDATE, no L1):
+      --      UPDATE storage_reservations SET state = 'ABANDONED'
+      --      WHERE reservation_id = $1 AND state = 'RESERVED';
+      --      -- No L1 needed: single-row state change, row lock suffices.
+      --      -- If fence already marked it ABANDONED → 0 rows, harmless.
+      --   2. DO NOT delete the staging file yet.
+      --      -- The staging file is the ONLY complete copy of the bytes.
+      --      -- Deleting it before the reservation is safely terminal risks data loss
+      --      -- if the ABANDONED update fails or the process crashes.
+      --   3. Release staging file LOCK_EX.
+      --   4. Return 500.
+      --   
+      --   Recovery:
+      --   - Reservation is ABANDONED (or will be, if step 1 raced fence).
+      --   - Staging file remains → orphan sweep finds 'cancelled' allowance
+      --     with ABANDONED reservation → deletes staging file after
+      --     verifying no .part transfer is in progress (via .part lock check).
+      --   - Empty .part file → stale-temp cleanup deletes.
+      --   
+      --   Why no L1: The abandonment is a terminal state change on a single row.
+      --   It doesn't affect quota calculations (ABANDONED reservations are not
+      --   counted). The row-level lock from UPDATE provides atomicity.
+      --   Acquiring L1 here could deadlock with fence holding L1 while waiting
+      --   for the staging lock we hold. (Rev 14 fixes rev 13 blocker 2.)
    b. Copy bytes: staging file → .part file
       -- Use copy_file_range() or read/write loop (not rename)
       -- The .part file grows from 0 bytes to actual_bytes
@@ -271,18 +291,19 @@ CONVERSION SEQUENCE:
       -- Ensures the file size update is durable
    e. Delete the staging file: unlink(/data/media/.staging/{allowance_id}.tmp)
    
-   f. Mark transfer complete (rev 13: prevents Phase-2 race):
+   f. Mark transfer complete (rev 14: no L1 — single-row update):
       ```sql
-      BEGIN;
-      SELECT pg_advisory_xact_lock(hashtext('media_global'));  -- L1 (brief)
+      -- Single statement, autocommit. No L1 needed.
+      -- This is a single-row flag flip, not a quota-affecting operation.
+      -- The row lock from UPDATE is sufficient for atomicity.
       UPDATE storage_reservations 
       SET bytes_ready = true 
       WHERE reservation_id = $1 AND state = 'RESERVED';
-      -- If 0 rows → reservation was ABANDONED (fence) or reaped → abort
-      COMMIT;
+      -- If 0 rows → reservation was ABANDONED (fence) or reaped → abort transfer
       ```
       -- Still holding LOCK_EX on .part file during this UPDATE.
       -- The flag is set AFTER fsync, so bytes are durable.
+      -- No L1 → no deadlock with fence holding L1 (rev 14 fixes rev 13 blocker 1).
    
    g. Release LOCK_EX on .part file
    h. Release LOCK_EX on staging file (already unlinked, just close fd)
@@ -368,12 +389,34 @@ The conversion acquires locks in strict order:
 - Writer acquiring LOCK_SH on the `.part` path always gets inode I.
 - No inode replacement → no lock splitting.
 
+**Interleaving: bytes_ready update vs fence (rev 14 explicit):**
+
+Scenario: Conversion holds `.part` LOCK_EX, does the `bytes_ready` UPDATE (no L1).
+Fence holds L1, is in bounded retry for `.part` LOCK_EX.
+
+- Fence's retry loop runs for up to 30s, then times out.
+- Fence releases L1, ROLLBACKs, aborts (fail-closed).
+- Conversion's UPDATE proceeds (no L1 contention — it doesn't need L1).
+- If fence invalidated the reservation BEFORE conversion's UPDATE:
+  → UPDATE affects 0 rows (state is ABANDONED, not RESERVED)
+  → Conversion detects this, aborts transfer cleanup.
+  → Partial .part file remains; RES-1c reaps; stale-temp cleanup deletes.
+- If conversion's UPDATE commits BEFORE fence's invalidation:
+  → bytes_ready=true, then fence marks ABANDONED.
+  → Phase-2 writer sees ABANDONED → refuses. Safe.
+  → .part file has complete bytes but reservation is dead → cleanup deletes.
+
+No deadlock: conversion never waits for L1 while holding .part lock.
+Fence's bounded retry guarantees it releases L1 within 30s.
+
 **Coherent bounded protocol (rev 13: no indefinite waits):**
 
 | Participant | Locks held | Waits for | Bounded? |
 |-------------|------------|-----------|----------|
 | Conversion | Staging LOCK_EX | .part LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
 | Conversion | (none after COMMIT) | L1 (in txn) | Yes: PG lock queue (fair) |
+| Conversion | .part LOCK_EX | (bytes_ready UPDATE, no lock wait) | Yes: no lock needed |
+| Conversion | Staging LOCK_EX | (abandon UPDATE, no lock wait) | Yes: no lock needed |
 | Fence | L1 | .part LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
 | Fence | L1 + .part LOCK_EX | Staging LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
 | Cleanup | (none) | Staging LOCK_EX | Yes: single LOCK_NB attempt |
