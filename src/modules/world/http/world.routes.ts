@@ -266,23 +266,24 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
     // REF-1: Validate coverArtUrl if present in metadata update
     const newCoverUrl = (body.metadata as Record<string, unknown> | undefined)?.coverArtUrl as string | undefined;
+    let oldCoverUrl: string | undefined;
     if (newCoverUrl !== undefined) {
-      const { validateReferences, ReferenceValidationError } = await import(
+      const { validateReferences, ReferenceValidationError, updateAssetRoles } = await import(
         '../domain/services/reference-validator.service.js'
       );
-      const { query } = await import('../../../shared/database/db.js');
+      const { query, withTransaction } = await import('../../../shared/database/db.js');
 
       // Get current cover URL for role recomputation
       const current = await query(
         `SELECT metadata->>'coverArtUrl' AS url FROM worlds WHERE world_id = $1`,
         [worldId]
       );
-      const oldUrl = current.rows[0]?.url as string | undefined;
+      oldCoverUrl = current.rows[0]?.url as string | undefined;
 
       try {
         await validateReferences(
           worldId,
-          oldUrl ? [oldUrl] : [],
+          oldCoverUrl ? [oldCoverUrl] : [],
           newCoverUrl ? [newCoverUrl] : [],
           {
             isFenceActive: async (tx) => {
@@ -314,6 +315,28 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
       metadata: body.metadata,
       startSceneId: body.startSceneId,
     });
+
+    // REF-1 pitfall fix: Update roles after metadata write.
+    // Old URL may have lost 'cover' role; new URL gains it.
+    if (newCoverUrl !== undefined) {
+      const { updateAssetRoles } = await import(
+        '../domain/services/reference-validator.service.js'
+      );
+      const { withTransaction } = await import('../../../shared/database/db.js');
+      await withTransaction(async (tx) => {
+        for (const url of [oldCoverUrl, newCoverUrl]) {
+          if (!url) continue;
+          const r = await tx.query(
+            `SELECT asset_id FROM world_media_assets WHERE url = $1`,
+            [url]
+          );
+          if (r.rows.length > 0) {
+            await updateAssetRoles(r.rows[0].asset_id, url, worldId, tx);
+          }
+        }
+      });
+    }
+
     return toWorldJson(world);
   });
 
@@ -396,6 +419,7 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
     // REF-1: Validate illustrationUrl if present in metadata update
     const newIllustUrl = (body.metadata as Record<string, unknown> | undefined)?.illustrationUrl as string | undefined;
+    let oldIllustUrl: string | undefined;
     if (newIllustUrl !== undefined) {
       const { validateReferences, ReferenceValidationError } = await import(
         '../domain/services/reference-validator.service.js'
@@ -406,12 +430,12 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
         `SELECT metadata->>'illustrationUrl' AS url FROM scenes WHERE scene_id = $1`,
         [sceneId]
       );
-      const oldUrl = current.rows[0]?.url as string | undefined;
+      oldIllustUrl = current.rows[0]?.url as string | undefined;
 
       try {
         await validateReferences(
           worldId,
-          oldUrl ? [oldUrl] : [],
+          oldIllustUrl ? [oldIllustUrl] : [],
           newIllustUrl ? [newIllustUrl] : [],
           {
             isFenceActive: async (tx) => {
@@ -437,6 +461,27 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
     const updateScene = new UpdateSceneUseCase(deps.sceneRepository, deps.worldRepository);
     await updateScene.execute({ sceneId, creatorId: request.user!.userId, ...body });
+
+    // REF-1 pitfall fix: Update roles after metadata write.
+    if (newIllustUrl !== undefined) {
+      const { updateAssetRoles } = await import(
+        '../domain/services/reference-validator.service.js'
+      );
+      const { withTransaction } = await import('../../../shared/database/db.js');
+      await withTransaction(async (tx) => {
+        for (const url of [oldIllustUrl, newIllustUrl]) {
+          if (!url) continue;
+          const r = await tx.query(
+            `SELECT asset_id FROM world_media_assets WHERE url = $1`,
+            [url]
+          );
+          if (r.rows.length > 0) {
+            await updateAssetRoles(r.rows[0].asset_id, url, worldId, tx);
+          }
+        }
+      });
+    }
+
     return reply.code(204).send();
   });
 
