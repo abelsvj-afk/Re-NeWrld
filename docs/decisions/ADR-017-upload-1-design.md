@@ -560,14 +560,20 @@ FENCE ACTIVATION SEQUENCE:
    
 3. For EACH active reservation:
    a. PartPath = /data/media/.tmp/{reservation_id}.part
-   b. Check if PartPath exists:
-      - If yes → acquire LOCK_EX on PartPath (see deadlock prevention below)
-      - If no → query staging_allowances for cancelled allowance with this reservation_id
-        - If found → StagingPath = /data/media/.staging/{allowance_id}.tmp
-          → acquire LOCK_EX on StagingPath
-          → This blocks the in-flight conversion's rename
-        - If not found → no file to lock, proceed (DB invalidation suffices)
+   b. Acquire LOCK_EX on PartPath via bounded retry (see below).
+      -- The file ALWAYS exists (created at reservation time, rev 11).
+      -- No missing-file case for RESERVED/WRITING reservations.
    c. Hold all acquired LOCK_EX locks (do not release yet)
+   
+   d. Handle in-flight conversions (reservation committed, rename not yet done):
+      Query for cancelled staging allowances pointing to enumerated reservations:
+      ```sql
+      SELECT allowance_id FROM staging_allowances
+      WHERE reservation_id = ANY($1) AND state = 'cancelled';
+      ```
+      For each: StagingPath = /data/media/.staging/{allowance_id}.tmp
+      → Acquire LOCK_EX on StagingPath (bounded retry)
+      → This blocks the conversion's rename until fence commits.
 
 4. With all writer locks held (LOCK_EX):
    a. UPDATE storage_reservations SET state = 'ABANDONED' 
@@ -622,6 +628,36 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 
 **Topology invariant:** UPLOAD-1 assumes single-writer-host. This matches the current Fly.io single-machine constraint (ADR-017 §9.2).
 
+**Stable lock file invariant (rev 11: closes missing-file race):**
+
+**Requirement:** Every `storage_reservations` row in state `RESERVED` or `WRITING` MUST have a corresponding `.part` file on disk from the moment the reservation is created.
+
+**Implementation:**
+1. `reserveStorage()` (Phase-1), after INSERTing the reservation row but BEFORE COMMIT:
+   - Create empty file at `/data/media/.tmp/{reservation_id}.part`
+   - `fsync()` the parent directory (ensures file creation is durable)
+2. If file creation fails → ROLLBACK the reservation INSERT → return 500
+3. The file exists before any writer can acquire LOCK_SH on it.
+
+**Why this closes the race (reviewer blocker):**
+- Before rev 11: Fence could enumerate a reservation with no `.part` file (Phase-2 not started). Writer could then create the file and start writing while fence holds L1 but hasn't locked the file.
+- After rev 11: The `.part` file exists from reservation creation. Fence always finds it. Writer and fence always lock the same inode. No missing-file interleaving.
+
+**Writer protocol (unchanged):**
+- Writer acquires `LOCK_SH` on the existing `.part` file for each chunk.
+- File is empty initially; chunks append.
+
+**Cleanup on reservation end:**
+| Reservation end state | .part file handling |
+|---------------------|---------------------|
+| COMMITTED (Phase-A success) | File renamed to final location by publication. No orphan. |
+| ABANDONED (fence) | Stale-temp cleanup (§1.6e) deletes after reservation expiry. |
+| EXPIRED (RES-1c reaps) | RES-1c unlinks `.part` after marking ABANDONED. |
+| Crash after reservation INSERT, before file creation | Transaction ROLLBACKs (file creation is before COMMIT). No orphan reservation. No orphan file (creation failed). |
+| Crash after file creation, before COMMIT | Transaction ROLLBACKs. File exists but no reservation row. Stale-temp cleanup: finds `.part` with no reservation → deletes. |
+
+**Empty .part files:** A newly created reservation has a 0-byte `.part` file. This is normal. Stale-temp cleanup must NOT delete 0-byte `.part` files with live reservations (check DB first).
+
 **Fence activation failure handling (rev 7: consistent contract):**
 
 ```
@@ -647,20 +683,12 @@ For EACH active reservation:
       → The renamed .part file will be cleaned by RES-1c (reservation expired)
          and stale-temp cleanup.
     
-    If NO 'cancelled' allowance exists:
-      → Check if .part file exists:
-        - If yes → acquire LOCK_EX (normal writer case)
-        - If no → check if reservation is expired:
-          ```sql
-          SELECT expires_at < now() AS is_expired FROM storage_reservations 
-          WHERE reservation_id = $1;
-          ```
-          - If expired AND no file → truly stale (writer died, cleanup pending)
-            → Safe to skip file lock; DB invalidation suffices.
-            → RES-1c will reap the reservation; stale-temp cleanup removes any orphan.
-          - If NOT expired AND no file → Phase-2 not started yet
-            → Safe to skip; DB invalidation prevents future writes.
-      → Log at DEBUG level with reason.
+    If NO 'cancelled' allowance exists AND no .part file exists:
+      → This should not happen (rev 11 invariant: file created at reservation time).
+      → Log WARNING with reservation_id.
+      → Treat as stale: skip file lock, DB invalidation suffices.
+      → File-creation failure would have rolled back the reservation;
+         so a missing file means the reservation row is orphaned or cleanup is in progress.
     
     **Why this works:** The `reservation_id` column in `staging_allowances`
     (added in rev 6) provides the link. Fence activation can discover
