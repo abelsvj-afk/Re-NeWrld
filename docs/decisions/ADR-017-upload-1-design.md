@@ -27,7 +27,7 @@ This bypasses every ADR-017 guarantee: no quota enforcement, no crash safety, no
 3. Validate: Magic bytes from streamed data → 415 on invalid (cancel allowance, delete staged file)
 4. Measure: fstat() staged file → actual_bytes
 5. Convert: Atomic allowance → reservation (DB txn, L1) → 507 QUOTA_EXCEEDED / 503 FENCE_ACTIVE
-6. Phase-2: Move staged file to .tmp/{reservation_id}.part; Phase2Writer writes (if chunked)
+6. Phase-2: Copy staged bytes into pre-created .tmp/{reservation_id}.part (preserving inode); Phase2Writer writes (if chunked)
 7. Fsync: file → rename to final → fsync directory
 8. Phase-A: commitReservationToRegistry() → asset PENDING + reservation COMMITTED
 9. Phase-B/C: publication.service handles link + activation
@@ -799,14 +799,25 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 - Otherwise → write chunk, release lock.
 
 **Schema: `bytes_ready` column (rev 13):**
+**Migration 020: Add `bytes_ready` to `storage_reservations` (definitive)**
+
 ```sql
--- Added to storage_reservations (migration 020, or amended into 014):
+-- Migration 020 (new file: db/migrations/020_reservation_bytes_ready.sql)
+-- Applied after 019. Does NOT amend 014 (014 is already applied in production
+-- via the release_command; amending applied migrations is forbidden).
 ALTER TABLE storage_reservations 
   ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT false;
--- For UPLOAD-1 conversions: set to true after initial transfer.
--- For RES-1a direct reservations (non-upload paths): set to true at creation
---   (they don't have a separate transfer step).
+
+-- Backfill: existing reservations get bytes_ready based on state.
+-- RESERVED/WRITING reservations created before this migration had no transfer
+-- step (they were created by RES-1a directly, not via UPLOAD-1 conversion).
+-- For those, the .part file (if any) was written directly, so mark ready.
+UPDATE storage_reservations SET bytes_ready = true WHERE bytes_ready = false;
+-- New UPLOAD-1 conversions will explicitly manage this flag (false at creation,
+-- true after transfer). The DEFAULT false is safe for any future reservation
+-- type that has a transfer step.
 ```
+
 
 **Crash recovery for `bytes_ready=false` (rev 15):**
 | Scenario | Recovery |
@@ -817,6 +828,54 @@ ALTER TABLE storage_reservations
 | Crash after `bytes_ready=true` | Normal. Phase-2 proceeds. |
 | Fence activates during transfer | Fence marks ABANDONED. The `bytes_ready` UPDATE affects 0 rows (state changed). Transfer aborts. Partial file cleaned. |
 | Abandonment UPDATE hit lock timeout | Staging file retained. Orphan sweep retries abandonment: `SET LOCAL lock_timeout='5s'` + UPDATE. Does NOT delete staging file until ABANDONED is confirmed. |
+
+**Orphan-sweep `bytes_ready` retry — exact SQL (rev 16):**
+
+```sql
+-- Called by orphan sweep for reservations with bytes_ready=false
+-- where the .part file exists and has non-zero size (transfer may have completed
+-- but the flag update timed out).
+--
+-- Eligibility: ONLY update if reservation is still RESERVED.
+-- If fence marked it ABANDONED, or RES-1c reaped it, do NOT set the flag.
+-- Zero rows updated = terminal for this transfer; do not retry further.
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+-- Verify the .part file is complete before setting the flag.
+-- The sweep must have already verified:
+--   1. .part file exists and size > 0
+--   2. Staging file no longer exists (transfer finished copying)
+--   3. No process holds LOCK_EX on .part (transfer not in progress)
+-- These checks are done via filesystem BEFORE this transaction.
+
+UPDATE storage_reservations 
+SET bytes_ready = true,
+    updated_at = now()
+WHERE reservation_id = $1 
+  AND state = 'RESERVED'      -- Critical: never revive ABANDONED
+  AND bytes_ready = false;     -- Idempotency: don't re-set
+
+-- Outcomes:
+--   1 row → flag set. Reservation is now usable by Phase-2.
+--   0 rows → reservation is ABANDONED, COMMITTED, or already bytes_ready=true.
+--            Do NOT retry. This transfer is terminal (abandoned or already handled).
+--   55P03 → row locked. ROLLBACK. Retry up to 3 times with 1-minute intervals.
+--            After 3 failures, leave for RES-1c expiry.
+
+COMMIT;
+```
+
+**Coordination with RES-1c:**
+- RES-1c reaps reservations with `expires_at < now()` regardless of `bytes_ready`.
+- The orphan sweep MUST check `expires_at` before attempting the retry:
+  ```sql
+  SELECT expires_at > now() AS not_expired FROM storage_reservations 
+  WHERE reservation_id = $1 AND state = 'RESERVED' AND bytes_ready = false;
+  ```
+- If expired → skip retry, let RES-1c reap. Do not revive an expiring reservation.
+- If the sweep's retry and RES-1c's reap race: both use row locks. The UPDATE's `WHERE state='RESERVED'` ensures the sweep cannot revive a reaped (ABANDONED) reservation.
 
 **Orphan sweep coordination (rev 15):**
 The sweep must not delete files while transfer or recovery is active:
