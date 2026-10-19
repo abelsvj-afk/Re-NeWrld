@@ -247,12 +247,31 @@ CONVERSION SEQUENCE:
    -- Allowance is 'cancelled' (not counted), reservation is counted
    -- Atomic: no point where both or neither are counted
 
-8. Rename staged file to .tmp/{reservation_id}.part
-   -- Still holding LOCK_EX on the source file
-   -- rename() is atomic
-   -- If rename fails → reservation exists without file → RES-1c reaps, orphan sweep cleans
+8. Transfer bytes into the pre-created .part file (rev 12: preserves inode):
+   -- The .part file was created empty at reservation time (rev 11).
+   -- DO NOT rename over it (that would replace the inode).
+   -- Instead:
+   a. Acquire LOCK_EX on /data/media/.tmp/{reservation_id}.part
+      -- We already hold LOCK_EX on the staging file (step 1).
+      -- Lock order: staging file → .part file (consistent everywhere).
+   b. Copy bytes: staging file → .part file
+      -- Use copy_file_range() or read/write loop (not rename)
+      -- The .part file grows from 0 bytes to actual_bytes
+      -- Inode is preserved; fence's LOCK_EX (if held) blocks us here
+   c. fsync() the .part file descriptor
+      -- Ensures bytes are durable before we release locks
+   d. fsync() the parent directory (/data/media/.tmp/)
+      -- Ensures the file size update is durable
+   e. Delete the staging file: unlink(/data/media/.staging/{allowance_id}.tmp)
+   f. Release LOCK_EX on .part file
+   g. Release LOCK_EX on staging file (already unlinked, just close fd)
 
-9. Release LOCK_EX on staging file (now at new path, lock transfers via fd)
+   -- If copy fails partway → .part file has partial bytes
+   -- → Reservation exists, file has partial data
+   -- → Return 500; RES-1c reaps reservation; stale-temp cleanup deletes .part
+   -- → Staging file remains (orphan sweep cleans it)
+
+9. Done. Locks released. Reservation COMMITTED, .part file has bytes, inode preserved.
 ```
 
 **Why this closes the race (reviewer blocker 1):**
@@ -283,9 +302,10 @@ The document previously said the allowance "remains converting" — this was WRO
 |-------------|----------|------------|----------|
 | Before BEGIN | Allowance 'active'/'expiring' | Staged file exists, no lock held | Cleanup job: marks 'expiring'→'expired', deletes file |
 | During DB txn (before COMMIT) | Transaction rolls back on connection close | File locked? No (lock released on process exit) | Allowance reverts to pre-txn state. Cleanup handles. |
-| After COMMIT, before rename | Allowance 'cancelled', reservation exists | Staged file exists at old path, lock released (process died) | Orphan sweep: finds 'cancelled' allowance with no .part file → checks reservation → if reservation exists but no .part → delete staged file, log. Reservation reaped by RES-1c. |
-| During rename | Allowance 'cancelled', reservation exists | rename() is atomic: file at old OR new path | If at old path → orphan sweep cleans. If at new path → normal Phase-2 continues. |
-| After rename, before lock release | Allowance 'cancelled', reservation exists | File at new path (.part) | Normal: Phase-2 writer picks it up. Lock released on process exit (harmless). |
+| After COMMIT, before byte transfer | Allowance 'cancelled', reservation exists | Staged file exists, .part is empty (0 bytes), locks released (process died) | Orphan sweep: finds 'cancelled' allowance → checks reservation → .part exists but empty → delete staged file, log. Reservation reaped by RES-1c (no Phase-2 writer will pick up empty file). |
+| During byte transfer (copy) | Allowance 'cancelled', reservation exists | Staged file exists, .part has partial bytes, locks released on crash | .part has partial data. Orphan sweep: sees 'cancelled' + reservation → leaves .part (not empty, not complete). RES-1c reaps reservation after expiry. Stale-temp cleanup deletes .part. Staged file deleted by orphan sweep. |
+| After transfer, before staging delete | Allowance 'cancelled', reservation exists | Staged file exists, .part has full bytes | Orphan sweep: deletes leftover staged file. .part is complete; Phase-2 can proceed (or RES-1c reaps if no writer). |
+| After staging delete | Allowance 'cancelled', reservation exists | .part has full bytes, no staging file | Normal: Phase-2 writer picks it up. |
 
 **No stranded 'converting':** The state doesn't exist anymore. The only non-terminal states are 'active' and 'expiring', both handled by cleanup.
 
@@ -296,19 +316,35 @@ The document previously said the allowance "remains converting" — this was WRO
   Locks (in order): L1 → L2 → world row FOR UPDATE → allowance row (via UPDATE).
 - File move: After COMMIT, still holding file LOCK_EX. Then release.
 
-**Complete lock order (reviewer blocker 4):**
+**Complete lock order (rev 12):**
 
-The conversion transaction acquires, in strict order:
+The conversion acquires locks in strict order:
 1. **Filesystem:** `LOCK_EX` on `/data/media/.staging/{allowance_id}.tmp` (before BEGIN)
 2. **L1:** `pg_advisory_xact_lock(hashtext('media_global'))`
 3. **L2:** `pg_advisory_xact_lock(hashtext('media_quota:' || world_id))`
 4. **World row:** `SELECT ... FROM worlds WHERE world_id=$1 FOR UPDATE`
 5. **Allowance row:** `UPDATE staging_allowances ... WHERE allowance_id=$1` (row lock via UPDATE)
-6. **(Inside reserveStorage):** Reservation row INSERT (no additional locks beyond L1/L2/world)
+6. **(Inside reserveStorage):** Reservation row INSERT + `.part` file creation (empty)
+7. **COMMIT** (releases L1, L2, row locks; file locks held)
+8. **Filesystem:** `LOCK_EX` on `/data/media/.tmp/{reservation_id}.part` (after COMMIT, before transfer)
+9. Byte transfer: staging → .part (holding both file locks)
+10. Release .part lock, release staging lock (after unlink)
 
-This matches QUOTA-1's lock order (L1→L2→world row) and adds the filesystem lock first (outermost) and the allowance row lock last (innermost).
+**Lock ordering rationale:**
+- Staging file lock before L1: prevents cleanup from deleting staging file during conversion.
+- .part file lock after COMMIT: the .part file didn't exist before the transaction (created in step 6). We acquire its lock after COMMIT to avoid holding it during the DB txn unnecessarily.
+- Fence activation order: L1 → .part LOCK_EX → staging LOCK_EX (for in-flight conversions).
+  
+  Potential cycle: Conversion holds staging lock, wants .part lock. Fence holds .part lock, wants staging lock.
+  Resolution: Both use bounded retry (LOCK_NB + 50ms sleep, 30s deadline). No indefinite blocking. Timeout → abort fail-closed.
 
-**Why filesystem first:** The file lock is held across the DB transaction. Acquiring it before BEGIN ensures no deadlock with cleanup job (which acquires file lock before DB UPDATE).
+**Inode preservation proof:**
+- Step 6 creates `.part` with inode I.
+- Step 8 acquires LOCK_EX on inode I (via path).
+- Step 9 writes bytes into inode I (no rename, no replacement).
+- Fence acquiring LOCK_EX on the `.part` path always gets inode I.
+- Writer acquiring LOCK_SH on the `.part` path always gets inode I.
+- No inode replacement → no lock splitting.
 
 **Deadlock prevention (rev 9: provably bounded):**
 
