@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 3 — addresses staging capacity + fence semantics
+**Status:** DRAFT rev 4 — fixes allowance lifecycle + fence rule
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -138,25 +138,32 @@ Full sequence:
 
 **Visibility:** All cleanup actions (success or failure) are logged with `allowance_id`, `world_id`, and `bytes_reclaimed`. Operators can audit via `temp_cleanup_incidents`.
 
-### 3.7 Fence Semantics (addresses review)
+### 3.7 Fence Semantics (rev 4: single enforceable rule)
 
-**Invariant:** A fence activated AFTER a reservation is admitted does NOT abort the already-admitted upload.
+**Rule:** The fence takes effect at Phase-2 write time, not at reservation time.
 
-**Rationale:**
-- The reservation is a contract: quota was checked, capacity was allocated.
-- Aborting mid-upload would leak the reservation (or require complex rollback).
-- The fence prevents NEW admissions (Phase-1 checks `isFenceActive()` under L1).
-- In-flight uploads complete; the fence takes full effect once they finish or expire.
+**Enforceable invariant:**
+- **Phase-1 (reservation):** If fence is active when `reserveStorage()` is called → 503 `FENCE_ACTIVE`. No reservation created.
+- **Phase-2 (writes):** Every chunk write performs the fenced check (per RES-1b: `flock LOCK_SH` → verify reservation still valid → write). If fence was activated AFTER reservation but BEFORE a chunk write → the fenced check fails → write rejected with `FENCE_ACTIVE`.
+- **Already-written chunks:** Not rolled back. The reservation remains; the upload is incomplete.
+- **Phase-A (commit):** Requires all chunks written. If fence blocked some chunks, Phase-A cannot complete (missing data).
 
-**Fence activation invalidates:**
-- New Phase-1 reservations (503 FENCE_ACTIVE)
-- New Phase-2 writes (fenced per-chunk check fails)
+**What this means:**
+- An upload admitted before fence activation does NOT automatically complete.
+- It completes ONLY if all Phase-2 writes finished before the fence activated.
+- If the fence activates mid-upload, remaining chunks are rejected. The partial upload expires via RES-1c.
 
-**Fence does NOT invalidate:**
-- Already-reserved uploads (they hold a valid reservation)
-- The reservation expiry mechanism (RES-1c still reaps expired ones)
+**Writer check (per chunk):**
+```
+1. Acquire LOCK_SH on .part file
+2. SELECT state FROM storage_reservations WHERE reservation_id = $1
+3. SELECT active FROM system_maintenance WHERE id = 1  -- fence check
+4. If fence active → release lock, throw FENCE_ACTIVE
+5. If reservation not in (RESERVED, WRITING) → release lock, throw
+6. Write chunk, release lock
+```
 
-This matches the RES-1b design: "a heartbeat or lease alone must not authorize a write after its fencing authority has become invalid" — but a VALID reservation (created before the fence) remains valid until expiry.
+**No contradiction:** The reservation is not "aborted" — it simply cannot make progress while the fence is active. This is the same as RES-1b's fenced writes. The fence is enforced at the point of filesystem mutation, which is the correct safety boundary.
 
 ## 4. API Contract
 

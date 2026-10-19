@@ -1,6 +1,6 @@
 # ADR-017 REF-1 Design: Reference Validation Contract
 
-**Status:** DRAFT rev 3 — addresses reference registry + role scope
+**Status:** DRAFT rev 4 — resolves cross-world + lock ordering
 **Date:** 2026-10-18
 **Scope:** §4.2b transaction contract on every reference-setting path
 
@@ -28,12 +28,31 @@ For reference-setting on world W (scene S in world W):
 1. **L1:** `pg_advisory_xact_lock(hashtext('media_global'))` — serializes against fence, backfill, other global operations
 2. **L2:** `pg_advisory_xact_lock(hashtext('media_quota:' || W))` — serializes against quota operations on W
 3. **Row lock:** `SELECT ... FOR UPDATE` on the `worlds` row for W
-4. **Asset row locks:** `SELECT ... FOR UPDATE` on BOTH affected asset rows, in consistent order:
-   - **Replacement** (URL A → URL B): Lock asset A row, then asset B row, ordered by `asset_id` (lexicographically smaller first) to prevent deadlock.
-   - **Removal** (URL A → null): Lock asset A row.
-   - **New reference** (null → URL B): Lock asset B row.
+4. **Asset row locks (rev 4: explicit ordering requirement):**
    
-   The ordering invariant: always lock in `asset_id` ascending order. This prevents AB-BA deadlock when two concurrent transactions replace in opposite directions.
+   **MANDATORY SEQUENCE:** All affected asset rows MUST be locked in ascending `asset_id` order BEFORE scanning references or modifying roles. No exceptions.
+   
+   - **Replacement** (URL A → URL B): 
+     1. Determine asset_id for A and B
+     2. Lock smaller asset_id first, then larger
+     3. Then scan reference graph
+     4. Then update roles for both
+   - **Removal** (URL A → null):
+     1. Lock asset A row
+     2. Scan, update roles
+   - **New reference** (null → URL B):
+     1. Lock asset B row  
+     2. Scan, update roles
+   
+   **The transaction MUST follow this exact sequence:**
+   1. Acquire L1, L2, world row lock (steps 1-3 above)
+   2. Identify all affected asset_ids (old and new)
+   3. Sort asset_ids ascending
+   4. Lock each in order via `SELECT ... FOR UPDATE`
+   5. ONLY THEN: scan reference graph
+   6. ONLY THEN: update roles and metadata
+   
+   **Violation = bug:** If code scans or modifies before all locks are held, it violates the contract. This is enforced by code review, not by the database.
 
 **Why both rows:** Replacement affects the `roles` of both the old asset (may lose a role) and the new asset (gains a role). Both must be locked before scanning the reference graph, otherwise a concurrent transaction could interleave and corrupt `roles`.
 
@@ -157,7 +176,8 @@ This is the same pattern as UPLOAD-1's Phase-1 (see UPLOAD-1 design §3.3). The 
 ## 6. Acceptance Criteria
 
 - [ ] S13: Invalid URLs rejected atomically (no partial metadata write)
-- [ ] S18: Cross-world URL → shared reference succeeds (no 422 `ASSET_WRONG_WORLD`)
+- [ ] S18-DEFERRED: Cross-world shared references (SHARE-1 scope, not REF-1)
+- [ ] Cross-world URLs rejected with 422 `ASSET_WRONG_WORLD` (REF-1 fail-closed behavior)
 - [ ] S28: Metadata commit during deletion lock-wait seen by scan (lock ordering)
 - [ ] S40: Metadata change during backfill freeze → 503
 - [ ] Roles array updated atomically with URL write
