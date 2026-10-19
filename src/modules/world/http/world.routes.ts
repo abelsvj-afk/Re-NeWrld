@@ -259,9 +259,53 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     return toWorldJson(world);
   });
 
-  app.patch('/worlds/:id', { preHandler: creatorOnly }, async (request) => {
+  app.patch('/worlds/:id', { preHandler: creatorOnly }, async (request, reply) => {
     const params = WorldParams.parse(request.params);
     const body = UpdateWorldBody.parse(request.body);
+    const worldId = params.id;
+
+    // REF-1: Validate coverArtUrl if present in metadata update
+    const newCoverUrl = (body.metadata as Record<string, unknown> | undefined)?.coverArtUrl as string | undefined;
+    if (newCoverUrl !== undefined) {
+      const { validateReferences, ReferenceValidationError } = await import(
+        '../domain/services/reference-validator.service.js'
+      );
+      const { query } = await import('../../../shared/database/db.js');
+
+      // Get current cover URL for role recomputation
+      const current = await query(
+        `SELECT metadata->>'coverArtUrl' AS url FROM worlds WHERE world_id = $1`,
+        [worldId]
+      );
+      const oldUrl = current.rows[0]?.url as string | undefined;
+
+      try {
+        await validateReferences(
+          worldId,
+          oldUrl ? [oldUrl] : [],
+          newCoverUrl ? [newCoverUrl] : [],
+          {
+            isFenceActive: async (tx) => {
+              const r = await tx.query(`SELECT active FROM system_maintenance WHERE id = 1`);
+              return r.rows.length > 0 && r.rows[0].active === true;
+            },
+            isBackfillActive: async (tx) => {
+              const r = await tx.query(
+                `SELECT 1 FROM backfill_runs WHERE state = 'in_progress' LIMIT 1`
+              );
+              return r.rows.length > 0;
+            },
+            log: (l, m, d) => request.log[l as 'info'](d, m),
+          }
+        );
+      } catch (err) {
+        if (err instanceof ReferenceValidationError) {
+          return reply.code(err.httpStatus).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
+    }
+
     const world = await updateWorld.execute({
       worldId: parseWorldId(params.id),
       creatorId: request.user!.userId,
@@ -346,7 +390,51 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
 
   app.patch('/worlds/:id/scenes/:sceneId', { preHandler: creatorOnly }, async (request, reply) => {
     const body = UpdateSceneBody.parse(request.body);
+    const params = WorldParams.parse(request.params);
     const { sceneId } = z.object({ sceneId: z.string().uuid() }).parse(request.params);
+    const worldId = params.id;
+
+    // REF-1: Validate illustrationUrl if present in metadata update
+    const newIllustUrl = (body.metadata as Record<string, unknown> | undefined)?.illustrationUrl as string | undefined;
+    if (newIllustUrl !== undefined) {
+      const { validateReferences, ReferenceValidationError } = await import(
+        '../domain/services/reference-validator.service.js'
+      );
+      const { query } = await import('../../../shared/database/db.js');
+
+      const current = await query(
+        `SELECT metadata->>'illustrationUrl' AS url FROM scenes WHERE scene_id = $1`,
+        [sceneId]
+      );
+      const oldUrl = current.rows[0]?.url as string | undefined;
+
+      try {
+        await validateReferences(
+          worldId,
+          oldUrl ? [oldUrl] : [],
+          newIllustUrl ? [newIllustUrl] : [],
+          {
+            isFenceActive: async (tx) => {
+              const r = await tx.query(`SELECT active FROM system_maintenance WHERE id = 1`);
+              return r.rows.length > 0 && r.rows[0].active === true;
+            },
+            isBackfillActive: async (tx) => {
+              const r = await tx.query(
+                `SELECT 1 FROM backfill_runs WHERE state = 'in_progress' LIMIT 1`
+              );
+              return r.rows.length > 0;
+            },
+            log: (l, m, d) => request.log[l as 'info'](d, m),
+          }
+        );
+      } catch (err) {
+        if (err instanceof ReferenceValidationError) {
+          return reply.code(err.httpStatus).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
+    }
+
     const updateScene = new UpdateSceneUseCase(deps.sceneRepository, deps.worldRepository);
     await updateScene.execute({ sceneId, creatorId: request.user!.userId, ...body });
     return reply.code(204).send();
