@@ -50,11 +50,12 @@ export interface ReserveStorageDeps {
   /** Returns true if the maintenance fence is active. */
   isFenceActive: (tx: pkg.PoolClient) => Promise<boolean>;
   /** Registered (committed) media bytes for a world. */
-  getRegisteredBytes: (worldId: WorldId, tx: pkg.PoolClient) => Promise<number>;
   /** Locks the world row FOR UPDATE; throws if the world does not exist. */
   lockWorldRow: (worldId: WorldId, tx: pkg.PoolClient) => Promise<void>;
   /** Per-world quota in bytes. */
   quotaBytes: number;
+  /** Single quota definition (QUOTA-1). Replaces inline registered+reserved SUM. */
+  quotaUsedBytes: (worldId: WorldId, tx: pkg.PoolClient) => Promise<number>;
   /** Narration reserve in bytes (hard boundary). */
   narrationReserveBytes: number;
   /** Max age of the capacity metric before it is considered stale (ms). */
@@ -140,13 +141,14 @@ export async function reserveStorage(
       );
     }
 
-    // Per-world quota: registered bytes + outstanding reservations.
-    const registeredBytes = await deps.getRegisteredBytes(worldId, tx);
-    const reservedBytes = await deps.reservationRepository.sumActiveBytes(worldId, tx);
-    if (registeredBytes + reservedBytes + sizeBytes > deps.quotaBytes) {
+    // Per-world quota: single definition via quota_used_bytes() (QUOTA-1, ADR-017 §5.1).
+    // B1: The admission transaction is unchanged; only the SUM computation
+    // is replaced by the shared SQL function.
+    const usedBytes = await deps.quotaUsedBytes(worldId, tx);
+    if (usedBytes + sizeBytes > deps.quotaBytes) {
       throw new ReservationRejectedError(
         'QUOTA_EXCEEDED',
-        `World quota exceeded: ${registeredBytes + reservedBytes + sizeBytes} > ${deps.quotaBytes} bytes.`
+        `World quota exceeded: ${usedBytes + sizeBytes} > ${deps.quotaBytes} bytes.`
       );
     }
 

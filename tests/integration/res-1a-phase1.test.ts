@@ -8,7 +8,6 @@ import {
   isFenceActive,
   activateFence,
   deactivateFence,
-  getRegisteredBytes,
   getCapacityMetric,
 } from '../../src/modules/world/infrastructure/persistence/postgres-reserve-storage.adapter.js';
 import {
@@ -77,11 +76,16 @@ describeFn('RES-1a Phase-1 check-and-reserve (integration)', () => {
       reservationRepository: repository,
       getCapacityMetric,
       isFenceActive,
-      getRegisteredBytes,
       lockWorldRow: lockWorldRowForUpdate,
       quotaBytes: QUOTA_BYTES,
       narrationReserveBytes: NARRATION_RESERVE,
       metricMaxAgeMs: 5 * 60 * 1000,
+      // QUOTA-1 B1: single quota definition via SQL function.
+      quotaUsedBytes: async (worldId: any, tx: any) => {
+        const id = typeof worldId === 'string' ? worldId : worldId.getValue();
+        const r = await tx.query(`SELECT quota_used_bytes($1) AS total`, [id]);
+        return Number(r.rows[0].total);
+      },
     };
   }
 
