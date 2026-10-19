@@ -5,7 +5,6 @@
  * Shared assets count toward the owner's quota only.
  */
 
-import type pkg from 'pg';
 import { withTransaction } from '../../../../shared/database/db.js';
 
 export type ShareErrorCode =
@@ -148,25 +147,4 @@ export async function unshareAsset(
 
     deps.log('info', 'Asset unshared', { assetId, ownerWorldId, targetWorldId });
   });
-}
-
-/**
- * Check if a world can reference an asset (owns it or it's shared with them).
- */
-export async function canReferenceAsset(
-  assetId: string,
-  worldId: string,
-  tx: pkg.PoolClient
-): Promise<boolean> {
-  const result = await tx.query(
-    `SELECT world_id, shared_with_worlds FROM world_media_assets WHERE asset_id = $1`,
-    [assetId]
-  );
-  if (result.rows.length === 0) return false;
-
-  const asset = result.rows[0];
-  if (asset.world_id === worldId) return true;
-
-  const sharedWith: string[] = asset.shared_with_worlds || [];
-  return sharedWith.includes(worldId);
 }
