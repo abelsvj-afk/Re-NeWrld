@@ -1179,4 +1179,59 @@ export async function worldRoutes(app: FastifyInstance, deps: WorldRouteDeps): P
     }
     return status;
   });
+
+  // RECOV-1: Establish recovery authorization (admin only).
+  // Note: Uses creatorOnly for now; a dedicated admin role is future work (API-1).
+  app.post('/admin/recovery/authorize', { preHandler: creatorOnly }, async (request, reply) => {
+    const body = z.object({
+      scope: z.enum(['repair', 'restore-reconcile']),
+      reason: z.string().min(1).max(500),
+      durationSeconds: z.number().int().min(1).max(86400),
+    }).parse(request.body);
+
+    const { establishRecoveryAuth, RecoveryError } = await import(
+      '../domain/services/recovery-auth.service.js'
+    );
+
+    try {
+      const auth = await establishRecoveryAuth(
+        body.scope,
+        body.reason,
+        body.durationSeconds,
+        request.user!.userId.getValue(),
+        {
+          isFenceActive: async (tx) => {
+            const r = await tx.query(`SELECT active FROM system_maintenance WHERE id = 1`);
+            return r.rows.length > 0 && r.rows[0].active === true;
+          },
+          log: (l, m, d) => request.log[l as 'info'](d, m),
+        }
+      );
+      return reply.code(201).send({
+        authId: auth.authId,
+        scope: auth.scope,
+        expiresAt: auth.expiresAt,
+      });
+    } catch (err) {
+      if (err instanceof RecoveryError) {
+        return reply.code(err.httpStatus).send({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
+  });
+
+  // RECOV-1: Revoke recovery authorization.
+  app.delete('/admin/recovery/:authId', { preHandler: creatorOnly }, async (request, reply) => {
+    const { authId } = z.object({ authId: z.string().uuid() }).parse(request.params);
+
+    const { revokeRecoveryAuth } = await import(
+      '../domain/services/recovery-auth.service.js'
+    );
+
+    await revokeRecoveryAuth(authId, {
+      isFenceActive: async () => false, // Not needed for revoke
+      log: (l, m, d) => request.log[l as 'info'](d, m),
+    });
+    return reply.code(204).send();
+  });
 }
