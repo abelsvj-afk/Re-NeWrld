@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 21 — idempotent migration script
+**Status:** DRAFT rev 22 — hardened idempotency checks
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -872,29 +872,55 @@ WHERE state IN ('RESERVED','WRITING') AND bytes_ready = false;
 
 ```sql
 -- Migration 020 — idempotent. Safe to run multiple times.
+-- Rev 22: handles NULL defaults, schema-scoped, validates type/nullability.
 DO $$
+DECLARE
+  v_exists BOOLEAN;
+  v_default TEXT;
+  v_data_type TEXT;
+  v_is_nullable TEXT;
 BEGIN
-  IF NOT EXISTS (
+  -- Scope to the current schema (project uses public).
+  SELECT EXISTS (
     SELECT 1 FROM information_schema.columns
-    WHERE table_name = 'storage_reservations' AND column_name = 'bytes_ready'
-  ) THEN
+    WHERE table_schema = current_schema()
+      AND table_name = 'storage_reservations'
+      AND column_name = 'bytes_ready'
+  ) INTO v_exists;
+
+  IF NOT v_exists THEN
+    -- Case 1: First run. Add column, initialize existing rows, set safe default.
     ALTER TABLE storage_reservations
       ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT true;
     ALTER TABLE storage_reservations
       ALTER COLUMN bytes_ready SET DEFAULT false;
-    RAISE NOTICE 'Migration 020: column added, default=false';
+    RAISE NOTICE 'Migration 020: column added, existing rows=true, default=false';
+
   ELSE
-    IF EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_name = 'storage_reservations'
-        AND column_name = 'bytes_ready'
-        AND column_default NOT LIKE '%false%'
-    ) THEN
+    -- Case 2: Column exists. Validate definition before deciding.
+    SELECT column_default, data_type, is_nullable
+    INTO v_default, v_data_type, v_is_nullable
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'storage_reservations'
+      AND column_name = 'bytes_ready';
+
+    -- Validate type and nullability. Fail clearly if incompatible.
+    IF v_data_type != 'boolean' THEN
+      RAISE EXCEPTION 'Migration 020: bytes_ready has wrong type % (expected boolean)', v_data_type;
+    END IF;
+    IF v_is_nullable != 'NO' THEN
+      RAISE EXCEPTION 'Migration 020: bytes_ready must be NOT NULL';
+    END IF;
+
+    -- Check default: NULL or anything not containing 'false' needs correction.
+    -- (NULL NOT LIKE '%false%' is NULL, not TRUE — must check IS NULL explicitly.)
+    IF v_default IS NULL OR v_default NOT LIKE '%false%' THEN
       ALTER TABLE storage_reservations
         ALTER COLUMN bytes_ready SET DEFAULT false;
-      RAISE NOTICE 'Migration 020: default corrected to false';
+      RAISE NOTICE 'Migration 020: default corrected to false (was: %)', COALESCE(v_default, 'NULL');
     ELSE
-      RAISE NOTICE 'Migration 020: already applied';
+      RAISE NOTICE 'Migration 020: already applied, no changes needed';
     END IF;
   END IF;
 END $$;
