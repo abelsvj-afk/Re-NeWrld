@@ -1,6 +1,6 @@
 # ADR-017 QUOTA-1 Design — Quota Admission + Atomic Handoff
 
-**Status:** DRAFT rev 2 — addresses reviewer blockers from rev 1
+**Status:** DRAFT rev 3 — addresses 2 precision issues from rev 2 review
 **Date:** 2026-10-18
 **Slice order:** After RES-1c (complete). Before UPLOAD-1 + REF-1.
 **Change classification:** Level 2 CONFIRMED — schema verified (see §9.4). No migration needed.
@@ -112,8 +112,9 @@ $$ LANGUAGE SQL STABLE;
 const DEFAULT_QUOTA_MB = 50; // Owner-confirmed 2026-10-18.
 
 /**
- * B3: Strict whole-value validation.
- * - Rejects "50abc", "1.5", "", whitespace-only.
+ * B3: Strict whole-value validation (rev 3: whitespace rejected).
+ * - Rejects "50abc", "1.5", "", " 50 ", "\t50".
+ * - No trimming: surrounding whitespace is a configuration error, not silently accepted.
  * - Upper bound: 1,000,000 MB (~1 TB). Prevents safe-integer overflow
  *   when converting to bytes (1M * 1024 * 1024 = ~1.05e12, well under 2^53).
  * - Empty string is NOT treated as unset (explicit empty = error).
@@ -124,16 +125,14 @@ export function getWorldQuotaBytes(): number {
   const raw = process.env.MEDIA_WORLD_QUOTA_MB;
   // Unset (undefined) → default. Empty string → error (explicit misconfiguration).
   if (raw === undefined) return DEFAULT_QUOTA_MB * 1024 * 1024;
-  if (raw === '') {
-    throw new Error('MEDIA_WORLD_QUOTA_MB is set but empty (must be positive integer or unset)');
-  }
-  // Strict: must be all digits, no decimal, no trailing garbage.
-  if (!/^[0-9]+$/.test(raw.trim())) {
+  // Strict: must be all digits, no whitespace, no decimal, no trailing garbage.
+  // Tested against the raw value (not trimmed) — " 50 " is rejected.
+  if (!/^[0-9]+$/.test(raw)) {
     throw new Error(
-      `Invalid MEDIA_WORLD_QUOTA_MB: "${raw}" (must be a positive whole number, e.g. "50")`
+      `Invalid MEDIA_WORLD_QUOTA_MB: "${raw}" (must be a positive whole number with no whitespace, e.g. "50")`
     );
   }
-  const mb = Number(raw.trim());
+  const mb = Number(raw);
   if (mb <= 0) {
     throw new Error(`Invalid MEDIA_WORLD_QUOTA_MB: "${raw}" (must be > 0)`);
   }
@@ -325,7 +324,7 @@ If any are missing, QUOTA-1 requires a migration (escalates to Level 3).
 | Test | Verifies |
 |------|----------|
 | `quota_used_bytes` SQL | Registered + reservations = total; excludes committed/abandoned; `pending_deletion` counts; missing file doesn't count |
-| Config parsing | Default 50 MB; valid override; invalid (0, negative, "50abc", "1.5", "", >1M) throws at startup |
+| Config parsing | Default 50 MB; valid override; invalid (0, negative, "50abc", "1.5", "", " 50 ", >1M) throws at startup |
 | `checkFileSizeLimit` | 10 MB exactly → pass; 10 MB + 1 → 413 |
 
 ### 8.2 Integration tests
@@ -366,13 +365,14 @@ If any are missing, QUOTA-1 requires a migration (escalates to Level 3).
 
 **Decision:** No schema changes required. QUOTA-1 is confirmed **Level 2**. The `quota_used_bytes()` SQL function is created via application migration (not a schema change to existing tables).
 
-**Startup verification:** On boot, QUOTA-1 executes:
+**Startup verification:** On boot, QUOTA-1 executes (scoped to the application's schema):
 ```sql
 SELECT column_name FROM information_schema.columns
-WHERE table_name = 'world_media_assets'
+WHERE table_schema = current_schema()
+  AND table_name = 'world_media_assets'
   AND column_name IN ('lifecycle', 'file_confirmed_present', 'size_bytes');
 ```
-If any are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` (fail-closed). This is defense-in-depth; the migration is the primary guarantee.
+`current_schema()` resolves to the application's `search_path` schema (typically `public`). A same-named table in another schema cannot satisfy the check. If any of the three columns are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` (fail-closed). This is defense-in-depth; the migration is the primary guarantee.
 
 ## 10. Open Questions for Review
 
@@ -388,7 +388,7 @@ If any are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` (fail-clos
 - [ ] `quota_used_bytes()` SQL matches §5.1 exactly (reviewer verifies against ADR text).
 - [ ] Boundary with RES-1a is respected: only the SUM computation is extracted, transaction unchanged (B1).
 - [ ] Handoff verifies world ownership with distinct 403/404/409 errors (B2).
-- [ ] Config parsing rejects "50abc", "1.5", "", and >1M MB (B3).
+- [ ] Config parsing rejects "50abc", "1.5", "", " 50 ", and >1M MB (B3).
 - [ ] Schema verified pre-gate; Level 2 confirmed, no conditional classification (B4).
 - [ ] Atomic handoff has no double-count or gap window (reviewer verifies transaction logic).
 - [ ] All failure modes have defined behavior (table in §3.4).
