@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 7 — fixes schema, quota fn, conversion SQL, fence consistency
+**Status:** DRAFT rev 21 — idempotent migration script
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -864,13 +864,47 @@ WHERE state IN ('RESERVED','WRITING') AND bytes_ready = false;
 ```
 
 -- Transaction behavior:
--- If ALTER fails (e.g., column already exists from partial run):
---   → Entire transaction rolls back. No partial state.
---   → Operator can safely re-run.
---
--- Idempotent variant (for safe re-runs):
--- ALTER TABLE storage_reservations
---   ADD COLUMN IF NOT EXISTS bytes_ready BOOLEAN NOT NULL DEFAULT true;
+-- If ALTER fails: entire transaction rolls back. No partial state.
+-- See "Idempotent migration script" below for safe reruns.
+```
+
+**Idempotent migration script (rev 21: complete rerun procedure):**
+
+```sql
+-- Migration 020 — idempotent. Safe to run multiple times.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'storage_reservations' AND column_name = 'bytes_ready'
+  ) THEN
+    ALTER TABLE storage_reservations
+      ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT true;
+    ALTER TABLE storage_reservations
+      ALTER COLUMN bytes_ready SET DEFAULT false;
+    RAISE NOTICE 'Migration 020: column added, default=false';
+  ELSE
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'storage_reservations'
+        AND column_name = 'bytes_ready'
+        AND column_default NOT LIKE '%false%'
+    ) THEN
+      ALTER TABLE storage_reservations
+        ALTER COLUMN bytes_ready SET DEFAULT false;
+      RAISE NOTICE 'Migration 020: default corrected to false';
+    ELSE
+      RAISE NOTICE 'Migration 020: already applied';
+    END IF;
+  END IF;
+END $$;
+```
+
+| Scenario | Behavior |
+|----------|----------|
+| First run | Column added (DEFAULT true) → rows get true → default set to false. |
+| Rerun after success | "already applied", no changes. |
+| Crash between ADD and SET DEFAULT | Default corrected to false on rerun. |
 ```
 
 **Why DEFAULT true (not false):**
