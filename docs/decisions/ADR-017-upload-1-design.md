@@ -257,11 +257,20 @@ CONVERSION SEQUENCE:
       -- Fence may hold LOCK_EX on .part while waiting for staging file.
       -- Use LOCK_EX|LOCK_NB with 50ms sleep, 30s deadline (same as fence).
       -- On timeout (rev 14: fail-closed without L1):
-      --   1. Mark reservation ABANDONED (single UPDATE, no L1):
+      --   1. Mark reservation ABANDONED (bounded row-lock wait, no L1):
+      --      BEGIN;
+      --      SET LOCAL lock_timeout = '5s';
       --      UPDATE storage_reservations SET state = 'ABANDONED'
       --      WHERE reservation_id = $1 AND state = 'RESERVED';
-      --      -- No L1 needed: single-row state change, row lock suffices.
-      --      -- If fence already marked it ABANDONED → 0 rows, harmless.
+      --      COMMIT;
+      --      -- Outcomes:
+      --      --   1 row → ABANDONED. Staging file preserved for orphan sweep.
+      --      --   0 rows → already ABANDONED (fence won) or reaped. Harmless.
+      --      --   55P03 (lock timeout) → row held by another txn.
+      --      --     → ROLLBACK. Do NOT assume ABANDONED.
+      --      --     → Staging file is RETAINED (we still hold its LOCK_EX).
+      --      --     → Release staging lock, return 500.
+      --      --     → Orphan sweep will retry abandonment (see below).
       --   2. DO NOT delete the staging file yet.
       --      -- The staging file is the ONLY complete copy of the bytes.
       --      -- Deleting it before the reservation is safely terminal risks data loss
@@ -291,19 +300,27 @@ CONVERSION SEQUENCE:
       -- Ensures the file size update is durable
    e. Delete the staging file: unlink(/data/media/.staging/{allowance_id}.tmp)
    
-   f. Mark transfer complete (rev 14: no L1 — single-row update):
+   f. Mark transfer complete (rev 15: bounded row-lock wait):
       ```sql
-      -- Single statement, autocommit. No L1 needed.
-      -- This is a single-row flag flip, not a quota-affecting operation.
-      -- The row lock from UPDATE is sufficient for atomicity.
+      BEGIN;
+      -- Bound the row-lock wait: if another txn holds this row, don't wait forever.
+      SET LOCAL lock_timeout = '5s';
       UPDATE storage_reservations 
       SET bytes_ready = true 
       WHERE reservation_id = $1 AND state = 'RESERVED';
-      -- If 0 rows → reservation was ABANDONED (fence) or reaped → abort transfer
+      COMMIT;
+      -- Outcomes:
+      --   1 row updated → transfer complete, Phase-2 may proceed.
+      --   0 rows → reservation was ABANDONED or reaped → abort, cleanup partial file.
+      --   SQLSTATE 55P03 (lock_not_available) → another txn holds the row.
+      --     → ROLLBACK, leave bytes_ready=false.
+      --     → The .part file has complete bytes but flag is false.
+      --     → Phase-2 refuses (flag false). Safe.
+      --     → Orphan sweep will retry the flag update (see recovery below).
       ```
-      -- Still holding LOCK_EX on .part file during this UPDATE.
+      -- Still holding LOCK_EX on .part file during this transaction.
       -- The flag is set AFTER fsync, so bytes are durable.
-      -- No L1 → no deadlock with fence holding L1 (rev 14 fixes rev 13 blocker 1).
+      -- No L1 → no lock-order cycle with fence.
    
    g. Release LOCK_EX on .part file
    h. Release LOCK_EX on staging file (already unlinked, just close fd)
@@ -415,8 +432,8 @@ Fence's bounded retry guarantees it releases L1 within 30s.
 |-------------|------------|-----------|----------|
 | Conversion | Staging LOCK_EX | .part LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
 | Conversion | (none after COMMIT) | L1 (in txn) | Yes: PG lock queue (fair) |
-| Conversion | .part LOCK_EX | (bytes_ready UPDATE, no lock wait) | Yes: no lock needed |
-| Conversion | Staging LOCK_EX | (abandon UPDATE, no lock wait) | Yes: no lock needed |
+| Conversion | .part LOCK_EX | bytes_ready row lock | Yes: lock_timeout 5s, 55P03 → leave flag false |
+| Conversion | Staging LOCK_EX | abandon row lock | Yes: lock_timeout 5s, 55P03 → retain file, retry via sweep |
 | Fence | L1 | .part LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
 | Fence | L1 + .part LOCK_EX | Staging LOCK_EX | Yes: LOCK_NB + 50ms × 30s |
 | Cleanup | (none) | Staging LOCK_EX | Yes: single LOCK_NB attempt |
@@ -791,13 +808,28 @@ ALTER TABLE storage_reservations
 --   (they don't have a separate transfer step).
 ```
 
-**Crash recovery for `bytes_ready=false`:**
+**Crash recovery for `bytes_ready=false` (rev 15):**
 | Scenario | Recovery |
 |----------|----------|
 | Crash during transfer, `bytes_ready=false` | Reservation visible but unusable. Phase-2 refuses. RES-1c reaps after expiry. Stale-temp cleanup deletes partial `.part`. |
-| Crash after transfer, before `bytes_ready=true` | Same as above. The bytes are on disk but flag not set. Safe: treated as incomplete. |
+| Crash after transfer, before `bytes_ready=true` | Same as above. Bytes on disk but flag not set. Safe: treated as incomplete. |
+| `bytes_ready` UPDATE hit lock timeout (55P03) | Flag remains false. Orphan sweep retries: acquires `.part` LOCK_EX\|LOCK_NB, then attempts the UPDATE again with `lock_timeout`. If the row is free, sets flag. If still locked after 3 retries, leaves for RES-1c expiry. |
 | Crash after `bytes_ready=true` | Normal. Phase-2 proceeds. |
 | Fence activates during transfer | Fence marks ABANDONED. The `bytes_ready` UPDATE affects 0 rows (state changed). Transfer aborts. Partial file cleaned. |
+| Abandonment UPDATE hit lock timeout | Staging file retained. Orphan sweep retries abandonment: `SET LOCAL lock_timeout='5s'` + UPDATE. Does NOT delete staging file until ABANDONED is confirmed. |
+
+**Orphan sweep coordination (rev 15):**
+The sweep must not delete files while transfer or recovery is active:
+1. Before deleting a staging file: try `LOCK_EX|LOCK_NB` on it.
+   - If locked → transfer or conversion in progress → skip.
+2. Before deleting a `.part` file: check `bytes_ready` AND try `LOCK_EX|LOCK_NB`.
+   - If `bytes_ready=false` and lock is held → transfer in progress → skip.
+   - If `bytes_ready=false` and lock is free → transfer crashed or timed out → safe to clean after reservation expiry.
+   - If `bytes_ready=true` → transfer complete → only clean if reservation is ABANDONED/expired.
+3. The sweep never deletes a staging file for a `cancelled` allowance until:
+   - The reservation is ABANDONED or expired, AND
+   - No process holds the staging file lock, AND  
+   - The `.part` file (if any) is not being transferred (checked via lock).
 
 **Cleanup on reservation end:**
 | Reservation end state | .part file handling |
