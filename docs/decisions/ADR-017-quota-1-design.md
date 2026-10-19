@@ -1,6 +1,6 @@
 # ADR-017 QUOTA-1 Design — Quota Admission + Atomic Handoff
 
-**Status:** DRAFT rev 7 — Phase A SQL matches Phase A/B/C contract
+**Status:** DRAFT rev 8 — eight-column consistency
 **Date:** 2026-10-18
 **Slice order:** After RES-1c (complete). Before UPLOAD-1 + REF-1.
 **Change classification:** Level 2 CONFIRMED — schema verified (see §9.4). No migration needed.
@@ -434,9 +434,9 @@ WHERE table_schema = current_schema()
   );
 ```
 Eight `(table, column)` pairs verified; any missing → `QUOTA_SCHEMA_INCOMPLETE`.
-`current_schema()` resolves to the application's `search_path` schema (typically `public`). A same-named table in another schema cannot satisfy the check. The application verifies all five `(table, column)` pairs are present; if any are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` naming the missing pair (fail-closed). This is defense-in-depth; the migration is the primary guarantee.
+`current_schema()` resolves to the application's `search_path` schema (typically `public`). A same-named table in another schema cannot satisfy the check. The application verifies all eight `(table, column)` pairs are present; if any are missing → startup crashes with `QUOTA_SCHEMA_INCOMPLETE` naming the missing pair (fail-closed). This is defense-in-depth; the migration is the primary guarantee.
 
-**Test:** A test creates the schema without one required column (e.g., drops `storage_reservations.state` in a scratch database) and asserts startup throws `QUOTA_SCHEMA_INCOMPLETE`. A second case drops `world_media_assets.lifecycle`. Both must fail startup; the happy path (all five present) must not.
+**Test:** For each of the eight required columns, a test creates the schema without that column (in a scratch database) and asserts startup throws `QUOTA_SCHEMA_INCOMPLETE` naming the missing pair. All eight missing-column cases must fail startup. A happy-path test with all eight present must not throw.
 
 ## 10. Open Questions for Review
 
@@ -454,7 +454,7 @@ Eight `(table, column)` pairs verified; any missing → `QUOTA_SCHEMA_INCOMPLETE
 - [ ] Handoff verifies world ownership with distinct 403/404/409 errors (B2).
 - [ ] Config parsing rejects "50abc", "1.5", "", " 50 ", and >1M MB (B3).
 - [ ] Schema verified pre-gate; Level 2 confirmed, no conditional classification (B4).
-- [ ] Startup guard covers all five required columns across both tables; missing column → QUOTA_SCHEMA_INCOMPLETE.
+- [ ] Startup guard covers all eight required columns across both tables; missing column → QUOTA_SCHEMA_INCOMPLETE naming the pair.
 - [ ] Atomic handoff has no double-count or gap window (reviewer verifies transaction logic).
 - [ ] Handoff follows §4.3c lock order (1 → 2 → 3 → reservation UPDATE → asset INSERT); no lock-order inversion.
 - [ ] All failure modes have defined behavior (table in §3.4).
