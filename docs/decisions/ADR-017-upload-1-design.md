@@ -812,33 +812,61 @@ FENCE EFFECTIVE POINT: After step 4c (COMMIT). At this point:
 
 BEGIN;
 
--- Add the column with DEFAULT true.
--- Rationale: All existing reservations were created by RES-1a's reserveStorage()
--- via the direct-write path (Phase-2 writes chunks directly to .part).
--- UPLOAD-1 (with staging transfer) is NOT YET IMPLEMENTED, so no existing
--- reservation has a pending transfer. DEFAULT true is correct for all existing rows.
---
--- For NEW reservations created by UPLOAD-1's conversion: the application
--- explicitly inserts with bytes_ready=false, then sets true after transfer.
--- The DEFAULT true does not affect them (explicit value overrides default).
---
--- Safety: If a future code path creates reservations with a transfer step
--- but forgets to set bytes_ready=false, the reservation would be usable
--- before transfer completes. This is a code-review concern, not a migration
--- concern. The UPLOAD-1 implementation MUST set bytes_ready=false explicitly.
+-- Step 1: Add with DEFAULT true so existing rows initialize correctly.
+-- All existing reservations used RES-1a's direct-write path (no staging transfer).
 ALTER TABLE storage_reservations
   ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT true;
 
--- No backfill UPDATE needed: DEFAULT true applies to all existing rows.
--- No preflight needed: the assumption (UPLOAD-1 not implemented) is verified
--- by code review, not by a SQL check that can't distinguish default from anomaly.
+-- Step 2: Change default to false for all FUTURE inserts.
+-- This makes the safe state (not ready) the default. Any reservation-creation
+-- path that doesn't explicitly set bytes_ready will get false, and Phase-2
+-- will refuse to write until the flag is set. Fail-closed by default.
+ALTER TABLE storage_reservations
+  ALTER COLUMN bytes_ready SET DEFAULT false;
 
 COMMIT;
+
+-- Result:
+-- - Existing rows: bytes_ready=true (correct: direct-write, no transfer step).
+-- - New rows without explicit value: bytes_ready=false (safe: must opt into ready).
+-- - UPLOAD-1 conversions: explicitly INSERT with bytes_ready=false.
+-- - RES-1a direct reservations: must explicitly INSERT with bytes_ready=true
+--   (implementation requirement, see below).
+
+**Implementation requirement: RES-1a must set bytes_ready explicitly (rev 20).**
+
+The existing `postgres-storage-reservation.repository.ts:create()` does:
+```sql
+INSERT INTO storage_reservations (world_id, size_bytes, state)
+VALUES ($1, $2, 'RESERVED')
+```
+
+After migration 020, the default is `false`. This would break RES-1a's direct-write
+flow (Phase-2 writers would see bytes_ready=false and refuse).
+
+**Required change** (implementation, not migration):
+```sql
+INSERT INTO storage_reservations (world_id, size_bytes, state, bytes_ready)
+VALUES ($1, $2, 'RESERVED', true)
+-- bytes_ready=true because RES-1a uses direct-write (no staging transfer).
+-- The .part file is written directly by Phase-2; no separate transfer step.
+```
+
+This is a one-line change to the repository. It must be deployed with migration 020.
+If the code change is missed, new RES-1a reservations will have bytes_ready=false
+and Phase-2 will refuse them (fail-closed, not data corruption).
+
+**Verification:** After deployment, query:
+```sql
+SELECT COUNT(*) FROM storage_reservations 
+WHERE state IN ('RESERVED','WRITING') AND bytes_ready = false;
+-- Should be 0 for RES-1a-created rows (only UPLOAD-1 conversions in progress).
+```
 
 -- Transaction behavior:
 -- If ALTER fails (e.g., column already exists from partial run):
 --   → Entire transaction rolls back. No partial state.
---   → Operator can safely re-run (IF NOT EXISTS variant below for idempotency).
+--   → Operator can safely re-run.
 --
 -- Idempotent variant (for safe re-runs):
 -- ALTER TABLE storage_reservations
@@ -934,9 +962,6 @@ COMMIT;
 - The predicates are compatible:
   - If `expires_at < clock_timestamp()` (recovery sees expired):
     Recovery aborts. RES-1c will reap within 30s (when observation window passes).
-  - If `clock_timestamp() < expires_at < now()` (edge case, clock skew):
-    Extremely unlikely (clock_timestamp and now differ by microseconds within a txn).
-    Recovery might proceed; RES-1c won't reap yet (within window). Safe.
   - No case where recovery revives and RES-1c concurrently reaps:
     Both use row locks. Recovery's WHERE includes `state='RESERVED'`.
     If RES-1c wins the race (sets ABANDONED), recovery finds 0 rows.
