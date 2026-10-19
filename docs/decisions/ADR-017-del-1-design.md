@@ -1,6 +1,6 @@
 # ADR-017 DEL-1 Design: Asset Deletion State Machine T1/T2
 
-**Status:** DRAFT rev 2 — bug fixes from self-review (fence checks, world filter, T2 rollback, lock timeout)
+**Status:** DRAFT rev 3 — review fixes (T2 abort cases, UPDATE rationale, S11 clarified)
 **Date:** 2026-10-19
 **Scope:** `DELETE /worlds/:id/media/:assetId` implementing ADR-017 §4.3b
 
@@ -42,6 +42,7 @@ Implement the two-transaction asset deletion state machine that ensures an asset
 |-----------|------|------|
 | Asset not found | (404) | 404 |
 | Active references exist | `ASSET_REFERENCED` | 409 |
+| Deletion aborted (lifecycle reverted) | `DELETION_ABORTED` | 409 |
 | Backfill in progress | `BACKFILL_IN_PROGRESS` | 503 |
 | Fence active | `FENCE_ACTIVE` | 503 |
 
@@ -51,7 +52,11 @@ Implement the two-transaction asset deletion state machine that ensures an asset
 
 **Steps:**
 1. Acquire L1, L2, asset row lock (in order)
-2. Re-verify `lifecycle = 'pending_deletion'` (if not, abort — another transaction changed it)
+2. Re-verify lifecycle:
+   - If row not found → COMMIT, return 204 (idempotent: already deleted by prior T2)
+   - If `lifecycle = 'active'` → COMMIT, return 409 `DELETION_ABORTED` (reverted by concurrent T2 step 4 or manual intervention; client should retry DELETE)
+   - If `lifecycle = 'pending_deletion'` → proceed to step 3
+   - Any other lifecycle → COMMIT, return 500 (invariant violation, log error)
 3. Re-run reference scan (defense in depth — see note below)
 4. If references found → revert `lifecycle` to `'active'`, COMMIT, return 409 `ASSET_REFERENCED`
    - This handles the race where REF-1 validation was bypassed or a reference was added via direct DB write
@@ -60,6 +65,10 @@ Implement the two-transaction asset deletion state machine that ensures an asset
    - If exists → `unlink()` the file, then `fsync()` the parent directory
    - If not exists → log warning (crash recovery case: file already gone), proceed
 6. `UPDATE world_media_assets SET file_confirmed_present = false WHERE asset_id = $1`
+   - **Rationale:** If we crash between `unlink()` and `DELETE`, the row persists with
+     `file_confirmed_present = false`. This signals to operators and DRIFT-1 that the
+     file is gone but the row needs cleanup. Without this, a crash would leave
+     `file_confirmed_present = true` with no file — a silent inconsistency.
 7. `DELETE FROM world_media_assets WHERE asset_id = $1`
 8. COMMIT
 9. Return 204
@@ -100,7 +109,7 @@ When T2 completes (row deleted):
 - [ ] S4: Unreferenced asset deleted synchronously, quota reclaimed
 - [ ] S7: Attach of `pending_deletion` URL → 422 `ASSET_DELETED` (via REF-1)
 - [ ] S9: Crash recovery — file-without-row and row-without-file handled
-- [ ] S11: Failed scan → 503, changes nothing
+- [ ] S11: Backfill/fence check failure → 503, changes nothing (T1 steps 2-3)
 - [ ] Idempotent retry on `pending_deletion` completes deletion
 - [ ] 404 on already-deleted (success-equivalent, not error)
 
