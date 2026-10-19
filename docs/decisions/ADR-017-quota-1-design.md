@@ -1,6 +1,6 @@
 # ADR-017 QUOTA-1 Design — Quota Admission + Atomic Handoff
 
-**Status:** DRAFT rev 5 — handoff follows §4.3c lock contract (1 → 2 → 3)
+**Status:** DRAFT rev 6 — filesystem-mutation boundary documented (Phase A/B/C)
 **Date:** 2026-10-18
 **Slice order:** After RES-1c (complete). Before UPLOAD-1 + REF-1.
 **Change classification:** Level 2 CONFIRMED — schema verified (see §9.4). No migration needed.
@@ -256,6 +256,36 @@ export async function commitReservationToRegistry(
 
 **Why the lock sequence matters:** Without level 1, a concurrent reconciliation `diagnose` (which holds level 1 per §4.3c read-only class) could observe the filesystem mid-handoff. Without level 2, two handoffs for different reservations in the same world could interleave their quota accounting. The world-row lock (position 3) makes the asset INSERT's FK validation self-held (E2), preventing a downward lock edge.
 
+### 3.5 Filesystem-mutation boundary (rev 6)
+
+**The handoff transaction does NOT perform the filesystem rename/link.** The full Phase-2 commit sequence (per RES-1b's implemented publication service) is:
+
+| Phase | What | Locks held | DB state | Filesystem state |
+|-------|------|------------|----------|------------------|
+| **A** (this design) | Reservation→COMMITTED + asset INSERT (`lifecycle='active'`, `publication_status='PENDING'`) | L1 → L2 → L3 (world row) | Asset row exists as PENDING; reservation is COMMITTED | Temp `.part` file exists; final path does not exist |
+| **B** (RES-1b) | `link(temp, final)` → `fsync(final_dir)` → `unlink(temp)` → `fsync(temp_dir)` | File `LOCK_SH` (POSIX, not PG) | Same as Phase A | Final file exists; temp file removed |
+| **C** (RES-1b) | Asset → `publication_status='ACTIVE'` | L1 → L3 | Asset is ACTIVE and servable | Final file exists |
+
+**Why this ordering is safe:**
+
+1. **Reconciliation cannot observe a dangling registry row.** Between Phase A and Phase B, the asset row is `PENDING`, not `ACTIVE`. Reconciliation's `diagnose` treats `PENDING` assets as "publication in progress" — it does not alert on a missing final file for a `PENDING` row. The `file_confirmed_present` flag is `true` because the temp file exists and is fsync'd (Phase A precondition).
+
+2. **Reconciliation cannot observe a dangling file.** The final file only appears in Phase B, after the registry row exists. There is no window where a final-path file exists without a registry row.
+
+3. **Level 1 is not held across the file write.** The long file-writing phase (Phase-2 chunk writes) happens before Phase A, holding only the POSIX `LOCK_SH` on the temp file (not PG level 1). Phase A is short (two SQL statements). Phase B is short (link + fsyncs). Level 1 is held only for the duration of Phase A's DB transaction.
+
+4. **Crash between Phase A and Phase B:** The asset sits as `PENDING` with the temp file on disk. Startup recovery (RES-1b §1.6e) detects `PENDING` assets with no final file and resumes at Phase B. Quota accounting is correct: the bytes are in `registered_usage` (asset row exists, `lifecycle='active'`, `file_confirmed_present=true`), not double-counted.
+
+5. **Crash during Phase B (after link, before unlink):** Both temp and final files exist. Recovery unlinks the temp file (idempotent — `unlink` on already-removed file is ignored). No quota impact (quota counts the asset row, not files).
+
+6. **Rollback of Phase A:** If the transaction rolls back, no asset row exists and the reservation remains `RESERVED`/`WRITING`. The temp file remains for retry or expiry claim. No filesystem state to clean up (nothing was linked).
+
+**Concurrency test (extended):** Handoff (Phase A) racing reconciliation `diagnose`:
+- Reconciliation holds level 1 and scans. Handoff blocks on level 1 until reconciliation completes.
+- After handoff commits (asset PENDING), reconciliation re-scans: sees PENDING row, does not alert.
+- After Phase B + C (asset ACTIVE, file in place), reconciliation sees consistent state.
+- No deadlock: reconciliation (level 1 only) and handoff (1 → 2 → 3) follow the same total order.
+
 **Failure modes:**
 - Reservation not in `RESERVED`/`WRITING` → 409 `RESERVATION_NOT_ACTIVE` (already claimed, abandoned, or committed).
 - Size mismatch → hard error (500), indicates caller bug.
@@ -349,6 +379,7 @@ If any are missing, QUOTA-1 requires a migration (escalates to Level 3).
 | **S37:** Stale capacity metric | 503 `STORAGE_METRIC_STALE` (fail-closed) |
 | Handoff atomicity | Reservation→COMMITTED + asset INSERT in one commit; concurrent handoffs → exactly one wins |
 | Handoff vs competing file-mutating op | Handoff racing asset-delete T1 on same world → serializes via level 1+2 without deadlock; quota accounting has no gap or double-count |
+| Handoff vs reconciliation | Phase A (PENDING) → Phase B (link) → Phase C (ACTIVE) racing `diagnose` → no false alerts, no dangling rows/files; crash between phases recovers correctly |
 | Handoff idempotency | Second handoff on same reservation → 409, no duplicate asset |
 
 ### 8.3 Failure injection
