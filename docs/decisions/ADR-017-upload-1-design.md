@@ -1,6 +1,6 @@
 # ADR-017 UPLOAD-1 Design: Upload Path Rework
 
-**Status:** DRAFT rev 22 — hardened idempotency checks
+**Status:** DRAFT rev 23 — explicit schema scoping
 **Date:** 2026-10-18
 **Scope:** `POST /worlds/:id/media` rework per ADR-017 §4.4
 
@@ -880,19 +880,22 @@ DECLARE
   v_data_type TEXT;
   v_is_nullable TEXT;
 BEGIN
-  -- Scope to the current schema (project uses public).
+  -- Use explicit 'public' schema for BOTH inspection and modification (rev 23).
+  -- The project's migrations run with search_path=public, and all tables
+  -- are in public. Using current_schema() for the check but unqualified
+  -- ALTER TABLE could target different schemas if search_path is unusual.
   SELECT EXISTS (
     SELECT 1 FROM information_schema.columns
-    WHERE table_schema = current_schema()
+    WHERE table_schema = 'public'
       AND table_name = 'storage_reservations'
       AND column_name = 'bytes_ready'
   ) INTO v_exists;
 
   IF NOT v_exists THEN
     -- Case 1: First run. Add column, initialize existing rows, set safe default.
-    ALTER TABLE storage_reservations
+    ALTER TABLE public.storage_reservations
       ADD COLUMN bytes_ready BOOLEAN NOT NULL DEFAULT true;
-    ALTER TABLE storage_reservations
+    ALTER TABLE public.storage_reservations
       ALTER COLUMN bytes_ready SET DEFAULT false;
     RAISE NOTICE 'Migration 020: column added, existing rows=true, default=false';
 
@@ -901,7 +904,7 @@ BEGIN
     SELECT column_default, data_type, is_nullable
     INTO v_default, v_data_type, v_is_nullable
     FROM information_schema.columns
-    WHERE table_schema = current_schema()
+    WHERE table_schema = 'public'
       AND table_name = 'storage_reservations'
       AND column_name = 'bytes_ready';
 
@@ -916,7 +919,7 @@ BEGIN
     -- Check default: NULL or anything not containing 'false' needs correction.
     -- (NULL NOT LIKE '%false%' is NULL, not TRUE — must check IS NULL explicitly.)
     IF v_default IS NULL OR v_default NOT LIKE '%false%' THEN
-      ALTER TABLE storage_reservations
+      ALTER TABLE public.storage_reservations
         ALTER COLUMN bytes_ready SET DEFAULT false;
       RAISE NOTICE 'Migration 020: default corrected to false (was: %)', COALESCE(v_default, 'NULL');
     ELSE
