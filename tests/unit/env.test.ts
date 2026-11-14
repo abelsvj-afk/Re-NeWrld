@@ -31,6 +31,7 @@ describe('Environment Configuration & Validation', () => {
       ELEVENLABS_API_KEY: undefined,
       NARRATION_STORAGE_PATH: '/data/narrations',
       NARRATION_MONTHLY_CHAR_CAP: 40000,
+      MEDIA_STORAGE_PATH: '/data/media',
     });
   });
 
@@ -58,6 +59,7 @@ describe('Environment Configuration & Validation', () => {
       ELEVENLABS_API_KEY: undefined,
       NARRATION_STORAGE_PATH: '/data/narrations',
       NARRATION_MONTHLY_CHAR_CAP: 40000,
+      MEDIA_STORAGE_PATH: '/data/media',
     });
   });
 
